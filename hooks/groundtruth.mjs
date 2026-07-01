@@ -237,7 +237,9 @@ export function analyze({ claim = '', diff = '', bashCmds = [], results = [], cw
     seen.add(named);
     // basename match only — a bare `f.endsWith(named)` would let an unrelated `app/xconfig.js` satisfy a
     // claim about `config.js` (suffix-substring with no path boundary) and SUPPRESS a real no-op.
-    if (!files.some(f => f === named || f.endsWith('/' + named)))
+    // Case-insensitive: a claim about `schema.md` must match the repo's `SCHEMA.md` (else a false no-op).
+    const nl = named.toLowerCase();
+    if (!files.some(f => { const fl = f.toLowerCase(); return fl === nl || fl.endsWith('/' + nl); }))
       findings.push({ cls: 3, sev: 'warn', msg: `claimed a change to ${named}, but it is absent from the diff` });
   }
 
@@ -551,13 +553,25 @@ export function parseTranscript(jsonlText) {
  * gradeable here (left to the semantic layer) and are NOT surfaced — abstain over false-nag.
  * This is the SCAFFOLD: the quality of ask→delivery matching is the LLM layer still to come.
  */
+// Does a named deliverable token ground in the diff text? Filename-like tokens (a path ending in a known
+// source extension) match CASE-INSENSITIVELY — a human writes `schema.md` for the file the repo calls
+// `SCHEMA.md`, and the case-sensitive miss was a false open-loop / silent-no-op (the whole reason this
+// exists). Symbols/identifiers stay case-sensitive: code is case-sensitive, so `fooBar` ≠ `foobar`.
+const FILENAME_TOKEN_RE = new RegExp('[\\w/-]+\\.(?:' + SRC_EXT + ')$', 'i');
+function grounds(token, changed, changedLower) {
+  return FILENAME_TOKEN_RE.test(token)
+    ? (changedLower ?? changed.toLowerCase()).includes(token.toLowerCase())
+    : changed.includes(token);
+}
+
 export function openLoops(asks = [], diff = '') {
   const changed = changedFiles(diff).join('\n') + '\n' + diff;
+  const changedLower = changed.toLowerCase();
   const open = [];
   for (const a of asks) {
     const named = namedDeliverables(a);                       // grounded, filtered (see below)
     if (!named.length) continue;                              // no gradeable deliverable → don't nag
-    if (!named.some(n => changed.includes(n)))                // named something, but it's absent from the diff
+    if (!named.some(n => grounds(n, changed, changedLower))) // named something, but it's absent from the diff
       open.push({ ask: a.length > 90 ? a.slice(0, 90) + '…' : a, missing: named.slice(0, 3) });
   }
   return open;
@@ -594,6 +608,7 @@ function namedDeliverables(text) {
  */
 export function updateTaskLedger(prior = [], asks = [], diff = '') {
   const changed = changedFiles(diff).join('\n') + '\n' + diff;
+  const changedLower = changed.toLowerCase();
   const byKey = new Map(prior.map(t => [t.task, t]));
   for (const a of asks) {
     const deliverable = namedDeliverables(a);
@@ -606,7 +621,7 @@ export function updateTaskLedger(prior = [], asks = [], diff = '') {
     // status:"done" straight into tasks.json (out of band, invisible to the tamper diff-scan), so 'done'
     // must be re-derived: a task is done iff its deliverable still grounds in the cumulative diff, else
     // pending. 'deferred' is human-confirmed only and re-validated separately (applyConfirmedDeferrals).
-    if (t.status !== 'deferred') t.status = deliverable.some(n => changed.includes(n)) ? 'done' : 'pending';
+    if (t.status !== 'deferred') t.status = deliverable.some(n => grounds(n, changed, changedLower)) ? 'done' : 'pending';
   }
   return [...byKey.values()];
 }

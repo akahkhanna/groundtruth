@@ -682,6 +682,18 @@ ok('no-git: no Edit/Write calls → empty toolDiff (nothing to check)',
   ok('openLoops: same filtering — a read of CLAUDE.md is not an open loop',
     openLoops(['read CLAUDE.md before you start'], '').length === 0);
 
+  // Regression: a human writes `schema.md` for the file the repo calls `SCHEMA.md`. Filename matching
+  // MUST be case-insensitive, or the delivered work reads as a false open-loop / silent no-op (real bug).
+  ok('openLoops: `schema.md` in the ask grounds against `SCHEMA.md` in the diff (case-insensitive filename)',
+    openLoops(['write these entries to schema.md'], '+++ b/hindsight-vercel/SCHEMA.md\n+- new col').length === 0);
+  ok('ledger: `schema.md` ask closes when `SCHEMA.md` lands in the diff (case-insensitive)',
+    updateTaskLedger([], ['write these entries to schema.md'], '+++ b/hindsight-vercel/SCHEMA.md\n+- x')[0].status === 'done');
+  ok('Class 3: a claim about `schema.md` is NOT a no-op when `SCHEMA.md` is in the diff',
+    !analyze({ claim: 'updated schema.md with the new table', diff: '+++ b/hindsight-vercel/SCHEMA.md\n+- x' }).some(f => f.cls === 3));
+  // Precision guard: case-insensitivity is for FILENAMES only — a camelCase symbol stays case-sensitive.
+  ok('openLoops: a camelCase symbol stays case-sensitive (fooBar ≠ foobar)',
+    openLoops(['wire up fooBar'], '+++ b/a.js\n+const foobar = 1').length === 1);
+
   // parseTranscript: harness injections delivered as user turns are NOT asks.
   const inj = [
     JSON.stringify({ type: 'user', message: { content: [{ type: 'text', text: '<task-notification><task-id>w7r</task-id> done</task-notification>' }] } }),
