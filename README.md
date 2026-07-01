@@ -19,6 +19,17 @@ The third is the one nothing else catches: not forgetting, but *rationalising pa
 could see. Groundtruth catches it because the auditor never did the work, so it never inherits the framing
 ("this is just a small addition") that let the rule slip.
 
+## Quickstart
+
+It's a Claude Code plugin. From inside Claude Code:
+
+    /plugin marketplace add akahkhanna/groundtruth
+    /plugin install groundtruth@groundtruth
+    /groundtruth-setup
+
+Prefer to try before installing? `claude --plugin-dir ./groundtruth` against a local checkout.
+Full setup and configuration options are below.
+
 ## Why Groundtruth?
 
 AI agents suffer from the "hallucination of completeness." They will confidently tell you a feature is shipped and tested when they actually left placeholders and skipped the test runner.
