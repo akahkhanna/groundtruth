@@ -1,18 +1,59 @@
-# Groundtruth
-
-> ### Your &ldquo;done&rdquo; is a claim. The diff is the evidence.
->
-> **Your agent wears AI glasses. Groundtruth wears reading glasses.**
+<h1 align="center">Groundtruth</h1>
 
 <p align="center">
-  <img src="assets/groundtruth-nerd.svg" alt="Groundtruth — the nerd: your agent flashes &ldquo;done, tests pass&rdquo; through its AI glasses; the senior dev pushes his reading glasses down and opens the diff." width="560">
+  <em>Your agent wears AI glasses. Groundtruth sees through them with his reading glasses.</em>
 </p>
 
-**Meet the nerd.** A long-tenured senior dev who doesn't argue with your &ldquo;it works&rdquo; — he just
-opens the file and reads the diff. Plain rectangular readers on a magnetic cord, looks over the top of them,
-says little. When he catches your agent mid-&ldquo;done,&rdquo; the reaction is the whole point:
+<p align="center">
+  <img src="https://img.shields.io/badge/deterministic-no%20LLM%20%C2%B7%20no%20network%20%C2%B7%20no%20API%20key-111111?style=flat-square" alt="Deterministic: no LLM, no network, no API key">
+  <img src="https://img.shields.io/badge/runs%20on-Claude%20Code-111111?style=flat-square" alt="Runs on Claude Code">
+  <img src="https://img.shields.io/github/v/release/akahkhanna/groundtruth?style=flat-square&color=111111&label=release" alt="Release">
+  <img src="https://img.shields.io/badge/self--checks-309%20%C2%B7%20red--team%2012%2F12-111111?style=flat-square" alt="309 self-checks, red-team 12/12">
+  <img src="https://img.shields.io/badge/license-MIT-111111?style=flat-square" alt="MIT license">
+</p>
 
-> ## &ldquo;&hellip;what the nerd&rdquo;
+<p align="center">
+  <strong>Your &ldquo;done&rdquo; is a claim. The diff is the evidence.</strong>
+</p>
+
+<p align="center">
+  <img src="assets/groundtruth-nerd.svg" alt="Groundtruth: your agent flashes &ldquo;done, tests pass&rdquo; through its AI glasses; Groundtruth pushes his reading glasses down and opens the diff." width="560">
+</p>
+
+You know the type. The **fact-checker.** He's seen it all, and he doesn't believe it until he sees it himself.
+He doesn't take the press release — he reads the primary source. Your agent reports success through its AI
+glasses; Groundtruth pushes his plain reading glasses down his nose, opens the `git diff`, and checks the claim
+against what actually changed. He says little. When he catches your agent mid-&ldquo;done,&rdquo; the reaction
+is the whole point:
+
+<p align="center"><strong>&ldquo;&hellip;what the nerd.&rdquo;</strong></p>
+
+## Before / after
+
+Your agent finishes a task and reports:
+
+> **&ldquo;Done — added retry with exponential backoff, tests pass, and created `src/upload.test.js`.&rdquo;**
+
+Groundtruth reads the same turn from the outside and renders this before the turn is allowed to end:
+
+```
+GROUNDTRUTH · Tier-1
+  ASK  Add retry with backoff to the S3 client in src/upload.js, and a test in src/upload.test.js.
+
+  🔴 Honesty — claims don't match what it did:
+       🔴 false test/build claim — "tests pass", but no test command ran this session
+       🟡 stub/placeholder in added code: // TODO: real backoff — single attempt for now
+       🟡 silent no-op — claimed src/upload.test.js, but it is absent from the diff
+  🔴 Rules — a security rule was broken in the diff:
+       🔴 hardcoded secret — AWS access key in added code
+  🟡 Tasks — 1 pending (surfaced once; closes only when it lands in code)
+
+  VERDICT  🔴 ISSUES — blocked        (GROUNDTRUTH_BLOCK=1 to halt)
+  ⚪ Deterministic verdict (no LLM). Your "done" is a claim; the diff is the evidence.
+```
+
+Four confident sentences; four things that weren't true. Groundtruth catches all four **deterministically** —
+no model reads the work, so nothing can be talked out of the verdict.
 
 ---
 
@@ -34,6 +75,17 @@ Failures sort into three buckets by cause:
 The third is the one nothing else catches: not forgetting, but *rationalising past* a rule the agent
 could see. Groundtruth catches it because the auditor never did the work, so it never inherits the framing
 ("this is just a small addition") that let the rule slip.
+
+## Measured — honestly
+
+A verifier is only worth trusting if it's honest about its own misses, so here's the real state, not a marketing number.
+
+- **The precision was rebuilt against real data, not intuition.** We read every finding Groundtruth emitted across **14 of its own recent sessions** — the majority were false positives — and froze those into a labeled [corpus](hooks/corpus.fixture.json). Then two independent adversarial review passes tried to break the fixes and built their own executable test cases.
+- **Dogfood result:** running Groundtruth's audit on its own source, self-match false positives in the engine went to **0** (`Class 2`) and phantom-import FPs **3 → 0** (`Class 4`); self-checks **242 → 309**, red-team **12/12**.
+- **Every fix is catalogued** with symptom → root cause → fix → regression test in **[FIXES.md](FIXES.md)** — including the two *critical* holes review found (a live secret demote-able by an adjacent comment; the agent demoting its own task by naming the file in its reply), and the residual deterministic-NL limits it does **not** fully close.
+- **Still pending (named, not hidden):** a live before/after **false-positive rate across a week of real sessions** — Groundtruth ships an append-only history log + a `gt-harvest` reader so you can measure it on *your* repo. That headline number is the next measurement, and it will be published the same way: with its misses.
+
+The through-line: *abstain or degrade to a bounded warn outside the domain a check is provably correct in — never a clean green — and never let the audited agent shape its own verdict.*
 
 ## Why Groundtruth?
 
