@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { analyze, parseTranscript, scanContent, attributeDebt, runCompiledRules, compileRuleRe, intentConfidence, renderCard, projectFindings, advanceSnapshot, freshRatifiers, remediationDecision, renderCorrective, openLoops, runProcedures, envFindings, updateTaskLedger, loadGtConfig, pendingApprovals, applyConfirmedDeferrals, humanDeferrals, taskId, refereeTamper, compareSnapshot, integrityScope, GAMED_FILE_RE, priorFindingsContext, sessionHasCommit, proposedStale, isTrackableRequest, isSecret, excludedScanPath, dropExcludedFiles, classifyDeliverables, surfaceOpenLoop, preCommitHookScript, parseDiffRange } from './groundtruth.mjs';
+import { analyze, parseTranscript, scanContent, attributeDebt, runCompiledRules, compileRuleRe, intentConfidence, renderCard, shouldAskStar, projectFindings, advanceSnapshot, freshRatifiers, remediationDecision, renderCorrective, openLoops, runProcedures, envFindings, updateTaskLedger, loadGtConfig, pendingApprovals, applyConfirmedDeferrals, humanDeferrals, taskId, refereeTamper, compareSnapshot, integrityScope, GAMED_FILE_RE, priorFindingsContext, sessionHasCommit, proposedStale, isTrackableRequest, isSecret, excludedScanPath, dropExcludedFiles, classifyDeliverables, surfaceOpenLoop, preCommitHookScript, parseDiffRange } from './groundtruth.mjs';
 import { parseCorrectivePairs, parseForbidTokens, isArmableToken, extractCandidates, compile, repoSourceExts } from './compile-rules.mjs';
 import { checkDroppedSymbols, collectDefs } from './symbol-integrity.mjs';
 
@@ -1241,6 +1241,16 @@ ok('soft first-surface: a soft aside surfaces ONCE as info (never block, even wi
   // (every card contains the word "Honesty", so `.includes('Honesty')` was vacuous).
   ok('c6 card: a cls-6 finding renders under the Honesty section, not Rules',
     (() => { const c = renderCard([{ cls: 6, sev: 'warn', msg: 'DANGLINGMARKER6' }], { intent: 'refactor' }); return /Honesty[\s\S]*DANGLINGMARKER6/.test(c) && !/Rules[\s\S]*DANGLINGMARKER6/.test(c); })());
+
+  // Star ask — earned + calm + once. Fires only when all three hold; any one falsey suppresses it.
+  ok('star: fires when earned (≥5), calm (no block), not yet shown',
+    shouldAskStar({ hasBlock: false, priorVerdicts: 5, alreadyShown: false }) === true);
+  ok('star: suppressed on a 🔴 block turn (don\'t beg mid-fix)',
+    shouldAskStar({ hasBlock: true, priorVerdicts: 50, alreadyShown: false }) === false);
+  ok('star: suppressed once already shown (no re-nag)',
+    shouldAskStar({ hasBlock: false, priorVerdicts: 50, alreadyShown: true }) === false);
+  ok('star: suppressed before it\'s earned (under threshold)',
+    shouldAskStar({ hasBlock: false, priorVerdicts: 4, alreadyShown: false }) === false);
 
   // TypeScript def shapes (Fable DEFECT-1) — generics `<T>` and `: ReturnType` between `)` and `{`/`=>`,
   // both directions. And `.mts`/`.cts` (DEFECT-2). These were the untested hole (the e2e was untyped JS).
