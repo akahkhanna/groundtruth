@@ -156,8 +156,20 @@ function codeHits(root, line_re, file_re) {
   return out.split('\n').filter(Boolean).filter(h => new RegExp(file_re).test(h.split(':')[0]));
 }
 
-// Compile docs → proposed-rules.json. Pure-ish (codeHits/grep injectable) so the test can drive it.
-export function compile(ROOT, { code = codeHits, grep } = {}) {
+// A `forbid_path` rule has NO line_re — it forbids a FILE existing at a path (e.g. `^api/.*\.mjs$`). Its
+// grounding must test file_re against the tracked-file LIST, not grep content. Without this, codeHits was
+// called with line_re=undefined → threw → caught → [] → the rule ALWAYS grounded 'armable', even when a
+// matching file was already committed (an over-broad path rule looked safe). Now: a committed match → 'review'.
+function pathHits(root, file_re, ls = gitLsFiles) {
+  // compileRuleRe (NOT `new RegExp(file_re,'i')`) — the same normalizer the runtime + the grounder's JS-compile
+  // gate use, so a `(?i)`-prefixed file_re doesn't throw here and vacuously ground 'armable' (the very hole this
+  // path-grounding closes) while passing everywhere else. Parity with runCompiledRules' file_re evaluation.
+  try { const re = compileRuleRe(file_re); return ls(root).split('\n').filter(Boolean).filter(f => re.test(f)); }
+  catch { return []; }   // bad file_re → no hits (the JS-compile gate in compile() already routes it to review)
+}
+
+// Compile docs → proposed-rules.json. Pure-ish (codeHits/pathHits/grep injectable) so the test can drive it.
+export function compile(ROOT, { code = codeHits, paths = pathHits, grep } = {}) {
   // extracted first (real provenance wins), then the project's own file-scoped seeds; dedup by predicate.
   const merged = [], seen = new Set();
   for (const c of [...extractCandidates(ROOT, grep), ...loadSeeds(ROOT)]) {
@@ -180,7 +192,7 @@ export function compile(ROOT, { code = codeHits, grep } = {}) {
     if (jsErr) return { ...c, status: 'review', reason: `regex does not compile at runtime (JS): ${jsErr}` };
     if (c.positive_example != null && c.line_re && !compileRuleRe(c.line_re).test(String(c.positive_example)))
       return { ...c, status: 'review', reason: 'line_re does not match its positive_example — the rule may never fire' };
-    const hits = code(ROOT, c.line_re, c.file_re);
+    const hits = (c.kind === 'forbid_path' || !c.line_re) ? paths(ROOT, c.file_re) : code(ROOT, c.line_re, c.file_re);
     return hits.length === 0
       ? { ...c, status: 'armable' }
       : { ...c, status: 'review', hits: hits.length, sample: hits[0].slice(0, 120) };

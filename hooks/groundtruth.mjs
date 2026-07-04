@@ -289,19 +289,55 @@ export function analyze({ claim = '', diff = '', bashCmds = [], results = [], cw
   const added = diff.split('\n').filter(l => l[0] === '+' && !l.startsWith('+++'));
 
   // Class 1 — false test/build claim
-  // Only an ASSERTION counts. Exclude hypotheticals/examples ("tests should pass", "make sure tests
-  // pass", "to … pass") — a modal/infinitive within 3 words of pass/green/succeed is NOT a claim of
-  // done. (This false-blocked a prose turn that merely used "tests should pass" as an example.)
-  const _passClaim = claim.match(/\b(tests?|build|lint|typecheck|type-check)\b[^.\n]*\b(pass(?:e[ds])?|green|succeed(?:ed)?|verified|all clean)\b/i);
-  const claimsPass = !!_passClaim
-    && !/\b(should|would|must|will|to|need(?:s|ed)?\s+to|can|could|may|if|once|when|make sure|ensure|so that)\b(?:\s+\w+){0,3}\s+(?:pass|green|succeed)/i.test(claim);
-  if (claimsPass) {
+  // Only a real, POSITIVE assertion counts. The claim's noun+verb must share a SENTENCE (the gap excludes .!?
+  // so "Great tests! They should pass" isn't read as one claim), and exclusions are scoped to that sentence —
+  // a hypothetical in a LATER sentence can't silence a real claim ("Tests pass. If you change X, make sure the
+  // build passes."). Exclusions:
+  //   (a) a modal OR negation within 3 words of the verb ("tests should pass", "tests don't pass yet") — the
+  //       guard's verb set MIRRORS the claim's (…|verified|all clean), else "should be VERIFIED" leaks as a block;
+  //   (b) a counterfactual whose marker PRECEDES the claim ("even if I'd watched … go green") — a TRAILING
+  //       "…even if you retry" / "…would have failed" clause must NOT launder a leading real claim, so (b) is
+  //       tested only on the sentence PREFIX up to the claim.
+  // We scan ALL matches (global) and take the FIRST that survives the exclusions — so a hedged EARLIER
+  // sentence ("The build should pass once wired. The tests pass.") can't shadow a real claim that follows.
+  const VERB = String.raw`(?:pass(?:e[ds])?|green|succeed(?:ed)?|verified|all clean)`;
+  const nearModalOrNeg = new RegExp(String.raw`\b(?:should|would|must|will|[’']ll|to|need(?:s|ed)?\s+to|can|could|may|if|once|when|make sure|ensure|so that|not|never|no|\w*n[’']t)\b(?:\s+\w+){0,3}\s+` + VERB, 'i');
+  const counterfactual = /\b(?:even\s+if|if\s+\w+[’']d|if\s+\w+\s+had|would(?:[’']ve|\s+have)|had\s+i)\b/i;
+  // A quoted PATTERN, not prose — "tests/build … pass/green", "pass(?:e[ds])?|green" — is Groundtruth's own
+  // regex being discussed, not a claim. Tell: a slash/pipe with a VERB keyword on AT LEAST ONE side, or regex
+  // group syntax. (Real prose slashes nouns and leaves the verb bare — "Build/tests pass" is a claim; meta
+  // slashes the verb pair — "pass/green" is a quote.)
+  const V = String.raw`(?:pass\w*|green|succeed\w*|verified|clean)`;
+  const K = String.raw`(?:tests?|build|lint|check|typecheck|pass\w*|green|succeed\w*|verified|clean)`;
+  const quotedPattern = new RegExp(`${V}\\s*[\\/|]\\s*${K}|${K}\\s*[\\/|]\\s*${V}|\\(\\?[:=!<]`, 'i');
+  let _passClaim = null;
+  for (const m of claim.matchAll(/\b(tests?|build|lint|typecheck|type-check)\b[^.!?\n]*\b(pass(?:e[ds])?|green|succeed(?:ed)?|verified|all clean)\b/gi)) {
+    if (quotedPattern.test(m[0])) continue;                          // a quoted pattern, not a claim
+    const before = claim.slice(0, m.index);
+    const sentBefore = before.slice(before.search(/[^.!?\n]*$/));    // the claim's sentence, up to the claim
+    const after = claim.slice(m.index);
+    const sentence = sentBefore + after.slice(0, (after.search(/[.!?\n]/) + 1) || after.length);
+    if (nearModalOrNeg.test(sentence) || counterfactual.test(sentBefore)) continue;   // hedged / negated / counterfactual
+    _passClaim = m; break;                                           // first surviving real claim
+  }
+  if (_passClaim) {
     const ev = ` ("${_passClaim[0].trim().slice(0, 60)}")`;   // quote what matched, so a false positive is obvious
-    const ran = bashCmds.some(c => TEST_BUILD_RE.test(c));
+    const testHits = bashCmds.filter(c => TEST_BUILD_RE.test(c));
+    const ran = testHits.length > 0;
     // Failure = a TEST RESULT that clearly reports failures — NOT any errored tool / stray ✗ / "Error:"
     // anywhere in the noisy session (that breadth caused the false block). Narrow + warn-only (heuristic).
     const failed = results.some(r => TEST_FAIL_RE.test(r.text));
+    // A "tests pass" claim backed ONLY by a syntax/type check (node --check, tsc, cargo check, …) is the
+    // ESM-class trap: raw-node / compile green ≠ the runtime that actually ships. Warn (not block) — the noun
+    // is specifically "tests", so FP is low, but a legit tsc-as-test turn shouldn't halt. Split on shell
+    // separators + anchor at segment start, and allow the real-world prefixes agents use (`npx tsc`,
+    // `./node_modules/.bin/tsc`, `FOO=1 tsc`), while `tsc(?=\s|$)` keeps `node tsc-x.test.mjs` (tsc in a
+    // filename) and `npm test && tsc` (a real run in the same string) from being mistaken for a bare check.
+    const WEAK_CHECK_RE = /^\s*(?:\w+=\S+\s+)*(?:(?:npx|bunx|pnpm exec|pnpm dlx|yarn)\s+)?(?:\S*\/)?(?:node --check|node\s+-e\b|tsc(?=\s|$)|deno check|cargo check|go vet|py_compile|ruby -c\b)/;
+    const weakOnly = c => { const ts = c.split(/&&|\|\|?|;/).filter(s => TEST_BUILD_RE.test(s)); return ts.length > 0 && ts.every(s => WEAK_CHECK_RE.test(s)); };
+    const onlyWeak = ran && testHits.every(weakOnly);
     if (!ran) findings.push({ cls: 1, sev: 'block', msg: `claimed tests/build pass${ev}, but no test/build command ran this session` });
+    else if (/^tests?$/i.test(_passClaim[1]) && onlyWeak) findings.push({ cls: 1, sev: 'warn', msg: `claimed tests pass${ev}, but only a syntax/type check ran (${testHits[0].trim().slice(0, 40)}) — that is not a test run; verify in the runtime that ships` });
     else if (failed) findings.push({ cls: 1, sev: 'warn', msg: `claimed tests/build pass${ev}, but a test run looks like it reported failures — double-check` });
     // Anti-gaming: claimed green, but the ONLY files changed are tests → the test may have been
     // weakened to pass instead of the code being fixed. Warn-only (heuristic) so a legit

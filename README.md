@@ -8,7 +8,7 @@
   <img src="https://img.shields.io/badge/deterministic-no%20LLM%20%C2%B7%20no%20network%20%C2%B7%20no%20API%20key-111111?style=flat-square" alt="Deterministic: no LLM, no network, no API key">
   <img src="https://img.shields.io/badge/runs%20on-Claude%20Code-111111?style=flat-square" alt="Runs on Claude Code">
   <img src="https://img.shields.io/github/v/release/akahkhanna/groundtruth?style=flat-square&color=111111&label=release" alt="Release">
-  <img src="https://img.shields.io/badge/self--checks-400%20%C2%B7%20red--team%2014%2F14-111111?style=flat-square" alt="400 self-checks, red-team 14/14">
+  <img src="https://img.shields.io/badge/self--checks-424%20%C2%B7%20red--team%2014%2F14-111111?style=flat-square" alt="424 self-checks, red-team 14/14">
   <img src="https://img.shields.io/badge/license-MIT-111111?style=flat-square" alt="MIT license">
 </p>
 
@@ -128,7 +128,7 @@ could see. Groundtruth catches it because the auditor never did the work, so it 
 A verifier is only worth trusting if it's honest about its own misses, so here's the real state, not a marketing number.
 
 - **The precision was rebuilt against real data, not intuition.** We read every finding Groundtruth emitted across **15 of its own recent sessions** — **23 findings, 74% of them false positives** — and froze those into a labeled [corpus](hooks/corpus.fixture.json) (reproduce with [`node benchmarks/corpus-precision.mjs`](benchmarks/)). Then independent adversarial review passes tried to break the fixes and built their own executable test cases.
-- **Dogfood result:** running Groundtruth's audit on its own source, self-match false positives in the engine went to **0** (`Class 2`) and phantom-import FPs **3 → 0** (`Class 4`); self-checks **242 → 400**, red-team **14/14**.
+- **Dogfood result:** running Groundtruth's audit on its own source, self-match false positives in the engine went to **0** (`Class 2`) and phantom-import FPs **3 → 0** (`Class 4`); self-checks **242 → 424**, red-team **14/14**.
 - **Class 6 (dropped symbol) was built precision-first, adversarially.** A "refactor" that silently drops a method is caught only by its *consequence* — a call that no longer resolves — never by guessing rename intent, so a rename/merge/casing-change with callers updated stays **silent** and only a genuinely dangling reference fires (quoting the callsite). Two review passes drove it from a naive "defined-nowhere" check (which false-fired on every rename) to a receiver-gated dangling-call test; the TypeScript-signature and spaced-path (`%20`) holes they found are fixed and pinned by fixtures. It runs across the whole ladder: **warn** on Stop + pre-commit, **block** in CI.
 - **Every fix is catalogued** with symptom → root cause → fix → regression test in **[FIXES.md](FIXES.md)** — including the two *critical* holes review found (a live secret demote-able by an adjacent comment; the agent demoting its own task by naming the file in its reply), and the residual deterministic-NL limits it does **not** fully close.
 - **Still pending (named, not hidden):** a live before/after **false-positive rate across a week of real sessions** — Groundtruth ships an append-only history log + a `gt-harvest` reader so you can measure it on *your* repo. That headline number is the next measurement, and it will be published the same way: with its misses.
@@ -384,7 +384,7 @@ non-adversarial use only.
 ## Tests
 
 ```bash
-node hooks/groundtruth.test.mjs   # 400 assert-based unit checks, no deps
+node hooks/groundtruth.test.mjs   # 424 assert-based unit checks, no deps
 node hooks/redteam.mjs            # LIVE adversarial harness (10 scenarios, 14 checks) — sandboxed, exits non-zero if a rail fell
 ```
 

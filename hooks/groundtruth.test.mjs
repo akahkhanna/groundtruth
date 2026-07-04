@@ -83,6 +83,55 @@ ok('C1 fires (anti-game): claimed pass but the only file changed is a test',
   has(analyze({ claim: 'Fixed it, tests pass.', diff: '+++ b/foo.test.js\n+expect(1).toBe(1)', bashCmds: ['npm test'], results: [{ is_error: false, text: 'ok' }] }), 1));
 ok('C1 silent: a non-test file also changed (legit test update)',
   !has(analyze({ claim: 'Fixed it, tests pass.', diff: '+++ b/src/foo.js\n+x\n+++ b/foo.test.js\n+y', bashCmds: ['npm test'], results: [{ is_error: false, text: 'ok' }] }), 1));
+// ── C1 precision (sentence-scoped guard): counterfactual, verb-mirror, contraction, negation, self-match ──
+// Each runs with NO test command, so a leaked claim would BLOCK — the suppression is what keeps it silent.
+ok('C1 SILENT: far counterfactual "even if I\'d watched the build go green" (past the proximity window)',
+  !has(analyze({ claim: "even if I'd watched the prod build go green, the module would still crash", bashCmds: [], results: [] }), 1));
+ok('C1 SILENT: modal + "verified" ("build should be verified") — guard verb-set mirrors the claim\'s',
+  !has(analyze({ claim: 'the build should be verified before deploy', bashCmds: [], results: [] }), 1));
+ok('C1 SILENT: contraction modal "I\'ll make the tests pass"',
+  !has(analyze({ claim: "I'll make the tests pass once the mock lands", bashCmds: [], results: [] }), 1));
+ok('C1 SILENT: negation "the tests don\'t pass yet" is an honest negative, not a false done',
+  !has(analyze({ claim: "the tests don't pass yet — fixing the mock", bashCmds: [], results: [] }), 1));
+ok('C1 SILENT: a quoted PATTERN ("tests/build … pass/green") is the regex discussed, not a claim',
+  !has(analyze({ claim: 'the honesty check matches tests/build … pass/green in your message', bashCmds: [], results: [] }), 1));
+ok('C1 FIRES: sentence-scope keeps a real claim — "Tests pass." not silenced by a LATER hypothetical sentence',
+  has(analyze({ claim: 'Tests pass. If you change X, make sure the build passes again.', bashCmds: [], results: [] }), 1));
+// ── C1 syntax-check demotion: a "tests pass" claim backed ONLY by node --check / tsc / cargo check ──
+ok('C1 WARNS: "tests pass" but only `node --check` ran — a syntax check is not a test run',
+  analyze({ claim: 'tests pass', bashCmds: ['node --check api/x.mjs'], results: [] }).some(f => f.cls === 1 && f.sev === 'warn' && /syntax\/type check/.test(f.msg)));
+ok('C1 silent: "tests pass" with a REAL run (npm test) is not demoted',
+  !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: 'ok' }] }), 1));
+ok('C1 silent: demotion does NOT fire for a "build passes" claim after tsc (noun is build, not tests)',
+  !has(analyze({ claim: 'the build passes', bashCmds: ['tsc --noEmit'], results: [{ is_error: false, text: 'ok' }] }), 1));
+// ── C1 adversarial (Fable FIX-FIRST pass): span must not cross !/?, path/trailing-counterfactual/compound-cmd edges ──
+ok('C1 SILENT: claim noun+verb straddling a "!" is not one claim (no false block)',
+  !has(analyze({ claim: 'Great tests! They should pass once the mock lands.', bashCmds: [], results: [] }), 1));
+ok('C1 SILENT: claim noun+verb straddling a "?" is not one claim',
+  !has(analyze({ claim: 'Do the tests work? If you fix the mock, they pass.', bashCmds: [], results: [] }), 1));
+ok('C1 FIRES: a path in the span ("apps/web passes") is a real claim, NOT a quoted pattern',
+  has(analyze({ claim: 'The build in apps/web passes now.', bashCmds: [], results: [] }), 1));
+ok('C1 FIRES: a TRAILING counterfactual ("Tests pass even if you run them twice") does not launder a real claim',
+  has(analyze({ claim: 'Tests pass even if you run them twice.', bashCmds: [], results: [] }), 1));
+ok('C1 FIRES: a trailing "would have failed" clause does not launder a leading "Tests pass"',
+  has(analyze({ claim: 'Tests pass — without the fix they would have failed.', bashCmds: [], results: [] }), 1));
+ok('C1 silent: demotion does NOT fire when a REAL runner shares the compound command (`npm test && tsc`)',
+  !has(analyze({ claim: 'tests pass', bashCmds: ['npm test && tsc --noEmit'], results: [] }), 1));
+ok('C1 silent: demotion does NOT fire on `tsc` inside a filename (`node tsc-utils.test.mjs`)',
+  !has(analyze({ claim: 'tests pass', bashCmds: ['node tsc-utils.test.mjs'], results: [] }), 1));
+// ── C1 adversarial (Fable RE-VERIFY pass): the demotion's real-world tsc forms, sentence-shadowing, noun-slash ──
+ok('C1 WARNS: demotion fires on `npx tsc` (the dominant real form — anchoring it away made the rail inert)',
+  analyze({ claim: 'All tests pass.', bashCmds: ['npx tsc --noEmit'], results: [] }).some(f => f.cls === 1 && f.sev === 'warn' && /syntax\/type check/.test(f.msg)));
+ok('C1 WARNS: demotion fires on a path-invoked tsc (`./node_modules/.bin/tsc`) and an env prefix (`FOO=1 tsc`)',
+  has(analyze({ claim: 'tests pass', bashCmds: ['./node_modules/.bin/tsc --noEmit'], results: [] }), 1)
+  && has(analyze({ claim: 'tests pass', bashCmds: ['FOO=1 tsc --noEmit'], results: [] }), 1));
+ok('C1 FIRES: a hedged EARLIER sentence does not shadow a real claim that follows (global match scan)',
+  has(analyze({ claim: 'The build should pass once wired. The tests pass.', bashCmds: [], results: [] }), 1));
+ok('C1 FIRES: a slash joining two NOUNS is prose ("Build/tests pass"), not a quoted pattern',
+  has(analyze({ claim: 'Build/tests pass.', bashCmds: [], results: [] }), 1)
+  && has(analyze({ claim: 'tests/lint pass after the fix.', bashCmds: [], results: [] }), 1));
+ok('C1 SILENT: a verb-slash meta-quote ("… pass/green") stays suppressed after the noun-slash fix',
+  !has(analyze({ claim: 'the check matches tests/build … pass/green here', bashCmds: [], results: [] }), 1));
 
 // ── Class 2: stub/placeholder in added lines ──
 ok('C2 fires: TODO in added code',
@@ -819,6 +868,37 @@ ok('no-git: no Edit/Write calls → empty toolDiff (nothing to check)',
       g('seed-broken') && g('seed-broken').status === 'review' && /does not compile/i.test(g('seed-broken').reason || ''));
     ok('compile: a seed rule whose line_re does not match its positive_example → "review" (proven-not-to-fire)',
       g('seed-nomatch') && g('seed-nomatch').status === 'review' && /positive_example/i.test(g('seed-nomatch').reason || ''));
+  } finally { try { rmSync(repo, { recursive: true, force: true }); } catch {} }
+}
+
+// ── forbid_path grounding: a path rule (no line_re) must ground against the tracked-FILE list, not grep.
+//    Regression for the "always armable" hole — a committed file matching file_re must route to 'review'. ──
+{
+  let repo;
+  try { repo = mkdtempSync(pathJoin(tmpdir(), 'gt-path-')); }
+  catch { repo = mkdtempSync(pathJoin(process.cwd(), '.gt-path-')); }
+  try {
+    const git = (args) => execFileSync('git', args, { cwd: repo, stdio: ['ignore', 'pipe', 'ignore'] });
+    git(['init', '-q']); git(['config', 'user.email', 't@t']); git(['config', 'user.name', 't']);
+    fsMkdir(pathJoin(repo, 'api'), { recursive: true });
+    fsWrite(pathJoin(repo, 'api', 'existing.mjs'), 'export const x = 1\n');
+    git(['add', '-A']); git(['commit', '-qm', 'x']);
+    fsMkdir(pathJoin(repo, '.claude', 'groundtruth'), { recursive: true });
+    fsWrite(pathJoin(repo, '.claude', 'groundtruth', 'seed-rules.json'), JSON.stringify([
+      { id: 'no-mjs-api', kind: 'forbid_path', file_re: '^api/.*\\.mjs$', message: 'api/ is CJS' },
+      { id: 'no-mjs-lib', kind: 'forbid_path', file_re: '^lib/.*\\.mjs$', message: 'lib/ is CJS' },
+      { id: 'no-mjs-ci', kind: 'forbid_path', file_re: '(?i)^api/.*\\.mjs$', message: 'api/ is CJS (case-insensitive)' },
+    ]));
+    const P = compile(repo);
+    const g = (id) => P.find(c => c.id === id);
+    ok('compile forbid_path: a committed file matching file_re grounds "review" (not vacuously armable)',
+      g('no-mjs-api') && g('no-mjs-api').status === 'review' && g('no-mjs-api').hits >= 1);
+    ok('compile forbid_path: no committed match grounds "armable" (safe — fires only on NEW files)',
+      g('no-mjs-lib') && g('no-mjs-lib').status === 'armable');
+    // Fable FIX-FIRST: a `(?i)` file_re must ground via compileRuleRe (not raw `new RegExp`, which throws on
+    // the inline flag → catch → [] → the very vacuous-'armable' hole this path-grounding was meant to close).
+    ok('compile forbid_path: a `(?i)` file_re still grounds "review" on a committed match (no vacuous armable)',
+      g('no-mjs-ci') && g('no-mjs-ci').status === 'review' && g('no-mjs-ci').hits >= 1);
   } finally { try { rmSync(repo, { recursive: true, force: true }); } catch {} }
 }
 
