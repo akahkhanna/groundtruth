@@ -1,4 +1,4 @@
-# Groundtruth — bug-fix report (v0.9.0)
+# Groundtruth — bug-fix report (v0.9.0 → v0.9.4)
 
 Groundtruth audits whether an agent did what it was asked. **v0.8.0** turned that lens on **Groundtruth itself** — first empirically (reading 14 of its own live sessions), then through two adversarial review passes. **v0.9.0** adds a new honesty class (**6 — dropped symbol / dangling reference**) and two new enforcement rungs (pre-commit + CI), built the same way across three more review passes (see the Class-6 section below). Every finding was reproduced against the real code, fixed at the root, and locked with a regression test. Self-check went from 242 → **362 checks**; the red-team suite grew to **14/14** (a Class-6 dangling-ref rail added).
 
