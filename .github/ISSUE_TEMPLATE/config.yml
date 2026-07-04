@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security issue (do not open a public issue)
+    url: https://github.com/akahkhanna/groundtruth/blob/main/SECURITY.md
+    about: If you've found a way to defeat a rail, please report it privately. See SECURITY.md.
+  - name: Question or usage help
+    url: https://github.com/akahkhanna/groundtruth/blob/main/GETTING-STARTED.md
+    about: Setup, arming rules, warn vs block — start here before filing an issue.
