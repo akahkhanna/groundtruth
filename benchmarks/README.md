@@ -12,7 +12,7 @@ node corpus-precision.mjs
 
 Prints the FP/TP breakdown by label and bucket, and the false-positive rate **at capture** (majority FP — the number the v0.8.0 precision work set out to cut). Every FP on the corpus carries the phase that fixed it; the fix + regression test is in [`../FIXES.md`](../FIXES.md).
 
-**Dogfood after the fixes** (reproduce with `node ../hooks/groundtruth.mjs --audit` from the repo root): self-match false positives in the engine source went to **0** (`Class 2`) and phantom-import FPs **3 → 0** (`Class 4`); self-checks **242 → 396**, red-team **14/14**.
+**Dogfood after the fixes** (reproduce with `node ../hooks/groundtruth.mjs --audit` from the repo root): self-match false positives in the engine source went to **0** (`Class 2`) and phantom-import FPs **3 → 0** (`Class 4`); self-checks **242 → 400**, red-team **14/14**.
 
 ## 2. Live false-positive rate on your repo (the pending headline)
 
@@ -40,6 +40,10 @@ A 30-day `gt-harvest` over a live workspace saw **74 real Stop turns · 45 findi
 - The **cross-workspace silent-no-op** (claiming a change to a file outside the audited workspace, so it's "absent from the diff") — a documented limitation: Groundtruth audits the *session's* workspace (`CLAUDE_PROJECT_DIR`/cwd), not files edited in another repo. **Practical guidance:** for a meaningful, quiet verdict, match the session's workspace to the repo you're editing (one repo per session); if you must touch two, treat the out-of-workspace repo's findings as noise and rely on that repo's own tests. Even a multi-root editor window anchors the referee to one project dir — it doesn't split across both.
 
 The representative headline — a week of **in-workspace, post-0.9.3** sessions — remains the pending number. This first pass validated the harvester and the 0.9.3 integrity fix; it did not (and could not honestly) produce the rate.
+
+### Self-audit during dev (2026-07, star-ask feature) — a borderline FP, logged not scored
+
+Building the one-time "star the repo" ask, Groundtruth's own `--intent` audit flagged a **Class 9 (special-casing / overfit)** warn on the feature's first-pass diff: the line `… renderCard(…) + starLine(cwd, findings.some(f => f.sev === 'block'))` tripped the "non-test source branches on evaluator/verdict state" heuristic on `f.sev === 'block'`. It was a **borderline false positive** — the branch was a legitimate "don't ask on a block" gate, not test-gaming — but it pointed at real coupling that a review pass independently called out, and the fix (moving the ask off the card and onto the `additionalContext` channel) deleted the line, so a re-audit of the final diff came back clean (Honesty ✓ Rules ✓ special-casing ✓). Recorded as an honest data point, **not** folded into a precision rate (n=1, dev session). The new `shouldAskStar` gate added **4 self-checks (396 → 400)**.
 
 ## Method notes
 
