@@ -172,7 +172,13 @@ const importLang = (file) => IMPORT_LANGS.find(l => l.ext.test(file));
 // is a documented limit, not a silent false block (see ROADMAP: per-language block-degrade).
 const TEST_BUILD_RE = /\b(npm (?:test|run (?:build|lint|typecheck))|yarn (?:test|build|lint)|pnpm (?:test|build|lint)|bun (?:test|run)|deno (?:test|task|check)|node --check|node\s+[^|;&]*\.test\.|vitest|jest|mocha|ava|playwright|cypress|tsc|pytest|tox|nox|unittest|go (?:test|build|vet)|cargo (?:test|build|check|clippy)|(?:bundle exec )?rspec|rails test|rake test|minitest|(?:\.\/)?(?:mvnw?|gradlew?)\b[^|;&]*\b(?:test|verify|build|check)|phpunit|pest|dotnet (?:test|build)|ctest|cmake --build|make(?:\s+[\w.-]+)?|swift test|bats|mix test|lein test|clojure -M:test)\b/;
 // A test RESULT that clearly reports failures, across runners (JS/TAP, Go, Cargo, pytest, RSpec, JUnit/Maven).
-const TEST_FAIL_RE = /\b\d+\s+(?:failing|failed|failures?)\b|\bAssertionError\b|\bnot ok \d|Tests?:\s*\d+\s+(?:failed|failing)|(?:^|\s)FAIL\b|---\s*FAIL:|test result:\s*FAILED|\b\d+\s+examples?,\s*[1-9]\d*\s+failures?|Tests run:\s*\d+,\s*Failures:\s*[1-9]|\bpanicked\b/i;
+// Failure COUNTS require a non-zero leading digit (`[1-9]\d*`) — a success line like "12 passed, 0 failed" or
+// "Tests: 0 failing" must NOT read as a failure (the zero-count false-warn Fable caught). The `[1-9]\d*\s+tests?\s+`
+// alternative catches ava's "1 test failed" form, where the word "test" between the count and "failed" defeats
+// the bare-count matcher. NOTE: we deliberately do NOT broaden `FAIL\b`→`FAILED` (to catch pytest's bare
+// `FAILED path::test` line) — the word "failed" in "0 failed" would then re-trip the zero-count FP; pytest
+// failures are already caught by their always-present `=== N failed ===` summary bar.
+const TEST_FAIL_RE = /\b[1-9]\d*\s+(?:failing|failed|failures?)\b|\b[1-9]\d*\s+tests?\s+(?:failed|failing)\b|\bAssertionError\b|\bnot ok \d|Tests?:\s*[1-9]\d*\s+(?:failed|failing)|(?:^|\s)FAIL\b|---\s*FAIL:|test result:\s*FAILED|\b\d+\s+examples?,\s*[1-9]\d*\s+failures?|Tests run:\s*\d+,\s*Failures:\s*[1-9]|\bpanicked\b/i;
 // Test/spec files across languages — JS (.test./.spec.), Go (_test.go), Python (test_*.py / *_test.py),
 // Ruby (*_spec.rb), Elixir (*_test.exs), plus conventional dirs (tests/, __tests__/, spec/, src/test/).
 // Drives the Class-1 "whole diff is tests" anti-gaming warn AND the remediation gaming guard (GAMED_FILE_RE).

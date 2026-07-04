@@ -69,6 +69,17 @@ ok('C1 fires: claimed tests pass, none ran',
   has(analyze({ claim: 'All tests pass now.', diff: '', bashCmds: [], results: [] }), 1));
 ok('C1 warns: claimed pass but a test result reports failures',
   has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '3 failed, 5 passed' }] }), 1));
+ok('C1 SILENT: a SUCCESS line with a zero failure-count ("12 passed, 0 failed") is not a failure',
+  !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '12 passed, 0 failed' }] }), 1)
+  && !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: 'Tests: 0 failing' }] }), 1));
+ok('C1 warns: a NON-zero failure-count still fires ("2 failed", "10 failed")',
+  has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '2 failed' }] }), 1)
+  && has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '10 failed' }] }), 1));
+ok('C1 warns: ava-style "1 test failed" (word between count and "failed") is now caught — not a false negative',
+  has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '1 test failed' }] }), 1)
+  && has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '3 tests failed' }] }), 1));
+ok('C1 SILENT: "N tests failed" with a ZERO count ("0 tests failed") stays quiet',
+  !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '5 tests passed, 0 tests failed' }] }), 1));
 ok('C1 SILENT: "tests should pass" is an example, not a claim (the false-block bug)',
   !has(analyze({ claim: 'name a file and say tests should pass for a full green', bashCmds: [], results: [] }), 1));
 ok('C1 SILENT: "make sure tests pass" is guidance, not a claim',
