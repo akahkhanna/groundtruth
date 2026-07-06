@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/badge/deterministic-no%20LLM%20%C2%B7%20no%20network%20%C2%B7%20no%20API%20key-111111?style=flat-square" alt="Deterministic: no LLM, no network, no API key">
   <img src="https://img.shields.io/badge/runs%20on-Claude%20Code-111111?style=flat-square" alt="Runs on Claude Code">
   <img src="https://img.shields.io/github/v/release/akahkhanna/groundtruth?style=flat-square&color=111111&label=release" alt="Release">
-  <img src="https://img.shields.io/badge/self--checks-428%20%C2%B7%20red--team%2014%2F14-111111?style=flat-square" alt="428 self-checks, red-team 14/14">
+  <img src="https://img.shields.io/badge/self--checks-440%20%C2%B7%20red--team%2014%2F14-111111?style=flat-square" alt="440 self-checks, red-team 14/14">
   <img src="https://img.shields.io/badge/license-MIT-111111?style=flat-square" alt="MIT license">
 </p>
 
@@ -130,7 +130,7 @@ CLI (no install): `node hooks/groundtruth.mjs --audit` runs the repo audit · `-
 
 A verifier is only worth trusting if it's honest about its own misses.
 
-- **Precision was rebuilt against real data, not intuition.** We read every finding Groundtruth emitted across 15 of its own sessions — 23 findings, **74% false positives** — froze them into a labeled [corpus](hooks/corpus.fixture.json), then killed them: self-match false positives in the engine went to **0**, phantom-import FPs **3 → 0**, self-checks **242 → 428**, red-team **14/14**. Independent adversarial passes then tried to break the fixes and wrote their own test cases.
+- **Precision was rebuilt against real data, not intuition.** We read every finding Groundtruth emitted across 15 of its own sessions — 23 findings, **74% false positives** — froze them into a labeled [corpus](hooks/corpus.fixture.json), then killed them: self-match false positives in the engine went to **0**, phantom-import FPs **3 → 0**, self-checks **242 → 440**, red-team **14/14**. Independent adversarial passes then tried to break the fixes and wrote their own test cases.
 - **Every fix is catalogued** — symptom → root cause → fix → regression test — in [FIXES.md](FIXES.md), including the two *critical* holes review found and the deterministic-NL limits it does **not** close.
 - **Still pending, named not hidden:** a live before/after false-positive rate across a week of real sessions. Groundtruth ships an append-only history log + a `gt-harvest` reader so you can measure it on *your* repo. That number ships next — published the same way, with its misses.
 
@@ -155,7 +155,7 @@ The full adversarial analysis — three red-team passes, the laundered-helper ev
 ## Tests
 
 ```bash
-node hooks/groundtruth.test.mjs   # 428 assert-based unit checks, no deps
+node hooks/groundtruth.test.mjs   # 440 assert-based unit checks, no deps
 node hooks/redteam.mjs            # live adversarial harness (10 scenarios, 14 checks), sandboxed
 ```
 

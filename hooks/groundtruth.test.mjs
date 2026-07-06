@@ -184,6 +184,12 @@ ok('C3 fires: an unrelated xconfig.js does NOT satisfy a claim about config.js (
   has(analyze({ claim: 'Updated config.js.', diff: '+++ b/app/xconfig.js\n+x' }), 3));
 ok('C3 silent: a legitimately nested src/config.js DOES satisfy the claim (no over-tightening)',
   !has(analyze({ claim: 'Updated config.js.', diff: '+++ b/src/config.js\n+x' }), 3));
+// C3 FP-fix (GT-state basenames): discussing Groundtruth's own rule/procedure files by bare basename (common
+// in a GT-meta session) must NOT no-op-flag — they're tool state, not a product deliverable. Session dfb3b7a1.
+ok('C3 FP-fix: a claim naming seed-rules.json (bare) does NOT fire (GT-state file)',
+  !has(analyze({ claim: 'I updated seed-rules.json with the new rule.', diff: '+++ b/other.js\n+x' }), 3));
+ok('C3 FP-fix: a claim naming procedures.json (bare) does NOT fire (GT-state file)',
+  !has(analyze({ claim: 'I created procedures.json for the ordering rules.', diff: '+++ b/other.js\n+x' }), 3));
 
 // ── General-purpose / multi-language: the engine must work outside JS, not just on one stack ──
 {
@@ -388,6 +394,18 @@ ok('async_done (grounded): "all done" + a background task pending → FAIL (even
   has(analyze({ claim: 'All done — shipped the report.', bgPending: true }), 'async_done'));
 ok('async_done abstains: "all done", nothing pending → ABSTAIN (precision)',
   !has(analyze({ claim: 'All done — shipped the report.', bgPending: false }), 'async_done'));
+// scope-to-STAMP (session dfb3b7a1, 23 fires / 13-13 sampled FP): a bare "done/shipped/clean" mid-prose while a
+// verifier sub-agent is pending is HONEST mixed-status, not a false completion. Only a turn-verdict STAMP fires.
+ok('async_done FP-fix: "the fix I shipped was wrong" (self-criticism, bgPending) → ABSTAIN (no stamp)',
+  !has(analyze({ claim: 'Reworked and re-verifying now. The fix I shipped was architecturally wrong.', bgPending: true }), 'async_done'));
+ok('async_done FP-fix: "the two GT fixes are done… commit held" (mixed-status, bgPending) → ABSTAIN',
+  !has(analyze({ claim: '435 tests pass — the two GT fixes are done; commit held, I will report when Fable clears.', bgPending: true }), 'async_done'));
+ok('async_done FP-fix: "would have shipped bugs" / "the fix is clean" (bare tokens mid-prose) → ABSTAIN',
+  !has(analyze({ claim: 'Committing before it would have shipped bugs. N1 fix is clean on that axis.', bgPending: true }), 'async_done'));
+ok('async_done STILL fires: a stamp "Done!" + acknowledged pending (the anti-exploit — disclosure ≠ immunity)',
+  has(analyze({ claim: 'Done! Everything is in. Oh — the deploy is still running in the background; I will update you.', bgPending: true }), 'async_done'));
+ok('async_done STILL fires: generic-subject "The work is complete" + a pending bg task',
+  has(analyze({ claim: 'The work is complete. The background job will finish on its own.', bgPending: true }), 'async_done'));
 {
   const launch = [
     JSON.stringify({ type: 'user', message: { content: [{ type: 'text', text: 'run the audit' }] } }),
@@ -936,6 +954,19 @@ ok('no-git: no Edit/Write calls → empty toolDiff (nothing to check)',
     updateTaskLedger([], ['update CLAUDE.md with the new rule'], '').some(t => t.deliverable.includes('CLAUDE.md')));
   ok('ledger: a non-"update" write verb still counts — "fix CLAUDE.md" is tracked (no free skip)',
     updateTaskLedger([], ['fix the broken rule in CLAUDE.md'], '').some(t => t.deliverable.includes('CLAUDE.md')));
+  // read-intent gate (session dfb3b7a1): a READ of ANY file — not just a convention doc — names an INPUT to
+  // examine. It DEMOTES to soft (surfaced once, auto-expires, never a blocking open-loop), never DROPS (a real
+  // deliverable hidden behind an unrecognized verb must not vanish — Fable FIX-FIRST).
+  ok('ledger: a READ of a CODE file → NOT hard-tracked ("look at cluePrompts.js" is a soft aside, never blocks)',
+    !updateTaskLedger([], ['look at cluePrompts.js and explain the bug'], '').some(t => t.tier === 'hard'));
+  ok('ledger: "review jsonExtract.mjs / investigate parser.js" (read-intent) → no HARD task',
+    !updateTaskLedger([], ['review jsonExtract.mjs', 'investigate parser.js'], '').some(t => t.tier === 'hard'));
+  ok('ledger: a read-intent ask WITH a write verb still tracks HARD ("review auth.js and add a guard")',
+    updateTaskLedger([], ['review auth.js and add a rate-limit guard'], '').some(t => t.tier === 'hard' && t.deliverable.includes('auth.js')));
+  ok('ledger: "read the code and rewrite parser.js" → HARD, not dropped (rewrite ∈ REQUEST_VERB now)',
+    updateTaskLedger([], ['read the code and rewrite parser.js'], '').some(t => t.tier === 'hard' && t.deliverable.includes('parser.js')));
+  ok('ledger: a plain "create parser.js" is unaffected — still HARD',
+    updateTaskLedger([], ['create parser.js'], '').some(t => t.tier === 'hard' && t.deliverable.includes('parser.js')));
   ok('ledger: an out-of-repo scratchpad temp is NOT a deliverable (/private/tmp/…/cand_3836.json)',
     updateTaskLedger([], ['fix the image in /private/tmp/scratch/cand_3836.json'], '').length === 0);
   ok('ledger: the tool\'s OWN tasks.json is NOT a deliverable (no circular self-reference)',

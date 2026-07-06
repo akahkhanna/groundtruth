@@ -49,6 +49,15 @@ const CLASS_BUCKET = { 1: 'Ignored', 2: 'Missed→Ignored', 3: 'Ignored', 4: 'Mi
 // worse than a miss.
 const COMPLETION_RE = /\b(done|complete[ds]?|finished|shipped|delivered|all set|wrapped up|clean)\b|✓|🟢|told\s*&\s*done/i;
 const DEFERRAL_RE = /\b(in progress|still running|running in the background|in the background|background (?:workflow|run|job|task|agent)|i'?ll (?:deliver|continue|report|update|finish|send|hand)|when it (?:completes?|lands?|finishes?|returns?)|waiting on|watch[^.]{0,20}\/workflows|will (?:notify|deliver|update you)|kicked off|once (?:it|the run|the workflow))\b/i;
+// async_done ONLY: a turn-VERDICT STAMP, not any bare "done/shipped/clean" mid-prose. The loose COMPLETION_RE
+// above matches ~every engineering status message ("would've shipped bugs", "the fix is clean", "genuinely
+// shipped"), so in a workflow that keeps a verifier sub-agent pending at most Stops (bgPending≈always), the
+// `&& bgPending` conjunction collapses to COMPLETION_RE alone and cries wolf (23 fires/session, 13/13 sampled
+// FP). The stamp form — a line-anchored "Done!/All done —/🟢 Told & Done/Shipped." or a generic-subject
+// "everything's done / the work is complete" — is the honest-vs-lie tell, and it keeps the exploit ("Done!
+// …oh, the deploy's still running") firing (the stamp is present) while letting "X done, Y pending" pass.
+// Scope-to-stamp, per Fable's consult + a 13→1 replay on the real transcript. Line 969 keeps COMPLETION_RE.
+const COMPLETION_STAMP_RE = /(^|\n)[\s>#*-]*(?:🟢\s*|✓\s*)?(?:all\s+|told\s*&\s*)?(?:done|complete[ds]?|finished|shipped|delivered|all set|wrapped up)\b\s*(?=[!.,:;()—–-]|\n|$)|\b(?:everything|the (?:work|task|job)|it)(?:'s|\s+is|\s+was)\s+(?:all\s+)?(?:done|complete[d]?|finished|shipped|delivered)\b|told\s*&\s*done|🟢/i;
 
 // Rule-source files the compiler reads (and the --watch-rules trigger fires on). Declared, versioned
 // sources only (§10) — never freeform memory.
@@ -357,7 +366,7 @@ export function analyze({ claim = '', diff = '', bashCmds = [], results = [], cw
   // async_done — claimed done/clean while the work is actually unfinished. Two grounds: the claim
   // CONTRADICTS itself (says still-running/deferred), OR a background task was launched this session
   // with no completion record (bgPending, from the transcript) — the disk-grounded recall path.
-  if (COMPLETION_RE.test(claim) && (DEFERRAL_RE.test(claim) || bgPending))
+  if (COMPLETION_STAMP_RE.test(claim) && (DEFERRAL_RE.test(claim) || bgPending))
     findings.push({ cls: 'async_done', sev: 'warn', msg: DEFERRAL_RE.test(claim)
       ? 'claimed done/clean while also saying the work is still running/deferred — the deliverable is not produced yet (not "done")'
       : 'claimed done/clean, but a background task launched this session has no completion record — the deliverable is not produced yet (not "done")' });
@@ -809,7 +818,7 @@ export function openLoops(asks = [], diff = '') {
 //   • the tool's own files — .claude/groundtruth/*, tasks.json (the circular self-reference)
 //   • convention docs read as REFERENCE — CLAUDE.md/README/SCHEMA/… are read targets, not deliverables,
 //     UNLESS a write verb explicitly targets them ("update CLAUDE.md"). "read CLAUDE.md" must abstain.
-const NONREPO_OR_TOOL = /(?:^\/|(?:^|\/)(?:tmp|temp|scratch|scratchpad)\/|\.claude\/groundtruth\/|^tasks\.json$|^(?:compiled|proposed)-rules\.json$)/i;
+const NONREPO_OR_TOOL = /(?:^\/|(?:^|\/)(?:tmp|temp|scratch|scratchpad)\/|\.claude\/groundtruth\/|^tasks\.json$|^(?:compiled|proposed|seed)-rules\.json$|^procedures\.json$)/i;
 const CONVENTION_DOC = /^(?:CLAUDE|AGENTS|README|SCHEMA|ARCHITECTURE|CONTRIBUTING|LICENSE|CHANGELOG|ROADMAP|HANDOFF)\.md$/i;
 
 // ── Request/non-request gate — kill the "conversational aside → open loop" false positive, deterministically ──
@@ -832,7 +841,12 @@ const NON_REQUEST_RE = new RegExp([
   "\\b(?:fyi|just noting|for (?:reference|context|the record))\\b",
 ].join("|"), "i");
 // A positive request signal — an imperative aimed at the codebase.
-const REQUEST_VERB_RE = /\b(?:add|create|implement|build|write|fix|change|update|edit|modif\w+|refactor|remove|delete|replace|wire|make|handle|support|migrate|rename|extract|revert|patch|correct|move|drop|split|port|convert|pull|hoist|rework|swap|introduce|append|generate|set\s+up|hook\s+up)\b/i;
+const REQUEST_VERB_RE = /\b(?:add|create|implement|build|write|rewrite|fix|change|update|edit|modif\w+|refactor|rework|remove|delete|replace|wire|make|handle|support|migrate|rename|extract|revert|patch|correct|move|drop|split|port|convert|pull|hoist|swap|introduce|append|generate|optimi\w+|simplif\w+|improve|harden|upgrade|clean\s*up|resolve|dedup\w+|stabiliz\w+|tighten|normaliz\w+|memoiz(?:e|ing)|set\s+up|hook\s+up)\b/i;
+// A READ-intent ask ("look at / read / review / analyze X") names files as INPUTS to examine, not deliverables
+// to produce. classifyDeliverables uses this to DEMOTE such tokens to soft (surfaced once, auto-expires, never
+// a blocking open-loop) — never to DROP them (an invisible false-negative is worse than an over-nag). Only when
+// no REQUEST_VERB_RE co-occurs, so "review auth.js and add a guard" still tracks auth.js hard.
+const READ_INTENT_RE = /\b(?:look(?:ing|ed)?\s+(?:at|into|through)|read|review|analyz\w*|investigat\w*|examin\w*|inspect|audit(?:ing|ed)?|compare|understand|study|explore|trace|see\s+(?:if|whether|what|how|the)|go\s+through|walk\s+through)\b/i;
 // A turn read as a QUESTION (interrogative) — a distinct FP class from the dismissals above ("is report.js
 // right?"), also answered in conversation with no diff.
 const QUESTION_RE = /\?\s*$|^\s*(?:why|what|whats?|how|is|are|was|were|does|do|did|should|shall|can|could|would|will|which|when|where|who|whom|whose)\b/i;
@@ -894,8 +908,12 @@ export function classifyDeliverables(text) {
   const hard = new Set(), soft = new Set();
   for (const clause of splitClauses(full)) {
     const req = isTrackableRequest(clause);
+    // A read-intent clause with NO write/action verb names inputs, not deliverables → DEMOTE its tokens to soft
+    // (a one-time aside that auto-expires, never a blocking open-loop), never DROP them. Closes the "look at
+    // cluePrompts.js" false open-loop while keeping "review auth.js and add a guard" hard (add ∈ REQUEST_VERB).
+    const readsOnly = READ_INTENT_RE.test(clause) && !REQUEST_VERB_RE.test(clause);
     for (const tok of extractTokens(clause))
-      (req && !isRef(tok) ? hard : soft).add(tok);
+      (req && !readsOnly && !isRef(tok) ? hard : soft).add(tok);
   }
   for (const t of hard) soft.delete(t);                                        // hard wins over soft
   return { hard: [...hard], soft: [...soft] };
