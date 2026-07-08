@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/badge/deterministic-no%20LLM%20%C2%B7%20no%20network%20%C2%B7%20no%20API%20key-111111?style=flat-square" alt="Deterministic: no LLM, no network, no API key">
   <img src="https://img.shields.io/badge/runs%20on-Claude%20Code-111111?style=flat-square" alt="Runs on Claude Code">
   <img src="https://img.shields.io/github/v/release/akahkhanna/groundtruth?style=flat-square&color=111111&label=release" alt="Release">
-  <img src="https://img.shields.io/badge/self--checks-440%20%C2%B7%20red--team%2014%2F14-111111?style=flat-square" alt="440 self-checks, red-team 14/14">
+  <img src="https://img.shields.io/badge/self--checks-495%20%C2%B7%20red--team%2014%2F14-111111?style=flat-square" alt="495 self-checks, red-team 14/14">
   <img src="https://img.shields.io/badge/license-MIT-111111?style=flat-square" alt="MIT license">
 </p>
 
@@ -91,7 +91,7 @@ From there you arm your project rules and turn on blocking in three optional sta
 
 One deterministic `Stop` hook — no LLM, no network, always runs, ~free. It reads the claim from the Stop payload, intent + Bash evidence from the transcript, and reality from `git diff HEAD`:
 
-- **Honesty** — false test/build claim (&ldquo;tests pass&rdquo; with no run) · stub/placeholder (`TODO`/`FIXME`/`NotImplemented`/Rust `todo!()`/Go `panic()`…) · silent no-op (claimed a file that's absent from the diff) · phantom ref (new import whose target doesn't exist) · dropped symbol (a removed function still *called* — a dangling reference under a &ldquo;refactor, everything preserved&rdquo; claim) · special-casing (code that branches on test/CI/the auditor).
+- **Honesty** — false test/build claim (&ldquo;tests pass&rdquo; with no run) · stub/placeholder (`TODO`/`FIXME`/`NotImplemented`/Rust `todo!()`/Go `panic()`…) · silent no-op (claimed a file that's absent from the diff) · phantom ref (new import whose target doesn't exist) · dropped symbol (a removed function still *called* — a dangling reference under a &ldquo;refactor, everything preserved&rdquo; claim) · special-casing (code that branches on test/CI/the auditor) · **test-gaming** (a green reached by *skipping/excluding* the tests or *weakening* an existing assertion, not by fixing the code).
 - **Completeness** — a named deliverable in the ask that never lands in the diff. Deliberately crude: it abstains when the ask names nothing, and when the turn is an observation rather than a request (&ldquo;the 304 is fine, no fix needed&rdquo;) so an aside is never minted into a phantom open loop.
 - **Rules** *(the differentiator)* — your standing rules, **compiled from your own docs into deterministic predicates**. The doc literally says ``use `X` not `Y` `` or ``never `Z` ``, so a violation is a regex match, not a judgment call. Auto-discovered, grounded against your tree, and **proposed** — never auto-armed.
 - **Security** — hardcoded secrets, an RLS-off / anon-readable new table (Postgres/Supabase), a committed `.env`.
@@ -122,7 +122,9 @@ CLI (no install): `node hooks/groundtruth.mjs --audit` runs the repo audit · `-
 ## Warn vs block
 
 - **Default: WARN.** The verdict is recorded; the turn is never disrupted. Build trust first.
-- **Opt-in: BLOCK.** A block-severity finding refuses the stop and hands back a corrective payload, then re-checks the fix on the next stop — a loop **capped at 2 attempts**, then escalates to a human. Editing the tests / this checker / the ledger to satisfy a catch is flagged as gaming: the block *holds* rather than releasing.
+- **Opt-in: BLOCK.** A block-severity finding refuses the stop and hands back a corrective payload, then re-checks the fix on the next stop — a loop **capped at 2 attempts**, then escalates to a human. Editing the tests / this checker / the ledger to satisfy a catch is flagged as gaming: the block *holds* rather than releasing. Purely **prose-grounded honesty heuristics** (e.g. a "tests pass" claim with no test run) and the test-gaming heuristics (skip/exclude, assertion-weakening) are **warn-only** — they never hard-block, because their trigger is a natural-language claim rather than a diff artifact, and a false block on that basis is the failure this tool exists to avoid. CI is the rung where such checks could later be made blocking, since there a false positive is a visible red check a human can override.
+
+> **Block visibility (honest scope).** A block always reaches the model (the corrective payload) and is recorded to the verdict file + history. An **escalated or held** block is also recorded to the verdict file + history and, on your **next prompt**, re-surfaced as a loud `🔴 BLOCKED / ESCALATED` banner in the injected Groundtruth note — so an unresolved block is not silently dropped between turns. (A block the agent *self-resolves* within the retry loop is recorded in history but, being fixed, isn't re-surfaced.) *Live, in-the-moment* surfacing is **best-effort**: in the VS Code extension the hook's `systemMessage` is not rendered (upstream limitation), so Groundtruth additionally tries to open the verdict file in your editor (Remote-safe) or fire a desktop notification — neither is guaranteed (headless/remote sessions have no desktop; Do-Not-Disturb and notification permissions apply). Net: *an unresolved block can no longer be silently lost — it may still not be seen the instant it fires.* One more reason the hard enforcement boundary is CI, not the in-session hook.
 
 > **False positives are fatal.** Run in WARN until precision is proven on your real sessions, *then* flip block. Every verdict carries file/line evidence, so a wrong call is auditable, not mysterious.
 
@@ -130,7 +132,7 @@ CLI (no install): `node hooks/groundtruth.mjs --audit` runs the repo audit · `-
 
 A verifier is only worth trusting if it's honest about its own misses.
 
-- **Precision was rebuilt against real data, not intuition.** We read every finding Groundtruth emitted across 15 of its own sessions — 23 findings, **74% false positives** — froze them into a labeled [corpus](hooks/corpus.fixture.json), then killed them: self-match false positives in the engine went to **0**, phantom-import FPs **3 → 0**, self-checks **242 → 440**, red-team **14/14**. Independent adversarial passes then tried to break the fixes and wrote their own test cases.
+- **Precision was rebuilt against real data, not intuition.** We read every finding Groundtruth emitted across 15 of its own sessions — 23 findings, **74% false positives** — froze them into a labeled [corpus](hooks/corpus.fixture.json), then killed them: self-match false positives in the engine went to **0**, phantom-import FPs **3 → 0**, self-checks **242 → 495**, red-team **14/14**. Independent adversarial passes then tried to break the fixes and wrote their own test cases.
 - **Every fix is catalogued** — symptom → root cause → fix → regression test — in [FIXES.md](FIXES.md), including the two *critical* holes review found and the deterministic-NL limits it does **not** close.
 - **Still pending, named not hidden:** a live before/after false-positive rate across a week of real sessions. Groundtruth ships an append-only history log + a `gt-harvest` reader so you can measure it on *your* repo. That number ships next — published the same way, with its misses.
 
@@ -155,7 +157,7 @@ The full adversarial analysis — three red-team passes, the laundered-helper ev
 ## Tests
 
 ```bash
-node hooks/groundtruth.test.mjs   # 440 assert-based unit checks, no deps
+node hooks/groundtruth.test.mjs   # 495 assert-based unit checks, no deps
 node hooks/redteam.mjs            # live adversarial harness (10 scenarios, 14 checks), sandboxed
 ```
 
@@ -163,7 +165,7 @@ The red-team harness is the *proven* counterpart: it spins up a throwaway repo, 
 
 ## Status
 
-Shipped: audit mode + per-turn verify-on-Stop, all deterministic — honesty, completeness, doc-compiled rule enforcement behind an approval gate, the remediation loop + anti-gaming, security checks. The semantic/LLM layer is roadmap. See [ROADMAP.md](ROADMAP.md).
+Shipped (**v1.0.0**): audit mode + per-turn verify-on-Stop, all deterministic — honesty, completeness, doc-compiled rule enforcement behind an approval gate, the remediation loop + anti-gaming, test-gaming detectors (skip/exclude + assertion-weakening), security checks, and never-silently-lost block visibility with a best-effort live pop. The auditor's own code is sealed into the integrity snapshot. The semantic/LLM layer is roadmap. See [ROADMAP.md](ROADMAP.md).
 
 ## Contributing
 

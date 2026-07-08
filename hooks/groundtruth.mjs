@@ -26,9 +26,10 @@
  * Pure `analyze()` + `parseTranscript()` are exported for groundtruth.test.mjs.
  */
 import { readFileSync, mkdirSync, writeFileSync, existsSync, readdirSync, statSync, rmSync, chmodSync } from 'node:fs';
-import { execSync, execFileSync } from 'node:child_process';
+import { execSync, execFileSync, spawn } from 'node:child_process';
 import { createHash, createHmac } from 'node:crypto';
-import { join, dirname, resolve } from 'node:path';
+import { join, dirname, resolve, sep } from 'node:path';
+import { tmpdir } from 'node:os';   // to suppress the live editor-pop for throwaway repos (redteam/tests) + CI
 import { fileURLToPath } from 'node:url';   // NOT `new URL(...).pathname` — that percent-encodes spaces (`john doe`→`john%20doe`), silently inerting every path-derived check on a spaced/Windows/cloud-synced install
 // Class 6 lives in its own module (this engine is already large). The import is a deliberate cycle
 // (symbol-integrity.mjs re-imports the pure lexers below) — safe because every cross-reference is at
@@ -39,7 +40,8 @@ const CLASS_NAME = { 1: 'false test/build claim', 2: 'stub/placeholder', 3: 'sil
   6: 'dropped symbol (dangling ref)', 9: 'special-casing / overfit', async_done: 'false completion (async)',
   B1: 'RLS off on new table', B3: 'permissive policy (anon-readable)', C1: 'hardcoded secret', C2: 'private key',
   R: 'compiled rule (from your docs)', openloop: 'open loop (asked, not delivered)', P: 'procedure (step skipped / out of order)',
-  ENV: 'env file not gitignored (secret-leak risk)' };
+  ENV: 'env file not gitignored (secret-leak risk)', test_exclusion: 'test excluded/skipped to pass',
+  test_weakened: 'test weakened/disabled to pass' };
 const CLASS_BUCKET = { 1: 'Ignored', 2: 'Missed→Ignored', 3: 'Ignored', 4: 'Missed', 6: 'Missed→Ignored', async_done: 'Ignored',
   B1: 'Ignored', B3: 'Ignored', C1: 'Ignored', C2: 'Ignored', R: 'Ignored' };
 
@@ -198,7 +200,16 @@ export const TEST_FILE_RE = /\.test\.|\.spec\.|_test\.(?:go|py|rb|exs?|java|kt|c
 // NON-test source. NOTE: warn-only + one-per-turn — real app code legitimately has test-mode config, so
 // this is a smell to confirm, not proof; tighten the env-probe arm if it gets noisy. Self-match-proof: the
 // arms need real access syntax (escaped dots/brackets), so this definition line can't trip itself.
-const EVALUATOR_DETECT_RE = /GROUNDTRUTH_[A-Z]\w*|groundtruth[-_](?:ok|off|skip|disable|ignore)|process\.env\.CI\b|process\.env\.\w*_?ENV\s*===?\s*['"]test|os\.environ(?:\.get\(|\[)\s*['"](?:CI|PYTEST)|ENV\[['"](?:CI|RAILS_ENV)|\bif\b[^;\n]{0,40}\b(?:is_?test|under_?test|in_?test|testing_?mode)\b/i;
+// Two arms, tested on DIFFERENT views (the fix for the comment-mention FP that fired on this repo's own
+// AG-A comment "// … GROUNDTRUTH_KEY …"):
+//   • EVAL_CODE_RE — an actual runtime BRANCH on the evaluator (env/CI/test-mode). Tested on the CODE portion
+//     only (comments stripped) — a comment that merely NAMES the env var is documentation, not a branch.
+//   • EVAL_SUPPRESS_RE — a Groundtruth SUPPRESSION directive written into source. Like an eslint-disable, it
+//     is a comment, so it matches whole-line — but the token must sit RIGHT AFTER a comment-opener (a
+//     DIRECTIVE), not embedded mid-prose, else a comment merely NAMING the token (like this very line) self-
+//     matches. So documentation that mentions the token in backticks/prose is not flagged; a real directive is.
+const EVAL_CODE_RE = /GROUNDTRUTH_[A-Z]\w*|process\.env\.CI\b|process\.env\.\w*_?ENV\s*===?\s*['"]test|os\.environ(?:\.get\(|\[)\s*['"](?:CI|PYTEST)|ENV\[['"](?:CI|RAILS_ENV)|\bif\b[^;\n]{0,40}\b(?:is_?test|under_?test|in_?test|testing_?mode)\b/i;
+const EVAL_SUPPRESS_RE = /^groundtruth[-_](?:ok|off|skip|disable|ignore)/i;   // tested against the (trimmed, language-aware) COMMENT portion — a real directive STARTS the comment
 
 // Secret detection (catalog C1/C2) — distinctive provider prefixes + the PEM private-key header.
 // Known-format only (gitleaks' lane for the long tail); low false-positive, so verdict-grade.
@@ -294,12 +305,143 @@ export function sessionHasCommit(cmds = []) {
   return (cmds || []).some(c => /\bgit\s+(?:commit|merge|cherry-pick|revert|am|rebase)\b|\bgh\s+(?:pr\s+merge|merge)\b/.test(String(c)));
 }
 
+// Quote-strip for the Class-1 claim scan (Defect A): a "tests pass" that is QUOTED or ATTRIBUTED is
+// discussion, not a first-person claim — the FP that silently block-looped when the agent echoed a finding
+// message or a doc line. Blank fenced ``` code blocks and `> ` blockquote lines WHOLESALE (length-preserving,
+// with `\n` kept, so the caller's offset-based sentence-scoping still aligns), and return the surviving
+// inline `code` span ranges: a claim match that falls ENTIRELY inside one is quoted and excused, while a
+// match that STRADDLES a span ("All `tests` pass" — the backticked word plus a bare verb) is a real claim and
+// still fires (no blank-and-rescan, which would launder that real claim into a false negative). Pure → tested.
+export function stripQuotedForClaim(s = '') {
+  const blank = (m) => m.replace(/[^\n]/g, ' ');
+  const scan = String(s)
+    .replace(/```[\s\S]*?```/g, blank)          // fenced code blocks
+    .replace(/^[ \t]*>.*$/gm, blank);           // blockquote lines
+  const inlineSpans = [];
+  for (const m of scan.matchAll(/`[^`\n]+`/g)) inlineSpans.push([m.index, m.index + m[0].length]);
+  return { scan, inlineSpans };
+}
+
+// AG-B (config/build test-exclusion): the agent claims success but reached green by SKIPPING/EXCLUDING the
+// tests or LOWERING the coverage gate — not by fixing the code. Two channels: added lines in a build/config
+// file (diff walker) and skip-flags on the command line (bashCmds). Gated on a success claim so a routine
+// config edit isn't flagged. Warn-only (heuristic). Pure → tested.
+const BUILD_CFG_RE = /(^|\/)(?:pom\.xml|build\.gradle(?:\.kts)?|jest\.config\.[cm]?[jt]s|vitest\.config\.[cm]?[jt]s|\.nycrc(?:\.json)?|karma\.conf\.[jt]s|package\.json)$/i;
+// `-x test` is a Gradle exclude-task flag — anchor it to a gradle invocation so it can't false-match an
+// unrelated `-x` (tar/ls/flock … `-x test.tar`), which would be a false gaming accusation (Fable re-review).
+const CMD_SKIP_TESTS_RE = /-DskipTests|-Dmaven\.test\.skip|\bgradlew?\b[^|;&]*\s-x\s+(?:test|check)\b|--testPathIgnorePatterns|--passWithNoTests/;
+const CFG_EXCLUDE_RE = [
+  /<skipTests>\s*true/i, /<skip>\s*true<\/skip>/i,          // maven surefire skip
+  /<exclude>[^<]*[Tt]est[^<]*<\/exclude>/,                  // surefire <excludes> a Test
+  /\btest\s*\.\s*enabled\s*=\s*false/, /\bexclude\s+['"][^'"]*[Tt]est/,   // gradle disable / exclude
+  // jest ignore ONLY when the added value names a test/spec path — a bare `testPathIgnorePatterns:
+  // ["/node_modules/"]` is boilerplate in nearly every honest jest config and must NOT flag (Fable FP #1).
+  /testPathIgnorePatterns[^\n]*(?:\.(?:test|spec)\.|[Tt]ests?\/|__tests__|[Ss]pec)/,
+];
+// A success/completion claim, negation- and quote-aware (Fable FP #3): reuses stripQuotedForClaim so an
+// echoed/quoted claim doesn't count, and abstains on a hedged/negated sentence ("Not done yet", "still WIP")
+// — the loose bare-word gate fired on honest self-disclosing turns. Deliberately conservative (a missed gate
+// is a warn-tier FN, an over-open one is the fatal FP). Pure → tested.
+const SUCCESS_CLAIM_RE = /\b(?:done|fixed|passes|passed|green|complete[d]?|all\s+tests?\s+pass\w*|tests?\s+pass\w*|works\b)\b/i;
+// Deliberately does NOT include `no` / `fail\w*` / `broken`: those wrongly suppressed the exact phrasing the
+// checks TARGET — "Fixed the failing test, all green" and "it works, no errors" are success claims (Fable
+// re-review FN). Present-tense hedges (not/never/n't/yet/still/wip) still gate the honest-WIP cases.
+const CLAIM_HEDGE_RE = /\b(?:not|never|n[’']t|yet|still|wip|todo|unfinished|incomplete|before|once|when|if|should|would|will|make sure|ensure|trying|about to|going to|need|can[’']t|couldn)\b/i;
+export function claimsSuccess(claim = '') {
+  const { scan, inlineSpans } = stripQuotedForClaim(claim);
+  // Blank inline `code` spans too (the gate has no straddle concern — a fully-quoted claim must not open it).
+  let s = scan;
+  for (const [a, b] of inlineSpans) s = s.slice(0, a) + ' '.repeat(b - a) + s.slice(b);
+  for (const sent of s.split(/[.!?\n]+/)) {
+    if (SUCCESS_CLAIM_RE.test(sent) && !CLAIM_HEDGE_RE.test(sent)) return true;
+  }
+  return false;
+}
+export function testExclusionFindings(claim = '', diff = '', bashCmds = []) {
+  const out = [];
+  if (!claimsSuccess(claim)) return out;  // only when success is genuinely claimed (negation/quote-aware)
+  // A skip flag is only gaming if NO real test run ALSO happened — `mvn -DskipTests` to build a jar, then a
+  // real `mvn test`, is honest (Fable FP #4). A real run = a TEST_BUILD command that is NOT itself a skip.
+  const realRun = (bashCmds || []).some(c => TEST_BUILD_RE.test(c) && !CMD_SKIP_TESTS_RE.test(c));
+  if (!realRun) for (const c of bashCmds || []) if (CMD_SKIP_TESTS_RE.test(c)) {
+    out.push({ cls: 'test_exclusion', sev: 'warn', msg: `claimed success, but a command SKIPPED the tests instead of running them (${c.trim().slice(0, 50)}) — verify the suite actually ran` }); break;
+  }
+  // per-file added/removed lines (for exclusion patterns + paired coverage-threshold lowering)
+  const byFile = {}; let cur = '';
+  for (const l of String(diff).split('\n')) {
+    const h = l.match(/^\+\+\+ b\/(.+)$/); if (h) { cur = h[1] === '/dev/null' ? '' : h[1]; continue; }
+    if (!cur) continue;
+    if (l[0] === '+' && !l.startsWith('+++')) (byFile[cur] ||= { add: [], del: [] }).add.push(l.slice(1));
+    else if (l[0] === '-' && !l.startsWith('---')) (byFile[cur] ||= { add: [], del: [] }).del.push(l.slice(1));
+  }
+  const nums = (lines) => { const m = {}; for (const ln of lines) for (const x of ln.matchAll(/(?:"?(branches|functions|lines|statements)"?\s*:\s*|<minimum>\s*)(\d+(?:\.\d+)?)/gi)) m[(x[1] || 'minimum').toLowerCase()] = parseFloat(x[2]); return m; };
+  for (const [f, { add, del }] of Object.entries(byFile)) {
+    if (!BUILD_CFG_RE.test(f)) continue;
+    const base = f.split('/').pop();
+    const ex = add.find(a => CFG_EXCLUDE_RE.some(re => re.test(a)));
+    if (ex) out.push({ cls: 'test_exclusion', sev: 'warn', msg: `claimed success, but ${base} adds a test skip/exclusion (${ex.trim().slice(0, 50)}) — verify the excluded tests still run and pass` });
+    const dn = nums(del), an = nums(add);
+    for (const k of Object.keys(an)) if (k in dn && an[k] < dn[k]) { out.push({ cls: 'test_exclusion', sev: 'warn', msg: `claimed success, but a coverage threshold was LOWERED in ${base} (${k} ${dn[k]}→${an[k]}) — verify coverage wasn't dropped just to pass the gate` }); break; }
+  }
+  return out;
+}
+
+// AG-C (assertion-downgrade / disable on baseline tests): the agent turned an EXISTING test green by
+// WEAKENING it, not by fixing the code. Two signals, both claim-gated + warn-only:
+//   • a strict assertion (assertEquals / toBe / assertThat…isEqualTo) REPLACED by a loose one (assertNotNull
+//     / toBeTruthy / …isNotNull) — measured as NET COUNTS per file, which is robust against the framework-
+//     migration FP Fable flagged (assertEquals→toBe is strict→strict, so the strict count doesn't drop);
+//   • a NET-NEW skip/disable (@Disabled / it.skip / xit / @pytest.mark.skip) added to a baseline test.
+// Anchored to "baseline": only fires on a file that has REMOVED lines (it existed at session start) — a
+// brand-new test file (adds only) passes free (legit TDD). Pure → tested. Delta-widening + case-level
+// deletion are DEFERRED (need pairing / a whole-tree lookup) — named, not half-built.
+// STRICT = an exact assertion (value/identity/called-with). LOOSE = an existence/partial/boolean weakening.
+// `assertThat` is a CARRIER, not an assertion — strictness lives in the chained matcher (isEqualTo vs
+// isNotNull), so it is in NEITHER table (Fable #9). `toContain`/`toHaveLength` are LOOSE (exact→partial is a
+// downgrade — launch-kit pattern #2). The tables must not overlap: `\.toBe\s*\(` can't match `toBeTruthy(`.
+const STRICT_ASSERT_RE = /\bassert(?:Equals|Same|ArrayEquals)\b|\.(?:toBe|toEqual|toStrictEqual|toHaveBeenCalledWith)\s*\(|\bis(?:EqualTo|SameAs)\b/;
+const LOOSE_ASSERT_RE = /\bassert(?:NotNull|True|False|Null)\b|\.(?:toBeTruthy|toBeFalsy|toBeDefined|toBeUndefined|toBeNull|toContain|toHaveLength)\s*\(|\.toHaveBeenCalled\s*\(\s*\)|\bis(?:NotNull|NotEmpty)\b/;
+const TEST_SKIP_RE = /@Disabled\b|@Ignore\b|@pytest\.mark\.skip|@unittest\.skip|\bit\.skip\s*\(|\bxit\s*\(|\btest\.skip\s*\(|\bdescribe\.skip\s*\(|\bxdescribe\s*\(|\.skip\s*\(\s*['"`]/;
+export function testWeakeningFindings(claim = '', diff = '') {
+  const out = [];
+  if (!claimsSuccess(claim)) return out;   // negation/quote-aware success gate (Fable #3)
+  const count = (lines, re) => lines.reduce((n, l) => n + (re.test(l) ? 1 : 0), 0);
+  const byFile = {}; let cur = '';
+  for (const l of String(diff).split('\n')) {
+    const h = l.match(/^\+\+\+ b\/(.+)$/); if (h) { cur = h[1] === '/dev/null' ? '' : h[1]; continue; }
+    if (!cur || !TEST_FILE_RE.test(cur)) continue;
+    if (l[0] === '+' && !l.startsWith('+++')) (byFile[cur] ||= { add: [], del: [] }).add.push(l.slice(1));
+    else if (l[0] === '-' && !l.startsWith('---')) (byFile[cur] ||= { add: [], del: [] }).del.push(l.slice(1));
+  }
+  for (const [f, { add, del }] of Object.entries(byFile)) {
+    if (!del.length) continue;                          // a NEW test file (adds only) → legit, never flag (TDD)
+    const base = f.split('/').pop();
+    // net-new skip/disable on a baseline test (in added, not already in removed)
+    const skip = add.find(a => TEST_SKIP_RE.test(a)) && !del.some(d => TEST_SKIP_RE.test(d)) ? add.find(a => TEST_SKIP_RE.test(a)) : null;
+    if (skip) out.push({ cls: 'test_weakened', sev: 'warn', msg: `claimed success, but an existing test was DISABLED/skipped in ${base} (${skip.trim().slice(0, 50)}) — that turns it green without fixing the code` });
+    // strict→loose downgrade, by net count (migration-safe: strict→strict doesn't drop the strict count)
+    const rmStrict = count(del, STRICT_ASSERT_RE), addStrict = count(add, STRICT_ASSERT_RE);
+    const rmLoose = count(del, LOOSE_ASSERT_RE), addLoose = count(add, LOOSE_ASSERT_RE);
+    if (rmStrict >= 1 && addStrict < rmStrict && addLoose > rmLoose) {
+      // Net-count evidence: do NOT quote a specific added line (net-counting can't identify WHICH line, and
+      // pointing at an unrelated new assertion is misleading — Fable #5). State the net movement instead.
+      out.push({ cls: 'test_weakened', sev: 'warn', msg: `claimed success, but ${base}'s strict assertions dropped (${rmStrict}→${addStrict}) while looser ones were added — verify the code was fixed, not the tests relaxed` });
+    }
+  }
+  return out;
+}
+
 /**
  * Pure deterministic Tier-1 analysis. Returns findings[].
  * ctx: { claim, diff, bashCmds:[cmd], results:[{is_error, text}], cwd }
  */
-export function analyze({ claim = '', diff = '', bashCmds = [], results = [], cwd = process.cwd(), bgPending = false }) {
+export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], results = [], cwd = process.cwd(), bgPending = false }) {
   const findings = [];
+  // AG-B/AG-C need REAL -/+ pairing, which only the git diff has. `diff` here is the WIDER scanDiff (git +
+  // the Edit/Write tool-ledger + untracked content); the ledger replays a file's unchanged CONTEXT lines as
+  // `+` (and never as `-`), so a pre-existing skip/exclusion would falsely read as newly-added. Route the two
+  // test-gaming checks to the git-only diff (falls back to `diff` when a caller passes none, e.g. the tests).
+  const gDiff = gitDiff != null ? gitDiff : diff;
   const files = changedFiles(diff);
   const added = diff.split('\n').filter(l => l[0] === '+' && !l.startsWith('+++'));
 
@@ -325,18 +467,27 @@ export function analyze({ claim = '', diff = '', bashCmds = [], results = [], cw
   const V = String.raw`(?:pass\w*|green|succeed\w*|verified|clean)`;
   const K = String.raw`(?:tests?|build|lint|check|typecheck|pass\w*|green|succeed\w*|verified|clean)`;
   const quotedPattern = new RegExp(`${V}\\s*[\\/|]\\s*${K}|${K}\\s*[\\/|]\\s*${V}|\\(\\?[:=!<]`, 'i');
+  //   (c) REPORTED SPEECH — an attribution verb governing the noun ("claimed/flagged/said/echoed/reported
+  //       … tests pass") is quotation, not a fresh claim; this is what an echoed finding message
+  //       ("claimed tests/build pass …") tripped, driving a silent self-match block-loop.
+  const reportedSpeech = new RegExp(String.raw`\b(?:claim(?:ed|s|ing)?|flag(?:ged|s|ging)?|said|says|echo(?:ed|es|ing)?|quot(?:ed|es|ing)?|wrote|writes|report(?:ed|s|ing)?)\b(?:\s+\w+){0,4}\s+\b(?:tests?|build|lint|typecheck|type-check)\b`, 'i');
+  // Scan the QUOTE-STRIPPED view (fenced/blockquote blanked; offsets preserved so sentence-scoping aligns);
+  // a match wholly inside an inline `code` span is quoted prose and excused (a straddling one still fires).
+  const { scan: claimScan, inlineSpans } = stripQuotedForClaim(claim);
+  const insideInline = (m) => inlineSpans.some(([a, b]) => m.index >= a && m.index + m[0].length <= b);
   let _passClaim = null;
-  for (const m of claim.matchAll(/\b(tests?|build|lint|typecheck|type-check)\b[^.!?\n]*\b(pass(?:e[ds])?|green|succeed(?:ed)?|verified|all clean)\b/gi)) {
+  for (const m of claimScan.matchAll(/\b(tests?|build|lint|typecheck|type-check)\b[^.!?\n]*\b(pass(?:e[ds])?|green|succeed(?:ed)?|verified|all clean)\b/gi)) {
     if (quotedPattern.test(m[0])) continue;                          // a quoted pattern, not a claim
-    const before = claim.slice(0, m.index);
+    if (insideInline(m)) continue;                                   // wholly inside a `code` span → quoted prose
+    const before = claimScan.slice(0, m.index);
     const sentBefore = before.slice(before.search(/[^.!?\n]*$/));    // the claim's sentence, up to the claim
-    const after = claim.slice(m.index);
+    const after = claimScan.slice(m.index);
     const sentence = sentBefore + after.slice(0, (after.search(/[.!?\n]/) + 1) || after.length);
-    if (nearModalOrNeg.test(sentence) || counterfactual.test(sentBefore)) continue;   // hedged / negated / counterfactual
+    if (nearModalOrNeg.test(sentence) || counterfactual.test(sentBefore) || reportedSpeech.test(sentence)) continue;   // hedged / negated / counterfactual / reported speech
     _passClaim = m; break;                                           // first surviving real claim
   }
   if (_passClaim) {
-    const ev = ` ("${_passClaim[0].trim().slice(0, 60)}")`;   // quote what matched, so a false positive is obvious
+    const ev = ` ("${claim.slice(_passClaim.index, _passClaim.index + _passClaim[0].length).trim().slice(0, 60)}")`;   // slice the ORIGINAL (offsets align) so evidence has no blanking artifacts
     const testHits = bashCmds.filter(c => TEST_BUILD_RE.test(c));
     const ran = testHits.length > 0;
     // Failure = a TEST RESULT that clearly reports failures — NOT any errored tool / stray ✗ / "Error:"
@@ -351,9 +502,35 @@ export function analyze({ claim = '', diff = '', bashCmds = [], results = [], cw
     const WEAK_CHECK_RE = /^\s*(?:\w+=\S+\s+)*(?:(?:npx|bunx|pnpm exec|pnpm dlx|yarn)\s+)?(?:\S*\/)?(?:node --check|node\s+-e\b|tsc(?=\s|$)|deno check|cargo check|go vet|py_compile|ruby -c\b)/;
     const weakOnly = c => { const ts = c.split(/&&|\|\|?|;/).filter(s => TEST_BUILD_RE.test(s)); return ts.length > 0 && ts.every(s => WEAK_CHECK_RE.test(s)); };
     const onlyWeak = ran && testHits.every(weakOnly);
-    if (!ran) findings.push({ cls: 1, sev: 'block', msg: `claimed tests/build pass${ev}, but no test/build command ran this session` });
+    // A claim that itself DISCLOSES a partial/known failure — "15/16 pass", "1 failing", "team-mode is a
+    // pre-existing failure I disclosed" — is honest reporting, not an overclaim. The `failed` branch below is
+    // a substring sensor (TEST_FAIL_RE on the output); an honest disclosure PRINTS `FAIL …team-mode.test.js`
+    // right next to `pass`, tripping it (confirmed FP on a real card). Suppress `failed` (only that branch —
+    // NOT `!ran`) when the claim OWNS the failure. Precision (Fable): test the QUOTE-STRIPPED view (someone
+    // else's fenced words aren't the agent's claim); BIND the fraction to a test/pass word so a date "12/2024"
+    // or a step "2/5" isn't a false disclosure and "22/22" stays a clean claim; require the contrastive
+    // markers (unrelated/aside from/known…) to co-occur with a FAILURE word in the SAME sentence, so
+    // "unrelated to the parser" / "known issue with docs" can't wave a real discrepancy through.
+    let partialPass = false;                                            // "15/16 pass", "passed 15 of 16" (N<M)
+    for (const fm of claimScan.matchAll(/\b(\d+)\s*(?:\/|of|out of)\s*(\d+)\b\s*(?:tests?|specs?|files?|suites?|pass\w*|green)|\bpass\w*\s+(\d+)\s*(?:\/|of|out of)\s*(\d+)\b/gi)) {
+      const n = +(fm[1] ?? fm[3]), mm = +(fm[2] ?? fm[4]);
+      if (n < mm) { partialPass = true; break; }
+    }
+    const countFail = /\b[1-9]\d*\s+(?:tests?|specs?|files?|of\s+them)?\s*fail\w*/i.test(claimScan);   // "1 failing", "2 tests failed"
+    const markerFail = claimScan.split(/[.!?\n]+/).some(s =>            // a known/pre-existing/contrastive marker, ABOUT a failure
+      /\bpre[-\s]?existing\b|\bknown\b|\baside from\b|\bother than\b|\bunrelated\b|\bnot (?:caused|introduced) by\b/i.test(s)
+      && /\bfail\w*|\bflaky\b|\bbroken\b/i.test(s));
+    const disclosesFailure = partialPass || countFail || markerFail;   // NOTE (documented ceiling): magnitude isn't cross-checked, so "18/20 pass" over 10 real fails still suppresses — warn-tier only.
+    // sev:'warn', not 'block': the `ran` side is deterministic (recorded commands) but the CLAIM side is
+    // prose-parsing of natural language — a heuristic with a live-demonstrated FP class (quoting/echoing
+    // "tests pass"). A conjunction's severity is bounded by its weakest conjunct, and by this project's own
+    // "abstain outside the scope a check is provably correct in" rule a prose-grounded predicate may not sit
+    // in the block tier in-session. Rule: artifact-grounded classes (secret/SQL/env/diff) may block; a
+    // prose-grounded one may not — CI is where this class earns block severity. (Demoted from block after a
+    // silent block-loop fired on an agent merely quoting the phrase.)
+    if (!ran) findings.push({ cls: 1, sev: 'warn', msg: `claimed tests/build pass${ev}, but no test/build command ran this session` });
     else if (/^tests?$/i.test(_passClaim[1]) && onlyWeak) findings.push({ cls: 1, sev: 'warn', msg: `claimed tests pass${ev}, but only a syntax/type check ran (${testHits[0].trim().slice(0, 40)}) — that is not a test run; verify in the runtime that ships` });
-    else if (failed) findings.push({ cls: 1, sev: 'warn', msg: `claimed tests/build pass${ev}, but a test run looks like it reported failures — double-check` });
+    else if (failed && !disclosesFailure) findings.push({ cls: 1, sev: 'warn', msg: `claimed tests/build pass${ev}, but a test run looks like it reported failures — double-check` });
     // Anti-gaming: claimed green, but the ONLY files changed are tests → the test may have been
     // weakened to pass instead of the code being fixed. Warn-only (heuristic) so a legit
     // test-writing turn is never blocked. Fires only when the whole diff is test files.
@@ -362,6 +539,12 @@ export function analyze({ claim = '', diff = '', bashCmds = [], results = [], cw
     if (testFiles.length && files.every(isTest))
       findings.push({ cls: 1, sev: 'warn', msg: `claimed pass, but the only files changed are tests (${testFiles.map(f => f.split('/').pop()).join(', ')}) — verify the test wasn't weakened instead of the code fixed` });
   }
+
+  // AG-B — claimed success but the tests were SKIPPED/EXCLUDED or the coverage gate LOWERED (config/build
+  // diff or a skip-flag on the command line), rather than the code fixed. Warn-only. Git-only diff (gDiff).
+  findings.push(...testExclusionFindings(claim, gDiff, bashCmds));
+  // AG-C — claimed success but an EXISTING test was WEAKENED (strict assertion → loose) or DISABLED. Warn-only.
+  findings.push(...testWeakeningFindings(claim, gDiff));
 
   // async_done — claimed done/clean while the work is actually unfinished. Two grounds: the claim
   // CONTRADICTS itself (says still-running/deferred), OR a background task was launched this session
@@ -421,11 +604,12 @@ export function analyze({ claim = '', diff = '', bashCmds = [], results = [], cw
   // specifiers are skipped (can't resolve cheaply).
   // NOTE: best-effort + WARN-only — file-existence resolution, not full symbol resolution. Upgrade to
   // proper resolution (a real resolver, or the roadmap LLM layer) only if this misses real phantom refs.
-  let curFile = '', curLang = null, curSrc = false, sawC9 = false;
+  let curFile = '', curLang = null, curSrc = false, sawC9 = false, c9St = { block: false, fence: false };
   for (const l of diff.split('\n')) {
     const h = l.match(/^\+\+\+ b\/(.+)$/);
     if (h) { curFile = h[1] === '/dev/null' ? '' : h[1]; curLang = curFile ? importLang(curFile) : null;
-             curSrc = !!curFile && CODE_EXT_RE.test(curFile) && !TEST_FILE_RE.test(curFile); continue; }
+             curSrc = !!curFile && CODE_EXT_RE.test(curFile) && !TEST_FILE_RE.test(curFile);
+             c9St = { block: false, fence: false }; continue; }   // reset comment/fence state per file
     if (l[0] !== '+' || l.startsWith('+++') || !curFile) continue;
     if (curLang) {                                                               // Class 4 — phantom ref (import langs only)
       const m = l.match(curLang.re);
@@ -434,9 +618,22 @@ export function analyze({ claim = '', diff = '', bashCmds = [], results = [], cw
       if (m && blankStrings(l)[m.index] !== ' ' && !relImportResolves(cwd, curFile, m[1], curLang.suffixes))
         findings.push({ cls: 4, sev: 'warn', msg: `new import may not resolve: ${m[1]} (in ${curFile})` });
     }
-    if (curSrc && !sawC9 && EVALUATOR_DETECT_RE.test(l)) {                       // Class 9 — special-casing the evaluator
+    // Class 9 — special-casing the evaluator. Test the CODE portion only (strip comments/strings via
+    // splitCodeComment, state threaded per file): a COMMENT that merely MENTIONS the evaluator ("// without
+    // GROUNDTRUTH_KEY …") is documentation, not a runtime branch — matching it was the same prose-as-code FP
+    // the Class-1 quote-strip fixes (it fired on this project's own AG-A comment).
+    // splitCodeComment gives the code and (language-aware) comment portions; state threads across this src
+    // file's ADDED lines only (best-effort in diff mode — a block comment closed on an unchanged line can
+    // leave state stale, which over-classifies as comment: FP-safe, never a false branch match).
+    const { code: c9code, comment: c9comment } = curSrc && !sawC9
+      ? splitCodeComment(l.slice(1), extOf(curFile), c9St) : { code: '', comment: '' };
+    // Branch-on-evaluator: CODE portion only (a comment naming the env var is not a branch). Suppression
+    // directive (groundtruth-disable): the COMMENT portion, anchored to its start (a real directive leads the
+    // comment; prose that merely mentions the token — even "#groundtruth-ok" mid-sentence — does not).
+    const c9commentBody = (c9comment || '').replace(/^\s*(?:\/\/+|#+|--|\/\*|<!--)?\s*/, '');   // drop a leading comment-opener so the directive can anchor at start
+    if (curSrc && !sawC9 && ((c9code && EVAL_CODE_RE.test(c9code)) || EVAL_SUPPRESS_RE.test(c9commentBody))) {
       sawC9 = true;
-      findings.push({ cls: 9, sev: 'warn', msg: `non-test source branches on the evaluator/test/CI: ${l.slice(1).trim().slice(0, 60)} — confirm behavior isn't different when audited` });
+      findings.push({ cls: 9, sev: 'warn', msg: `non-test source branches on the evaluator/test/CI: ${(c9code || l.slice(1)).trim().slice(0, 60)} — confirm behavior isn't different when audited` });
     }
   }
 
@@ -1082,17 +1279,37 @@ export function refereeTamper(diff = '', commandsInvoked = new Set(), envBlock =
 // that — an HMAC keyed by env GROUNDTRUTH_KEY (out of the agent's reach, like env-block). Unsigned (no
 // key) still catches the naive case (tamper the file, leave the snapshot); signed catches both.
 // tasks.json is EXCLUDED — the hook rewrites it every turn, so its hash always changes (no false alarm).
+// AG-A (seal the auditor's own code): the RUNNING hook's code files, sealed into the same hash snapshot.
+// Resolved from `import.meta.url` (the running file's real location) as ABSOLUTE paths, NOT `join(cwd, rel)` —
+// the repo being audited is not where the plugin lives, and a repo-relative regex would false-fire in the
+// dogfooding/vendoring repo. Keyed by a synthetic `@hook/…` rel (a stable map key), read via `abs`.
+// ratifiedBy:null — nothing in-session legitimately edits the auditor (a real plugin update is out-of-session).
+// HONEST LIMIT: a TARGETED self-edit executes the already-neutered file this very turn, so in-session this is
+// NOT prevention — it inherits compareSnapshot's regime split, so WITHOUT GROUNDTRUTH_KEY (the default, incl.
+// this dev repo) a hook-code change is only a quiet INFO note, never a warn/block; it becomes a real block
+// only in the keyed/CI rung, where a pristine runner hashes the deployed hook vs the release. That is where
+// A's guarantee lives (see integrityScope). In-session value = naive/incidental edits + helper files.
+// KEYED-REGIME CEILING (rare, documented not fixed): a contributor who legitimately edits the hook (or a
+// mid-session plugin upgrade) in a session with GROUNDTRUTH_KEY set gets a held, unratifiable tamper finding
+// (block under GROUNDTRUTH_BLOCK=1) that re-fires until the session restarts. Restart re-baselines it.
+function hookCodeTargets() {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return ['groundtruth.mjs', 'symbol-integrity.mjs', 'compile-rules.mjs']
+    .map(f => ({ rel: `@hook/${f}`, abs: join(here, f), ratifiedBy: null }));
+}
 function snapshotTargets(session) {
   return [
     { rel: '.claude/groundtruth/config.json', ratifiedBy: 'groundtruth-block' },
     { rel: '.claude/groundtruth/compiled-rules.json', ratifiedBy: ['groundtruth-rules', 'groundtruth-setup'] },
     { rel: `.claude/groundtruth/${session}.baseline.json`, ratifiedBy: null },
+    ...hookCodeTargets(),
   ];
 }
 const sha16 = (s) => createHash('sha256').update(String(s)).digest('hex').slice(0, 16);
 function snapHashes(cwd, session) {
   const m = {};
-  for (const { rel } of snapshotTargets(session)) { try { m[rel] = sha16(readFileSync(join(cwd, rel), 'utf8')); } catch { m[rel] = null; } }
+  // `abs` (the hook code) reads from the plugin dir; a bare `rel` reads from the audited repo (cwd).
+  for (const { rel, abs } of snapshotTargets(session)) { try { m[rel] = sha16(readFileSync(abs || join(cwd, rel), 'utf8')); } catch { m[rel] = null; } }
   return m;
 }
 // `mark` is a transcript HIGH-WATER MARK: the COUNT of slash-command invocations recorded when this snapshot
@@ -1322,7 +1539,7 @@ export function renderCard(findings, { session = 'unknown', intent = '', blockEn
   const hasAsync = findings.some(f => f.cls === 'async_done');     // false-completion: claimed done, work unfinished
   const dot = hasBlock ? '🔴' : hasAsync ? '⏳' : (findings.length || ic.tier === 'thin') ? '🟡' : '🟢';
 
-  const isHonesty = f => [1, 2, 3, 4, 6, 9, 'async_done'].includes(f.cls);   // false-claim / stub / no-op / phantom / dangling-ref / special-casing / false-completion
+  const isHonesty = f => [1, 2, 3, 4, 6, 9, 'async_done', 'test_exclusion', 'test_weakened'].includes(f.cls);   // false-claim / stub / no-op / phantom / dangling-ref / special-casing / false-completion / test-exclusion / test-weakened
   const sortF = a => [...a].sort((x, y) => (x.sev === 'block' ? 0 : 1) - (y.sev === 'block' ? 0 : 1));
   const sub = f => `       ${SEV[f.sev]} ${CLASS_NAME[f.cls] || f.cls}${f.rule ? ` [${f.rule}]` : ''} — ${f.msg}`;
   const hon = findings.filter(isHonesty);
@@ -1411,6 +1628,62 @@ export function remediationDecision({ attempts = 0, gamed = false, cap = 2 } = {
   return { action: 'block', gamed, why: gamed ? 'a fix attempt edited the tests / this checker / the ledger — gaming does not release the block' : '', nextAttempts: attempts + 1 };
 }
 
+// Never-lost floor (Defect B): when block mode actually HALTS or RELEASES a turn, the outcome must reach
+// the user. In the VS Code extension `systemMessage` doesn't render and the corrective `reason` goes only
+// to the model, so a block/escalate can loop or release invisibly. This synthesises an outcome marker that
+// is persisted into <session>.findings.json; the NEXT turn's UserPromptSubmit banner (priorFindingsContext)
+// renders it loudly and instructs the agent to surface it. Returns null when there is nothing to report.
+// `effective` is the outcome ACTUALLY taken (a block whose attempts-file write failed degrades to escalate).
+// Pure → tested.
+export function blockOutcomeNote(effective, attempt = 1, cap = 2, gamed = false) {
+  if (effective === 'block')
+    return { cls: 'blocked', sev: 'block', msg: `your PREVIOUS turn was BLOCKED by Groundtruth (attempt ${attempt}/${cap})${gamed ? ' — a fix attempt edited the tests/checker/ledger, flagged as gaming' : ''}; the turn did not end. This CAN be a false positive — verify it against reality, then fix the code or tell the user. Do not silently retry.` };
+  if (effective === 'escalate')
+    return { cls: 'escalated', sev: 'block', msg: `your PREVIOUS turn ESCALATED — Groundtruth released the block after ${attempt} attempt${attempt === 1 ? '' : 's'}; the work PROCEEDED UNVERIFIED and needs human review. Tell the user what was flagged.` };
+  return null;
+}
+
+// Defect B step 2 — the LIVE (this-instant) surface. Pure: choose a command to pop a block/escalate
+// notice, given the outcome, the environment, the platform, and the verdict-file path. Returns {cmd,args}
+// or null. TWO hard rules: (1) the message is FIXED — never interpolate finding text (it carries
+// repo-controlled filenames/task strings, an injection vector into the referee's process); the detail lives
+// in the verdict file / the never-lost banner. (2) VS Code (incl. Remote/devcontainer, where a desktop
+// toast has no display to reach) → open the verdict file via the `code` CLI in the connected window; only a
+// local desktop falls back to a native toast. Caller spawns this DETACHED + fail-open so a missing binary or
+// a hung dialog can never stall or crash the Stop hook. Best-effort by construction — the guaranteed floor is
+// the never-lost banner; this is the in-the-moment nicety. Pure → tested.
+// Resolve an editor CLI actually on PATH (VS Code / Cursor / Insiders / VSCodium / Windsurf). This is the
+// RELIABLE VS-Code signal — env vars (TERM_PROGRAM/VSCODE_*) are set in the integrated terminal but not always
+// in the hook's process env (the earlier `code -r` never fired because env detection failed; the user got a
+// dead toast instead). Presence of the `code` CLI is a durable, inheritable signal. Cheap `which`/`where`,
+// run once per catch. Returns the bin name (spawn resolves via PATH) or null.
+export function editorCli(which = (bin) => { try { return !!execFileSync(process.platform === 'win32' ? 'where' : 'which', [bin], { stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000 }).toString().trim(); } catch { return false; } }) {
+  for (const bin of ['code', 'cursor', 'code-insiders', 'codium', 'windsurf']) if (which(bin)) return bin;
+  return null;
+}
+// The LIVE (this-instant) surface(s). Pure: given the outcome, verdict path, platform, and a resolved editor
+// bin, return the list of commands to fire. Returns an ARRAY so we do BOTH when we can: OPEN THE VERDICT in the
+// editor (the actionable thing the user's "Open" should do — a bare macOS toast only re-opens Finder) AND a
+// desktop toast as the attention-grab. Message is FIXED — never interpolate finding text (repo-controlled
+// filenames/task strings are an injection vector). Caller spawns each DETACHED + fail-open. Best-effort; the
+// guaranteed floor is the never-lost banner. Pure → tested.
+export function liveNoticeCmds(effective, mdPath = '', platform = process.platform, editorBin = null, env = {}) {
+  const title = 'Groundtruth';
+  const body = effective === 'escalate'
+    ? 'ESCALATED — block released, the work is UNVERIFIED. Review needed.'
+    : 'BLOCKED this turn — the verdict was opened; it may be a false positive.';
+  const cmds = [];
+  if (editorBin && mdPath) cmds.push({ cmd: editorBin, args: ['-g', mdPath] });   // best: editor CLI on PATH, -g opens+focuses (Remote-safe)
+  // macOS fallback when the `code` shell command isn't installed (the common case that gave the user a dead
+  // toast): open the verdict in the app that LAUNCHED the hook, by its bundle id (__CFBundleIdentifier is
+  // inherited from the GUI app). No CLI needed. Gated to editor-ish bundle ids so we never open a random app.
+  else if (platform === 'darwin' && mdPath && /vscode|vscodium|windsurf|\.code\b|sublime|jetbrains|cursor|todesktop/i.test(env.__CFBundleIdentifier || ''))
+    cmds.push({ cmd: 'open', args: ['-b', env.__CFBundleIdentifier, mdPath] });
+  if (platform === 'darwin') cmds.push({ cmd: 'osascript', args: ['-e', `display notification ${JSON.stringify(body)} with title ${JSON.stringify(title)}`] });
+  else if (platform === 'linux') cmds.push({ cmd: 'notify-send', args: [title, body] });
+  return cmds;   // empty (e.g. bare Windows, no editor CLI) → the never-lost banner still carries it next turn
+}
+
 // Per-class corrective payload (§15): name the TARGET STATE, not just "fix it".
 const FIX = {
   1: 'Run the test/build you claimed passed (do NOT edit the test to make it pass), or correct the claim.',
@@ -1466,7 +1739,20 @@ function untrackedAdded(cwd, skip = new Set()) {
 export function priorFindingsContext(findings = []) {
   const f = (findings || []).filter(x => x && (x.sev === 'warn' || x.sev === 'block'));
   if (!f.length) return '';
-  const lines = f.map(x => `  • [${x.sev}] ${CLASS_NAME[x.cls] || x.cls} — ${x.msg}`).join('\n');
+  // Never-lost floor: a block/escalate outcome marker (blockOutcomeNote) turns this from an awareness-only
+  // FYI into an ACTION-NEEDED banner — the block halted or released the PREVIOUS turn invisibly (systemMessage
+  // doesn't render in the VS Code extension), so this is the first surface that reaches the user, on their
+  // next prompt. Unlike the warn note, this one DOES tell the agent to surface it (a block is exactly when an
+  // unprompted user-facing reply is wanted). Rendered even if the outcome is the only finding.
+  const outcome = f.find(x => x.cls === 'blocked' || x.cls === 'escalated');
+  const rest = f.filter(x => x !== outcome);
+  const lines = rest.map(x => `  • [${x.sev}] ${CLASS_NAME[x.cls] || x.cls} — ${x.msg}`).join('\n');
+  if (outcome) {
+    const verb = outcome.cls === 'escalated' ? 'ESCALATED' : 'BLOCKED';
+    return `[Groundtruth — ACTION NEEDED (not awareness-only). 🔴 ${verb}: ${outcome.msg}]`
+      + (rest.length ? `\nWhat was flagged:\n${lines}` : '')
+      + `\nTell the user this happened and why; if it looks like a false positive, say so plainly. Do not bury it.`;
+  }
   return `[Groundtruth — audit of your PREVIOUS turn's diff, for awareness only; warn-level, some may be false positives (e.g. a pattern self-match). Do NOT reply to this note; act on a finding only if it's relevant to the current request, and verify it against reality first.]\n${lines}`;
 }
 
@@ -1779,6 +2065,7 @@ function main() {
   } catch { /* no baseline */ }
   const baseRef = baseline?.startRef || 'HEAD';
   let diff = git(`diff ${baseRef}`, cwd);
+  const gitOnlyDiff = diff;   // capture BEFORE the tool-ledger/untracked merge — AG-B/AG-C need real -/+ pairing
 
   let parsed = { intent: '', bashCmds: [], results: [] };
   if (payload.transcript_path) {
@@ -1808,7 +2095,7 @@ function main() {
 
   const findings = analyze({
     claim: payload.last_assistant_message || '',
-    diff: scanDiff, bashCmds: parsed.bashCmds, results: parsed.results, cwd, bgPending: parsed.bgPending,
+    diff: scanDiff, gitDiff: gitOnlyDiff, bashCmds: parsed.bashCmds, results: parsed.results, cwd, bgPending: parsed.bgPending,
   });
 
   // H2: an untracked file too large to fully scan is surfaced, never silently dropped (a secret padded
@@ -1925,19 +2212,22 @@ function main() {
   const blockEnabled = process.env.GROUNDTRUTH_BLOCK === '1' || loadGtConfig(cwd).block === true;
   const card = renderCard(findings, { session: payload.session_id || 'unknown', intent: parsed.intent, blockEnabled, baseline: baselineInfo, pendingRules: pendingApprovals(cwd), integrity: integrityScope(!!(process.env.GROUNDTRUTH_KEY || '')) });
 
+  // Hoisted so the block/escalate branch below can re-persist findings.json with the outcome marker (the
+  // never-lost floor) — dir/sid/surf must be in scope past the try.
+  const dir = join(cwd, '.claude', 'groundtruth');
+  const sid = payload.session_id || 'session';
+  const surf = projectFindings(findings);
   try {
-    const dir = join(cwd, '.claude', 'groundtruth');
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, `${payload.session_id || 'session'}.md`), card + '\n');
+    writeFileSync(join(dir, `${sid}.md`), card + '\n');
     // persist surfaceable findings so the next UserPromptSubmit (--intent) injects them into the agent's
     // context — the .md alone is read by no one in VS Code (the silent-warn gap). Overwritten every turn.
     // Inject only NON-quiet warn/block findings: nag-once means a hard task already surfaced in a prior turn
     // still shows on the card (f.quiet stays in `findings`) but is NOT re-injected into the agent's context.
-    const surf = projectFindings(findings);
-    writeFileSync(join(dir, `${payload.session_id || 'session'}.findings.json`), JSON.stringify(surf));
+    writeFileSync(join(dir, `${sid}.findings.json`), JSON.stringify(surf));
     // cumulative history — one line per turn, never overwritten (weekly harvest)
     try {
-      const rec = { ts: new Date().toISOString(), session: payload.session_id || 'session',
+      const rec = { ts: new Date().toISOString(), session: sid,
         verdict: findings.some(f => f.sev === 'block') ? 'block' : findings.length ? 'warn' : 'clean',
         findings: surf };
       writeFileSync(join(dir, 'history.jsonl'), JSON.stringify(rec) + '\n', { flag: 'a' });
@@ -1965,6 +2255,25 @@ function main() {
     const d = remediationDecision({ attempts, gamed });
     let wrote = true;
     try { writeFileSync(attemptsFile, String(d.nextAttempts)); } catch { wrote = false; }
+    // Never-lost floor: persist the EFFECTIVE outcome (a block whose counter-write failed degrades to
+    // escalate) so the next-turn banner surfaces it even if every live channel (systemMessage/reason) is
+    // dropped. Written AFTER the plain surf so the marker leads the next turn's note.
+    const effective = (d.action === 'block' && wrote) ? 'block' : 'escalate';
+    const note = blockOutcomeNote(effective, effective === 'block' ? d.nextAttempts : attempts, 2, d.gamed);
+    if (note) { try { writeFileSync(join(dir, `${sid}.findings.json`), JSON.stringify([note, ...surf])); } catch {} }
+    // Live pop — best-effort, DETACHED + fail-open. Deduped PER CATCH (fire on the first block or on escalate,
+    // not on intermediate retries) so a loop doesn't spam. Missing binary → the 'error' handler swallows it;
+    // the never-lost banner is the guarantee, this is only the in-the-moment surface.
+    // Suppress the live pop for a throwaway repo under the OS temp dir (the redteam/test harnesses, which
+    // would otherwise spray editor tabs). CI needs no gate — it has no display, so the pop fails open there.
+    // The never-lost banner still records the outcome regardless.
+    const ephemeral = dir === tmpdir() || dir.startsWith(tmpdir() + sep);   // sep guard: `/tmpfoo` must not match `/tmp`
+    if ((effective === 'escalate' || attempts === 0) && !ephemeral) {
+      try {
+        const plans = liveNoticeCmds(effective, join(dir, `${sid}.md`), process.platform, editorCli(), process.env);
+        for (const p of plans) { const ch = spawn(p.cmd, p.args, { detached: true, stdio: 'ignore' }); ch.on('error', () => {}); ch.unref(); }
+      } catch { /* never let a notice stall or crash the hook */ }
+    }
     if (d.action === 'block' && wrote) {
       out.decision = 'block';
       out.reason = (d.gamed ? '⚠ GAMING DETECTED — a fix attempt edited the tests / this checker / the ledger. The block HOLDS; it is not an escape hatch. A human must review.\n\n' : '') + renderCorrective(blockFindings, d.nextAttempts);
