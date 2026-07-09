@@ -1722,7 +1722,9 @@ const UNTRACKED_TOTAL_CAP = 128 * 1024 * 1024;    // across all untracked files.
 export function untrackedAdded(cwd, skip = new Set(), perFileCap = UNTRACKED_SCAN_CAP, totalCap = UNTRACKED_TOTAL_CAP) {
   let content = ''; const oversized = [];
   try {
-    const porcelain = execSync('git status --porcelain=v1 --untracked-files=all', { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    // maxBuffer: execSync defaults to 1 MiB stdout; a repo with >1 MiB of untracked FILENAMES would throw into
+    // the outer catch and silently skip the WHOLE untracked scan (a coverage hole). 256 MiB covers any real tree.
+    const porcelain = execSync('git status --porcelain=v1 --untracked-files=all', { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 });
     for (const ln of porcelain.split('\n').filter(Boolean)) {
       if (!ln.startsWith('??')) continue;                               // untracked only — tracked edits are in git diff
       const f = ln.slice(3).trim().replace(/^"(.*)"$/, '$1');
@@ -1731,7 +1733,9 @@ export function untrackedAdded(cwd, skip = new Set(), perFileCap = UNTRACKED_SCA
       if (content.length >= totalCap) { let sz = 0; try { sz = statSync(join(cwd, f)).size; } catch {} oversized.push(`${f}${sz ? ` (${sz} bytes)` : ''} — scan budget exhausted, review manually`); continue; }
       // Bounded partial read (open+read up to the cap) instead of readFileSync-the-whole-file: caps memory to
       // the scan window even for a multi-GB blob, so the read itself can't OOM the hook.
-      let fd; try { fd = openSync(join(cwd, f), 'r'); } catch { continue; }
+      // An UNREADABLE file (permission denied, e.g. a `chmod 000` blob) must be SURFACED, not silently skipped —
+      // else a secret can hide behind a stripped read bit. statSync only needs dir search, so size still shows.
+      let fd; try { fd = openSync(join(cwd, f), 'r'); } catch { let sz = 0; try { sz = statSync(join(cwd, f)).size; } catch {} oversized.push(`${f}${sz ? ` (${sz} bytes)` : ''} — unreadable (permission denied), review manually`); continue; }
       let size = 0, off = 0, buf;
       try {
         size = fstatSync(fd).size;

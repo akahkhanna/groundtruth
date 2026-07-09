@@ -6,7 +6,7 @@
  * Class-7 judgment is the semantic/roadmap call, not a deterministic one). assert-based, no deps.
  */
 import assert from 'node:assert';
-import { mkdtempSync, writeFileSync as fsWrite, mkdirSync as fsMkdir, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync as fsWrite, mkdirSync as fsMkdir, rmSync, existsSync, chmodSync, readFileSync as fsRead } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -1031,6 +1031,17 @@ ok('no-git: no Edit/Write calls → empty toolDiff (nothing to check)',
       oversized.some(s => /d\.txt/.test(s) && /budget exhausted/i.test(s)));
     ok('untrackedAdded: total content stays bounded by the budget (+ at most one per-file overshoot)',
       content.length <= 100 + 40 + 200 /* budget + a per-file cap + header slack */);
+    // An unreadable untracked file must be SURFACED, not silently skipped (a chmod-000 secret can't hide).
+    // Guarded: on root/CI where chmod 000 stays readable, the probe read succeeds → skip (behavior untestable there).
+    fsWrite(pathJoin(repo, 'locked.txt'), 'AKIA-would-be-secret\n');
+    let denied = false;
+    try { chmodSync(pathJoin(repo, 'locked.txt'), 0o000); fsRead(pathJoin(repo, 'locked.txt')); } catch { denied = true; }
+    if (denied) {
+      const { oversized: ov2 } = untrackedAdded(repo);   // default caps; budget not spent by one small file
+      ok('untrackedAdded: an UNREADABLE untracked file is surfaced (permission-denied secret can\'t hide silently)',
+        ov2.some(s => /locked\.txt/.test(s) && /unreadable/i.test(s)));
+    }
+    try { chmodSync(pathJoin(repo, 'locked.txt'), 0o644); } catch {}   // restore so rmSync can clean up
   } finally { try { rmSync(repo, { recursive: true, force: true }); } catch {} }
 }
 
