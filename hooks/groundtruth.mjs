@@ -25,7 +25,7 @@
  *
  * Pure `analyze()` + `parseTranscript()` are exported for groundtruth.test.mjs.
  */
-import { readFileSync, mkdirSync, writeFileSync, existsSync, readdirSync, statSync, rmSync, chmodSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync, existsSync, readdirSync, statSync, rmSync, chmodSync, openSync, readSync, fstatSync, closeSync } from 'node:fs';
 import { execSync, execFileSync, spawn } from 'node:child_process';
 import { createHash, createHmac } from 'node:crypto';
 import { join, dirname, resolve, sep } from 'node:path';
@@ -1708,7 +1708,13 @@ export function renderCorrective(blockFindings, attempts, cap = 2) {
 // spot). `git diff` ignores untracked files, and the Write/Edit tool-ledger never sees a Bash-written
 // file — so a secret in `printf > leak.js` was a 0-line diff. Disk is ground truth; read it. Skips the
 // hook's own state dir (tamper-handled), binaries, and files already in the diff (`skip`). ~free.
-const UNTRACKED_SCAN_CAP = 1_000_000;   // scan the first 1 MB of each untracked file — bounds COST, not COVERAGE
+// Scan each untracked file IN FULL up to this ceiling — a secret on the LAST line must be caught, not just
+// the first 1 MB (the old cap left a "hide the key past 1 MB" hole). 64 MB covers every realistic
+// secret-bearing file with vast margin (a .env / config / source is kilobytes; nobody keeps a credential in a
+// >64 MB text file), while bounding both READ and SCAN memory so the per-turn hook can't be hung or OOM'd by a
+// pathological blob — and Node caps a single string at ~512 MB, so a truly-unbounded whole-string scan is
+// impossible regardless. Anything larger is still SURFACED (oversized), never silently trusted. Tunable.
+const UNTRACKED_SCAN_CAP = 64 * 1024 * 1024;
 function untrackedAdded(cwd, skip = new Set()) {
   let content = ''; const oversized = [];
   try {
@@ -1717,15 +1723,24 @@ function untrackedAdded(cwd, skip = new Set()) {
       if (!ln.startsWith('??')) continue;                               // untracked only — tracked edits are in git diff
       const f = ln.slice(3).trim().replace(/^"(.*)"$/, '$1');
       if (skip.has(f) || /(^|\/)\.claude\/groundtruth\//.test(f)) continue;
-      let buf; try { buf = readFileSync(join(cwd, f)); } catch { continue; }
+      // Bounded partial read (open+read up to the cap) instead of readFileSync-the-whole-file: caps memory to
+      // the scan window even for a multi-GB blob, so the read itself can't OOM the hook.
+      let fd; try { fd = openSync(join(cwd, f), 'r'); } catch { continue; }
+      let size = 0, off = 0, buf;
+      try {
+        size = fstatSync(fd).size;
+        const want = Math.min(size, UNTRACKED_SCAN_CAP);
+        buf = Buffer.allocUnsafe(want);
+        while (off < want) { const n = readSync(fd, buf, off, want - off, off); if (n <= 0) break; off += n; }
+      } catch { try { closeSync(fd); } catch {} continue; }
+      try { closeSync(fd); } catch {}
       // H5/H6: do NOT skip a file by extension OR by a binariness heuristic — both were one-token
       // bypasses (rename to .lock; prepend one NUL). Secrets are PRINTABLE, so EXTRACT the printable runs
       // (non-printable bytes → line breaks) and scan those. A real binary just yields short runs the
       // specific secret patterns won't match; a text file with an injected NUL is fully scanned.
-      // H2: NEVER drop a file by size — scan the first 1 MB; if larger, surface it loudly (oversized).
-      const printable = buf.subarray(0, UNTRACKED_SCAN_CAP).toString('latin1').replace(/[^\x09\x0a\x0d\x20-\x7e]+/g, '\n');
+      const printable = buf.subarray(0, off).toString('latin1').replace(/[^\x09\x0a\x0d\x20-\x7e]+/g, '\n');
       if (printable.trim()) content += `\n+++ b/${f}\n` + printable.split('\n').map((l) => '+' + l).join('\n');
-      if (buf.length > UNTRACKED_SCAN_CAP) oversized.push(`${f} (${buf.length} bytes)`);
+      if (size > UNTRACKED_SCAN_CAP) oversized.push(`${f} (${size} bytes)`);   // beyond the ceiling → surfaced, never silently trusted
     }
   } catch { /* no git → skip */ }
   return { content, oversized };
