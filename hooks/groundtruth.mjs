@@ -1708,14 +1708,18 @@ export function renderCorrective(blockFindings, attempts, cap = 2) {
 // spot). `git diff` ignores untracked files, and the Write/Edit tool-ledger never sees a Bash-written
 // file — so a secret in `printf > leak.js` was a 0-line diff. Disk is ground truth; read it. Skips the
 // hook's own state dir (tamper-handled), binaries, and files already in the diff (`skip`). ~free.
-// Scan each untracked file IN FULL up to this ceiling — a secret on the LAST line must be caught, not just
-// the first 1 MB (the old cap left a "hide the key past 1 MB" hole). 64 MB covers every realistic
-// secret-bearing file with vast margin (a .env / config / source is kilobytes; nobody keeps a credential in a
-// >64 MB text file), while bounding both READ and SCAN memory so the per-turn hook can't be hung or OOM'd by a
-// pathological blob — and Node caps a single string at ~512 MB, so a truly-unbounded whole-string scan is
-// impossible regardless. Anything larger is still SURFACED (oversized), never silently trusted. Tunable.
-const UNTRACKED_SCAN_CAP = 64 * 1024 * 1024;
-function untrackedAdded(cwd, skip = new Set()) {
+// Scan each untracked file up to a PER-FILE ceiling — a secret on the LAST line must be caught, not just the
+// first 1 MB (the old cap left a "hide the key past 1 MB" hole). 64 MB covers every realistic secret-bearing
+// file (a .env / config / source is kilobytes). A TOTAL budget across ALL untracked files then bounds the
+// CONSUMER: `content` is regex-scanned as one string and Node caps a single string at ~512 MB, so WITHOUT a
+// total cap a few large un-gitignored data files would move the OOM/stall from the read to the per-turn scan
+// (or throw RangeError and, via the swallowing catch, silently skip later files — a padding bypass). Once the
+// budget is spent, remaining files are SURFACED (oversized), never silently dropped, so padding still can't buy
+// a green. Common case (little/no untracked text) stays ~free; only a big-untracked-blob repo pays the bounded
+// cost. Both caps are parameters so the self-check can drive tiny ones deterministically.
+const UNTRACKED_SCAN_CAP = 64 * 1024 * 1024;      // per file
+const UNTRACKED_TOTAL_CAP = 128 * 1024 * 1024;    // across all untracked files. Budget is checked BEFORE a read, so one file overshoots; the printable transform (`+`-prefix per line) can ~2× a file, so worst-case content ≈ total + 2×per-file = 128 + 2×64 = 256 MB — still safely < Node's ~512 MB string cap.
+export function untrackedAdded(cwd, skip = new Set(), perFileCap = UNTRACKED_SCAN_CAP, totalCap = UNTRACKED_TOTAL_CAP) {
   let content = ''; const oversized = [];
   try {
     const porcelain = execSync('git status --porcelain=v1 --untracked-files=all', { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
@@ -1723,13 +1727,15 @@ function untrackedAdded(cwd, skip = new Set()) {
       if (!ln.startsWith('??')) continue;                               // untracked only — tracked edits are in git diff
       const f = ln.slice(3).trim().replace(/^"(.*)"$/, '$1');
       if (skip.has(f) || /(^|\/)\.claude\/groundtruth\//.test(f)) continue;
+      // Total budget spent → surface the rest WITHOUT reading (bounds consumer memory/time; never silent).
+      if (content.length >= totalCap) { let sz = 0; try { sz = statSync(join(cwd, f)).size; } catch {} oversized.push(`${f}${sz ? ` (${sz} bytes)` : ''} — scan budget exhausted, review manually`); continue; }
       // Bounded partial read (open+read up to the cap) instead of readFileSync-the-whole-file: caps memory to
       // the scan window even for a multi-GB blob, so the read itself can't OOM the hook.
       let fd; try { fd = openSync(join(cwd, f), 'r'); } catch { continue; }
       let size = 0, off = 0, buf;
       try {
         size = fstatSync(fd).size;
-        const want = Math.min(size, UNTRACKED_SCAN_CAP);
+        const want = Math.min(size, perFileCap);
         buf = Buffer.allocUnsafe(want);
         while (off < want) { const n = readSync(fd, buf, off, want - off, off); if (n <= 0) break; off += n; }
       } catch { try { closeSync(fd); } catch {} continue; }
@@ -1740,7 +1746,7 @@ function untrackedAdded(cwd, skip = new Set()) {
       // specific secret patterns won't match; a text file with an injected NUL is fully scanned.
       const printable = buf.subarray(0, off).toString('latin1').replace(/[^\x09\x0a\x0d\x20-\x7e]+/g, '\n');
       if (printable.trim()) content += `\n+++ b/${f}\n` + printable.split('\n').map((l) => '+' + l).join('\n');
-      if (size > UNTRACKED_SCAN_CAP) oversized.push(`${f} (${size} bytes)`);   // beyond the ceiling → surfaced, never silently trusted
+      if (size > off) oversized.push(`${f} (${size} bytes) — only the first ${Math.floor(perFileCap / (1024 * 1024))} MB scanned, review the remainder`);   // truncated at the per-file cap → surfaced, never silently trusted
     }
   } catch { /* no git → skip */ }
   return { content, oversized };
@@ -2118,7 +2124,7 @@ function main() {
   // key is reserved for genuine compiled-rule ids (the card prints [id] + a `/groundtruth-rules unarm <id>`
   // hint from it), and this built-in coverage-gap isn't unarmable via that command.
   for (const f of ut.oversized) findings.push({ cls: 'R', sev: 'warn',
-    msg: `untracked file too large to fully scan for secrets — ${f}; scanned first ${UNTRACKED_SCAN_CAP / 1e6} MB only, review the remainder` });
+    msg: `untracked file not fully secret-scanned — ${f}` });   // `f` carries the reason (per-file cap hit, or total budget exhausted)
 
   // §10: also evaluate the deterministic rules compiled from this repo's own docs (CLAUDE.md/skills).
   findings.push(...runCompiledRules(scanDiff, loadCompiledRules(cwd)));

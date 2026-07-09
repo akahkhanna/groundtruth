@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { analyze, stripQuotedForClaim, claimsSuccess, testExclusionFindings, testWeakeningFindings, parseTranscript, scanContent, attributeDebt, runCompiledRules, compileRuleRe, intentConfidence, renderCard, shouldAskStar, projectFindings, advanceSnapshot, freshRatifiers, remediationDecision, renderCorrective, blockOutcomeNote, liveNoticeCmds, editorCli, openLoops, runProcedures, envFindings, updateTaskLedger, loadGtConfig, pendingApprovals, applyConfirmedDeferrals, humanDeferrals, taskId, refereeTamper, compareSnapshot, integrityScope, GAMED_FILE_RE, priorFindingsContext, sessionHasCommit, proposedStale, isTrackableRequest, isSecret, excludedScanPath, dropExcludedFiles, classifyDeliverables, surfaceOpenLoop, preCommitHookScript, parseDiffRange } from './groundtruth.mjs';
+import { analyze, stripQuotedForClaim, claimsSuccess, testExclusionFindings, testWeakeningFindings, untrackedAdded, parseTranscript, scanContent, attributeDebt, runCompiledRules, compileRuleRe, intentConfidence, renderCard, shouldAskStar, projectFindings, advanceSnapshot, freshRatifiers, remediationDecision, renderCorrective, blockOutcomeNote, liveNoticeCmds, editorCli, openLoops, runProcedures, envFindings, updateTaskLedger, loadGtConfig, pendingApprovals, applyConfirmedDeferrals, humanDeferrals, taskId, refereeTamper, compareSnapshot, integrityScope, GAMED_FILE_RE, priorFindingsContext, sessionHasCommit, proposedStale, isTrackableRequest, isSecret, excludedScanPath, dropExcludedFiles, classifyDeliverables, surfaceOpenLoop, preCommitHookScript, parseDiffRange } from './groundtruth.mjs';
 import { parseCorrectivePairs, parseForbidTokens, isArmableToken, extractCandidates, compile, repoSourceExts } from './compile-rules.mjs';
 import { checkDroppedSymbols, collectDefs } from './symbol-integrity.mjs';
 
@@ -1007,6 +1007,30 @@ ok('no-git: no Edit/Write calls → empty toolDiff (nothing to check)',
     const mapRule = compile(repo).find(c => /\\bmap\\b/.test(c.line_re));
     ok('grounding (REAL git grep -P): a forbidden token present in code grounds as "review", not "armable"',
       !!mapRule && mapRule.status === 'review' && mapRule.hits >= 1);
+  } finally { try { rmSync(repo, { recursive: true, force: true }); } catch {} }
+}
+
+// ── untrackedAdded: full scan up to a per-file cap + a TOTAL budget that surfaces (never drops) the rest ──
+{
+  let repo;
+  try { repo = mkdtempSync(pathJoin(tmpdir(), 'gt-untracked-')); }
+  catch { repo = mkdtempSync(pathJoin(process.cwd(), '.gt-untracked-')); }
+  try {
+    const git = (args) => execFileSync('git', args, { cwd: repo, stdio: ['ignore', 'pipe', 'ignore'] });
+    git(['init', '-q']); git(['config', 'user.email', 't@t']); git(['config', 'user.name', 't']);
+    fsWrite(pathJoin(repo, 'a.txt'), 'KEEPME-small\n');           // within per-file cap → fully scanned
+    fsWrite(pathJoin(repo, 'b.txt'), 'x'.repeat(500));            // over per-file cap → truncated + surfaced
+    fsWrite(pathJoin(repo, 'c.txt'), 'y'.repeat(500));            // pushes content past the total budget
+    fsWrite(pathJoin(repo, 'd.txt'), 'z'.repeat(500));            // budget already spent → surfaced without reading
+    const { content, oversized } = untrackedAdded(repo, new Set(), /*perFileCap*/ 40, /*totalCap*/ 100);
+    ok('untrackedAdded: a file within the per-file cap is fully scanned (its content reaches the scanner)',
+      content.includes('a.txt') && content.includes('KEEPME-small'));
+    ok('untrackedAdded: a file over the per-file cap is TRUNCATED but SURFACED (oversized), never silently dropped',
+      oversized.some(s => /b\.txt/.test(s) && /only the first/i.test(s)));
+    ok('untrackedAdded: once the TOTAL budget is spent, remaining files are SURFACED as budget-exhausted (bounds the consumer; padding still cannot buy a green)',
+      oversized.some(s => /d\.txt/.test(s) && /budget exhausted/i.test(s)));
+    ok('untrackedAdded: total content stays bounded by the budget (+ at most one per-file overshoot)',
+      content.length <= 100 + 40 + 200 /* budget + a per-file cap + header slack */);
   } finally { try { rmSync(repo, { recursive: true, force: true }); } catch {} }
 }
 
