@@ -390,6 +390,12 @@ ok('C1 fires: AWS key hardcoded in added code',
   has(analyze({ diff: '+++ b/config.js\n+const k = "' + awsKey + '";' }), 'C1'));
 ok('C1 silent: same key only on a REMOVED line (not added)',
   !has(analyze({ diff: '+++ b/config.js\n-const k = "' + awsKey + '";' }), 'C1'));
+// Enforcement-boundary invariant: analyze() has NO path filter — a secret in a tmp/ (excludedScanPath) file
+// is STILL flagged. The Stop path suppresses tmp/ noise upstream via dropExcludedFiles, but pre-commit/CI
+// (`--pre-commit`, `--diff-range`) pass the RAW diff to analyze, so a committed tmp/ secret still blocks.
+// Guards against a future refactor "unifying" the exclusion INTO analyze — which would go dark at the merge gate.
+ok('C1 fires on a tmp/ path too — analyze has no path filter (committed tmp/ secret still blocks at pre-commit/CI)',
+  has(analyze({ diff: '+++ b/tmp/leak.env\n+const k = "' + awsKey + '";' }), 'C1'));
 const pem = '-----BEGIN ' + 'RSA' + ' PRIVATE KEY-----';
 ok('C2 fires: private key header in added code',
   has(analyze({ diff: '+++ b/id_rsa\n+' + pem }), 'C2'));
@@ -1031,6 +1037,14 @@ ok('no-git: no Edit/Write calls → empty toolDiff (nothing to check)',
       oversized.some(s => /d\.txt/.test(s) && /budget exhausted/i.test(s)));
     ok('untrackedAdded: total content stays bounded by the budget (+ at most one per-file overshoot)',
       content.length <= 100 + 40 + 200 /* budget + a per-file cap + header slack */);
+    // Regression: a throwaway tmp/ blob is not a deliverable → neither secret-SCANNED nor surfaced as
+    // `oversized`. Before the excludedScanPath skip, an oversized tmp/ file leaked an `oversized` entry
+    // and fired the "too large to scan" warn every single turn (real hindsight-session noise).
+    fsMkdir(pathJoin(repo, 'tmp'), { recursive: true });
+    fsWrite(pathJoin(repo, 'tmp', 'big.json'), 'q'.repeat(500));   // oversized AND in a throwaway dir
+    const tmpScan = untrackedAdded(repo, new Set(), /*perFileCap*/ 40, /*totalCap*/ 100);
+    ok('untrackedAdded: a throwaway tmp/ file is neither scanned nor surfaced (no every-turn oversized noise)',
+      !tmpScan.content.includes('tmp/big.json') && !tmpScan.oversized.some(s => /tmp\/big\.json/.test(s)));
     // An unreadable untracked file must be SURFACED, not silently skipped (a chmod-000 secret can't hide).
     // Guarded: on root/CI where chmod 000 stays readable, the probe read succeeds → skip (behavior untestable there).
     fsWrite(pathJoin(repo, 'locked.txt'), 'AKIA-would-be-secret\n');

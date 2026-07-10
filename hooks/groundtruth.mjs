@@ -1728,7 +1728,11 @@ export function untrackedAdded(cwd, skip = new Set(), perFileCap = UNTRACKED_SCA
     for (const ln of porcelain.split('\n').filter(Boolean)) {
       if (!ln.startsWith('??')) continue;                               // untracked only — tracked edits are in git diff
       const f = ln.slice(3).trim().replace(/^"(.*)"$/, '$1');
-      if (skip.has(f) || /(^|\/)\.claude\/groundtruth\//.test(f)) continue;
+      // Skip throwaway paths (tmp/scratch/absolute/../ + GT's own state) at the SOURCE, not just via the
+      // downstream dropExcludedFiles content filter: a tmp/ blob is not a deliverable, so it must be neither
+      // secret-SCANNED nor surfaced as `oversized`. Before this, an oversized tmp/ file (dropped from `content`)
+      // still leaked its `oversized` entry into findings and fired the "too large to scan" warn every turn.
+      if (skip.has(f) || excludedScanPath(f)) continue;
       // Total budget spent → surface the rest WITHOUT reading (bounds consumer memory/time; never silent).
       if (content.length >= totalCap) { let sz = 0; try { sz = statSync(join(cwd, f)).size; } catch {} oversized.push(`${f}${sz ? ` (${sz} bytes)` : ''} — scan budget exhausted, review manually`); continue; }
       // Bounded partial read (open+read up to the cap) instead of readFileSync-the-whole-file: caps memory to

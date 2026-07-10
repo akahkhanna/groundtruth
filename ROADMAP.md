@@ -53,7 +53,7 @@ Tracks `groundtruth-architecture.md` **v0.4**. What's built, and what's left to 
   `.attempts` state file; regression-tested.
 - WARN default / BLOCK opt-in (`GROUNDTRUTH_BLOCK=1`); verdict card → `.claude/groundtruth/<session>.md`.
 - Repo-agnostic rule auto-discovery + the **`groundtruth.rules` pointer** (`.claude/groundtruth.json` `rules`).
-- Plugin packaging; no-dep self-check (`hooks/groundtruth.test.mjs`, 495 checks).
+- Plugin packaging; no-dep self-check (`hooks/groundtruth.test.mjs`, 502 checks).
 - **Block visibility + test-gaming detectors (v1.0.0)** — the block/escalate outcome is stamped into
   `findings.json` and re-surfaced as a loud next-prompt banner (never silently lost), plus a best-effort
   live editor-open (`code -g` / macOS `open -b`) + toast. New warn-only anti-gaming classes: **test
