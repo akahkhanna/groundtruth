@@ -1090,6 +1090,18 @@ function pasteStripped(askText) {
   return String(askText)
     .replace(/```[\s\S]*?```/g, ' ')                 // fenced code blocks
     .replace(/^\s*>.*$/gm, ' ')                       // quoted pasted lines
+    // UNFENCED tool-output / status listings — the way people actually paste (an MCP server list, a CLI
+    // table, Claude Code's own ⏺/⎿ output, a vitest ❯ line). These carry structural glyphs no human writes
+    // in a prose request, and they routinely NAME config files (`.mcp.json`, `package.json`) that the ledger
+    // then minted as HARD deliverables — a phantom task that can never close and ESCALATES TO BLOCK.
+    // Stripping the line makes its tokens paste-refs → soft (surfaced once, auto-expires, never blocks, still
+    // grounds to done) per the demote-never-drop invariant. Real session FP: an MCP listing became task [tjqyi].
+    // Whole-line strip is required, not glyph-onward: the motivating listing has `❯` MID-line, so anchoring
+    // would leave `.mcp.json` HARD and un-fix the bug. Deliberately EXCLUDES ▶/► — the only glyphs here a
+    // human writes in prose (`refactor parser.js ▶ tokenizer.js`), which they'd wrongly demote (Fable).
+    // Accepted trade: an imperative sharing a line with a TOOL glyph demotes to soft; restating it on a
+    // glyph-free line keeps it HARD. Known-narrow: glyph-less pastes (plain `ls`, ASCII `|` tables) still mint.
+    .replace(/^.*[❯⎿⏺│├└┌┐┘┴┬┼═║╔╗╚╝].*$/gm, ' ')
     .replace(/[\w./-]+\.\w+:\d+/g, ' ');              // stack-trace file:line refs
 }
 

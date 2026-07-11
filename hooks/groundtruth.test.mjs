@@ -1374,6 +1374,28 @@ ok('paste-provenance (fence): a token only inside a ``` fence is a reference (SO
   (() => { const c = classifyDeliverables('why does this crash?\n```\nconst x = doTheThing(payload)\n```'); return c.soft.includes('doTheThing') && !c.hard.includes('doTheThing'); })());
 ok('paste-provenance (stack-trace): a filename only in a `file.js:line` ref is SOFT, a requested symbol stays HARD',
   (() => { const c = classifyDeliverables('the error at stackFrame.js:42 — add a guardClause'); return c.soft.includes('stackFrame.js') && c.hard.includes('guardClause'); })());
+// UNFENCED tool-output paste (real FP, hindsight task [tjqyi]): an MCP-server listing pasted raw NAMES
+// .mcp.json / claude.json; the ledger minted them HARD → a phantom task that can never close → ESCALATES
+// TO BLOCK. Structural glyphs (❯ ⎿ ⏺ │ ├ └ …) mark a line as tool output, so its tokens are paste-refs → SOFT.
+ok('paste-provenance (UNFENCED tool output): an MCP listing naming .mcp.json is SOFT, never a HARD open loop',
+  (() => { const c = classifyDeliverables('Project MCPs (/Users/x/hindsight-vercel/.mcp.json) ❯ supabase · ✔ connected · playwright · ✔ connected'); return c.soft.includes('mcp.json') && !c.hard.includes('mcp.json'); })());
+ok('paste-provenance (UNFENCED): Claude Code ⏺/⎿ tool output naming a file is SOFT, not a deliverable',
+  (() => { const c = classifyDeliverables('⏺ Read(config.json)\n  ⎿  read 42 lines from settings.json'); return !c.hard.includes('config.json') && !c.hard.includes('settings.json'); })());
+ok('paste-provenance: a REAL ask is unaffected by the glyph strip — still HARD',
+  classifyDeliverables('add a retry helper to upload.js').hard.includes('upload.js'));
+ok('paste-provenance: a real ask ALONGSIDE a pasted tool-output line still tracks its own deliverable HARD',
+  (() => { const c = classifyDeliverables('⏺ Bash(npm test) ⎿ ok\nnow add a retry helper to upload.js'); return c.hard.includes('upload.js'); })());
+// The "imperative + glyph on ONE line" shape (Fable). ▶/► are EXCLUDED from the strip precisely because a
+// human writes them in prose — this ask must stay HARD, or the fix would eat a real deliverable.
+ok('paste-provenance: a prose arrow ("refactor parser.js ▶ tokenizer.js") is NOT a paste — stays HARD',
+  (() => { const c = classifyDeliverables('refactor parser.js ▶ tokenizer.js'); return c.hard.includes('parser.js') && c.hard.includes('tokenizer.js'); })());
+// The ACCEPTED trade, pinned: an imperative sharing a line with a TOOL glyph (vitest prints ❯) demotes to
+// SOFT — surfaced once, never blocks, still grounds to done. It is NOT dropped, and restating it on a
+// glyph-free line restores HARD. This is the deliberate cost of killing the phantom block-wedge.
+ok('paste-provenance: imperative on a TOOL-glyph line demotes to SOFT (not dropped) — the accepted trade',
+  (() => { const c = classifyDeliverables('vitest says ❯ upload.test.js FAIL — fix the null deref in upload.js'); return c.soft.includes('upload.js') && !c.hard.includes('upload.js'); })());
+ok('paste-provenance: restating that ask on a glyph-free line restores it to HARD (the recovery path)',
+  (() => { const c = classifyDeliverables('vitest says ❯ upload.test.js FAIL\nfix the null deref in upload.js'); return c.hard.includes('upload.js'); })());
 // M1 regression: polite/omitted imperatives are real requests (HARD), not demoted questions.
 ok('M1: "could you move gameState into state.js?" is a HARD request (not a demoted question)',
   classifyDeliverables('could you move gameState into state.js?').hard.includes('state.js'));
