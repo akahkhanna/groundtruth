@@ -434,8 +434,11 @@ export function testWeakeningFindings(claim = '', diff = '') {
 /**
  * Pure deterministic Tier-1 analysis. Returns findings[].
  * ctx: { claim, diff, bashCmds:[cmd], results:[{is_error, text}], cwd }
+ * OPTIONAL (v1.1.0, transcript-only): bashEvents:[{cmd,seq,background,is_error,text}] (paired+ordered Bash),
+ * mutations:[{path,seq,text}] (ordered Edit/Write ledger). When absent (pre-commit, --diff-range, any legacy
+ * caller) the checks that need them ABSTAIN — they never fire and never bless on missing data.
  */
-export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], results = [], cwd = process.cwd(), bgPending = false }) {
+export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], results = [], cwd = process.cwd(), bgPending = false, bashEvents = null, mutations = null }) {
   const findings = [];
   // AG-B/AG-C need REAL -/+ pairing, which only the git diff has. `diff` here is the WIDER scanDiff (git +
   // the Edit/Write tool-ledger + untracked content); the ledger replays a file's unchanged CONTEXT lines as
@@ -475,16 +478,56 @@ export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], 
   // a match wholly inside an inline `code` span is quoted prose and excused (a straddling one still fires).
   const { scan: claimScan, inlineSpans } = stripQuotedForClaim(claim);
   const insideInline = (m) => inlineSpans.some(([a, b]) => m.index >= a && m.index + m[0].length <= b);
-  let _passClaim = null;
+  //   (d) "pass" as a NOUN — a STAGE, not the verb. The keyword→verb gap (`[^.!?\n]*`) spans a whole noun
+  //       phrase, so "then build the FIX pass" / "build the **CONFIRM pass**" read as "the build passes"
+  //       and flag a turn that merely ANNOUNCED a plan. Live FP, found by replaying 10 days of real
+  //       sessions: it fired on a hindsight turn at BLOCK severity (pre-demotion) for describing a
+  //       validation stage. Tell: a bare `pass` headed by a determiner (+ optional modifier) — "a pass",
+  //       "the FIX pass", "a second pass". Only the BARE form is ambiguous; the inflected verbs
+  //       (passes/passed) and green/verified/succeeded are unambiguous and untouched. A real SUBJECT
+  //       before it ("the tests pass", "all tests pass") is not a determiner, so a true claim still fires.
+  //       Because `[^.!?\n]*` is GREEDY, m[2] is the LAST verb in the sentence — so a first-draft guard
+  //       that only inspected m[2] excused "Tests pass after the second pass" / "build is green after one
+  //       pass" wholesale: a trailing noun-`pass` silenced a REAL leading claim (verified FN — a one-noun
+  //       suffix would launder any green claim). Walk EVERY verb occurrence in the span instead; the match
+  //       is excused only if NO occurrence is a credible verb.
+  //   (e) gap bound — a keyword and a verb 18 words apart are clause GLUE, not one claim: live replay FP
+  //       "…no named file/test, so the auditor had no explicit deliverable list to tick off (… the fix was
+  //       verified …)" married "test" to "verified" across three clauses. Real claims are short ("all 502
+  //       unit checks pass" is a 4-word gap); past MAX_GAP words the check ABSTAINS (warn-tier heuristic —
+  //       abstention outside the provable scope is the charter, a distant FN is the accepted cost).
+  const NP_SUBJECT = /^(?:tests?|builds?|lints?|checks?|suites?|specs?|typecheck|type-check|they|it|all|everything|both|these|those|ci|runs?)$/i;
+  const NP_DET = /^(?:the|a|an|another|this|that|each|every|first|second|third|next|final|one|our|my|its|their)$/i;
+  const VERB_OCC = new RegExp(String.raw`\b` + VERB + String.raw`\b`, 'gi');
+  // Tuned against BOTH directions, not guessed: the live glue FP spans 18 words, while a real claim ("the
+  // tests I added for the new billing and invoicing modules now all pass") spans 11 — so 8 silently ATE that
+  // real claim (an FN: abstain = clean green). 12 sits between the two and is the only band verified to hold
+  // every case in the regression set; ≥18 lets the glue FP back in.
+  const MAX_GAP = 12;
+  const noCredibleVerb = (m) => {                                    // true → abstain (noun-only or out-of-range span)
+    for (const v of m[0].matchAll(VERB_OCC)) {
+      const toks = m[0].slice(0, v.index).match(/[\w-]+/g) || [];    // keyword + everything before THIS occurrence
+      if (toks.length - 1 > MAX_GAP) break;                          // (e) this and all later occurrences are too far
+      if (!/^pass$/i.test(v[0])) return false;                       // inflected/other verb forms are unambiguous
+      const last = toks[toks.length - 1], prev = toks[toks.length - 2];
+      if (!last || NP_SUBJECT.test(last)) return false;              // "tests pass" — a subject, so `pass` is the verb
+      if (!(NP_DET.test(last) || (!!prev && NP_DET.test(prev)))) return false;   // not "a pass" / "the FIX pass" → treat as verb
+    }
+    return true;                                                     // every in-range occurrence is a determiner-headed noun
+  };
+  // ponytail: known ceiling — a DET inside a PP modifying a real subject ("tests on this branch pass") is
+  // surface-identical to a noun stage ("lint in a final pass") and abstains; needs a parser to do better.
+  let _passClaim = null, _passSentence = '';
   for (const m of claimScan.matchAll(/\b(tests?|build|lint|typecheck|type-check)\b[^.!?\n]*\b(pass(?:e[ds])?|green|succeed(?:ed)?|verified|all clean)\b/gi)) {
     if (quotedPattern.test(m[0])) continue;                          // a quoted pattern, not a claim
     if (insideInline(m)) continue;                                   // wholly inside a `code` span → quoted prose
+    if (noCredibleVerb(m)) continue;                                 // "the FIX pass" — a stage, not a verdict — or clause glue
     const before = claimScan.slice(0, m.index);
     const sentBefore = before.slice(before.search(/[^.!?\n]*$/));    // the claim's sentence, up to the claim
     const after = claimScan.slice(m.index);
     const sentence = sentBefore + after.slice(0, (after.search(/[.!?\n]/) + 1) || after.length);
     if (nearModalOrNeg.test(sentence) || counterfactual.test(sentBefore) || reportedSpeech.test(sentence)) continue;   // hedged / negated / counterfactual / reported speech
-    _passClaim = m; break;                                           // first surviving real claim
+    _passClaim = m; _passSentence = sentence; break;                 // first surviving real claim (+ its sentence, for the universality gate below)
   }
   if (_passClaim) {
     const ev = ` ("${claim.slice(_passClaim.index, _passClaim.index + _passClaim[0].length).trim().slice(0, 60)}")`;   // slice the ORIGINAL (offsets align) so evidence has no blanking artifacts
@@ -500,7 +543,12 @@ export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], 
     // `./node_modules/.bin/tsc`, `FOO=1 tsc`), while `tsc(?=\s|$)` keeps `node tsc-x.test.mjs` (tsc in a
     // filename) and `npm test && tsc` (a real run in the same string) from being mistaken for a bare check.
     const WEAK_CHECK_RE = /^\s*(?:\w+=\S+\s+)*(?:(?:npx|bunx|pnpm exec|pnpm dlx|yarn)\s+)?(?:\S*\/)?(?:node --check|node\s+-e\b|tsc(?=\s|$)|deno check|cargo check|go vet|py_compile|ruby -c\b)/;
-    const weakOnly = c => { const ts = c.split(/&&|\|\|?|;/).filter(s => TEST_BUILD_RE.test(s)); return ts.length > 0 && ts.every(s => WEAK_CHECK_RE.test(s)); };
+    // `\n` is a shell separator too: agents routinely write ONE Bash call as several lines
+    // ("npm test\ngit commit -m x"). Without `\n` in the split, the whole call read as ONE segment, so a
+    // failed COMMIT on line 2 was attributed to the green test on line 1 (verified exit-check FP), and
+    // "tsc\nnpm test" read as a bare typecheck (a weakOnly FP the same split fixes).
+    const SHELL_SEG_RE = /&&|\|\|?|;|\n/;
+    const weakOnly = c => { const ts = c.split(SHELL_SEG_RE).filter(s => TEST_BUILD_RE.test(s)); return ts.length > 0 && ts.every(s => WEAK_CHECK_RE.test(s)); };
     const onlyWeak = ran && testHits.every(weakOnly);
     // A claim that itself DISCLOSES a partial/known failure — "15/16 pass", "1 failing", "team-mode is a
     // pre-existing failure I disclosed" — is honest reporting, not an overclaim. The `failed` branch below is
@@ -521,6 +569,178 @@ export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], 
       /\bpre[-\s]?existing\b|\bknown\b|\baside from\b|\bother than\b|\bunrelated\b|\bnot (?:caused|introduced) by\b/i.test(s)
       && /\bfail\w*|\bflaky\b|\bbroken\b/i.test(s));
     const disclosesFailure = partialPass || countFail || markerFail;   // NOTE (documented ceiling): magnitude isn't cross-checked, so "18/20 pass" over 10 real fails still suppresses — warn-tier only.
+    // ── Artifact-grounded Class-1 evidence (v1.1.0): exit status · ordering · filtered runs ──
+    // These ground on the TRANSCRIPT's paired/ordered record (bashEvents/mutations) — an input the agent
+    // can't author — unlike the prose sensors above. They are STILL warn, not block: each fires only under
+    // _passClaim, a prose-parsed natural-language trigger, and a conjunction's severity is bounded by its
+    // weakest conjunct (the exact rule that demoted the !ran branch after its live block-loop FP). The
+    // artifact strengthens the EVIDENCE side; the TRIGGER stays prose. CI is where this class earns block.
+    // ABSTAIN contract: bashEvents/mutations are optional — null on --pre-commit / --diff-range and on any
+    // caller predating them (all legacy tests). With no paired/ordered data these emit NOTHING and bless
+    // nothing; the flat-array sensors keep their old coverage unchanged.
+    const events = Array.isArray(bashEvents) ? bashEvents : [];
+    // FAMILY FENCE (adversarial-review fix): TEST_BUILD_RE spans tests+build+lint+typecheck as ONE family —
+    // a breadth the legacy sensors (ran/onlyWeak/failed) deliberately share and KEEP (changing them would
+    // drift legacy verdicts). The artifact-grounded checks must not inherit it: a TRUE "the tests pass" was
+    // warned NON-ZERO because `npm run lint` exited 1 AFTER the green `npm test` (verified FP — a lint
+    // failure falsifies nothing about tests), and inversely a green `npm run lint` run after the last edit
+    // "refreshed" a stale test green (verified laundering FN — any cheap green family member washed the
+    // stale check dark). LINT is the one member whose outcome is independent of tests/build/typecheck in
+    // both directions, so it alone is fenced: under a lint claim only lint segments count; under any other
+    // noun, lint segments don't. Build/typecheck failures stay relevant to a tests claim ON PURPOSE — code
+    // that doesn't compile can't honestly be "tests pass" — matching the legacy sensors' breadth.
+    const LINT_SEG_RE = /\b(?:lint|eslint|stylelint|prettier|ruff|flake8|pylint|rubocop|clippy|golangci|vet)\b/i;
+    const claimIsLint = /^lint$/i.test(_passClaim[1]);
+    const famOK = (seg) => claimIsLint ? LINT_SEG_RE.test(seg) : !LINT_SEG_RE.test(seg);
+    // COMMAND-POSITION anchor (adversarial-review fix, v1.1.1): TEST_BUILD_RE is a \b-substring by design —
+    // the legacy ran/failed sensors want that breadth in the BLESS direction, and it stays there. But the
+    // artifact checks CONDEMN and ORDER on family membership, and a substring hit inside an ARGUMENT made a
+    // non-run "family": `grep vitest package.json` exiting 1 (no match) after a genuine green read as a
+    // FAILED test run (verified FP), and the same grep run AFTER the last edit refreshed lastTestSeq and
+    // washed a stale green dark (verified laundering FN — any argument mentioning a runner re-blessed the
+    // green). Family here therefore requires the runner in COMMAND position: optional subshell paren /
+    // env-var prefixes / npx-style wrappers / a path prefix — the same prefix idiom WEAK_CHECK_RE uses —
+    // then the family command itself.
+    const FAM_CMD_RE = new RegExp(String.raw`^[\s({!]*(?:\w+=\S+\s+)*(?:(?:npx|bunx|pnpm exec|pnpm dlx|yarn)\s+)?(?:\S*/)?(?:` + TEST_BUILD_RE.source + ')');
+    const famSegs = (c) => String(c).split(SHELL_SEG_RE).filter(s => FAM_CMD_RE.test(s) && famOK(s));
+    const testEvents = events.filter(x => famSegs(x.cmd).length > 0);
+    // (1) EXIT STATUS — the confirmed hole: `npm test` → exit 1 whose output carries NO string TEST_FAIL_RE
+    // recognizes ("Killed" from the OOM killer, a bare "command failed with exit code 1") was blessed green.
+    // The harness records is_error on the PAIRED result; a non-zero exit on the LAST completed run contradicts
+    // a pass claim regardless of stdout. Scope guards (each a real FP class, not caution theater):
+    //   • LAST completed run only — red → fix → re-run green is the normal flow and must stay silent;
+    //   • a harness ABORT (user interrupt / permission rejection / timeout) is not a test failure — the run
+    //     never finished, so it neither backs nor contradicts the claim → treated as no-result (abstain);
+    //   • exit ATTRIBUTABLE: in `npm test && git commit`, the recorded exit is the last segment's — a failed
+    //     commit after green tests must not read as failed tests. Attribute only when the FINAL shell segment
+    //     is itself the test/build invocation;
+    //   • background runs excluded — their result lands out of order.
+    const HARNESS_ABORT_RE = /\[Request interrupted|doesn'?t want to proceed|Command timed out after/i;
+    const completedRuns = testEvents.filter(x => !x.background && x.is_error !== null && !HARNESS_ABORT_RE.test(x.text));
+    const lastRun = completedRuns.length ? completedRuns[completedRuns.length - 1] : null;
+    // CONNECTOR-AWARE exit attribution (v1.1.1) — the old "final shell segment must be the test" rule was
+    // wrong in BOTH directions: `npm test && echo ok` crashing read as unattributable (last seg = echo) and
+    // the red was LAUNDERED silent behind a decorative suffix (verified FN), while `cd frontend && npm test`
+    // failing read as failed TESTS when the `cd` was what failed — the test never ran (verified FP). The
+    // exact rule, connector by connector:
+    //   (1) any `||` anywhere → NULL: masking semantics — the recorded exit can't indict the test;
+    //   (2) statements (split on `;`/newline/lone-`&`) own their exits SEPARATELY, and the recorded exit is
+    //       the LAST statement's — an in-family run in an EARLIER statement is exit-NULL (its own exit was
+    //       discarded: "npm test\ngit commit" — the failed commit is not a failed test, the multi-line FP);
+    //   (3) within the last statement's `&&`-chain / pipeline: attributable iff ≥1 segment is in-family AND
+    //       every other segment is INFALLIBLE — an allowlist of exactly `echo` / `true` / `:` (commands that
+    //       can't plausibly own a non-zero exit). `cd` is deliberately NOT on it (fails on a missing dir —
+    //       the frontend FP above), nor is `tee` (a pipe stage can own the pipeline exit under pipefail).
+    // A NULL run abstains in BOTH directions (mirror of the unpairedFg pattern): it neither fires NOR serves
+    // as the green "last run" — and because lastRun deliberately KEEPS null runs (filtering them out would
+    // resurrect an earlier attributable red as the run of record), `npm test || true` after a red can't
+    // launder the red into a bless, and the earlier red can't fire either (the masked re-run may genuinely
+    // have been green — condemning past it would be deciding on missing data).
+    // Adversarial-review tighten (v1.1.1): `echo` IS fallible when it carries a redirection —
+    // `npm test && echo done > /bad/path` records the echo's exit-1 over green tests (verified FP) — so any
+    // `<`/`>` in the segment drops it off the allowlist (end-anchored now, so args are inspected). Command
+    // substitution stays allowed: `echo $(x)` discards the substitution's exit and still exits 0.
+    const INFALLIBLE_SEG_RE = /^\s*(?:echo\b[^<>]*|true\s*|:\s*)$/;
+    const inFam = (seg) => FAM_CMD_RE.test(seg) && famOK(seg);
+    const exitAttributable = (x) => {
+      const cmd = String(x.cmd);
+      if (cmd.includes('||')) return false;                                                 // (1) masked → NULL
+      // Statement separators: `;`, newline, AND a lone `&` — `a & b` backgrounds a, so the compound's exit
+      // is b's, exactly like `a; b` (verified FP: `npm test & git push` attributed the push's exit-1 to the
+      // test). The lookarounds keep `&&` whole and never split `>&`/`&>` (redirect fd syntax — splitting
+      // there turned the ubiquitous `npm test 2>&1` into two statements and NULLed a real red). BLANK
+      // statements are dropped: `npm test;` / a trailing newline made the LAST statement empty, so the real
+      // run sat in an "earlier" statement and went exit-NULL — a one-char suffix laundered a red silent
+      // (verified FN, the exact laundering class rule (3) exists to close).
+      const stmts = cmd.split(/[;\n]|(?<![&>])&(?![&>])/).filter(s => s.trim());
+      if (!stmts.length) return false;
+      if (stmts.slice(0, -1).some(s => s.split(/&&|\|/).some(inFam))) return false;         // (2) earlier statement's exit was discarded
+      const segs = stmts[stmts.length - 1].split(/&&|\|/);
+      return segs.some(inFam) && segs.every(s => inFam(s) || INFALLIBLE_SEG_RE.test(s));    // (3) family + only-infallible peers
+    };
+    // MIXED pairing = malformed/truncated/foreign transcript: a live Stop transcript pairs every foreground
+    // Bash before the final claim exists. Falling back past an UNPAIRED later run to an earlier completed
+    // RED would CONDEMN on missing data — the exact mirror of blessing on it (the later run may have been
+    // the green re-run whose result was lost). is_error:null means abstain in BOTH directions.
+    const unpairedFg = testEvents.some(x => !x.background && x.is_error === null);
+    const exitFailed = !!(!unpairedFg && lastRun && lastRun.is_error === true && exitAttributable(lastRun));
+    // (2) ORDERING — stale green: the last test/build run PREDATES the last mutation that could change its
+    // outcome (the structurally-impossible-before-v1.1.0 check: flat arrays carried no interleaving). The
+    // "mutation" scope is deliberately narrow — charter: provable scope or abstain:
+    //   • CODE files only (CODE_EXT_RE): a README/CLAUDE.md/.yaml edit after a green run doesn't invalidate
+    //     it. Accepted FN: package.json/tsconfig CAN change outcomes but ride out with the other non-code
+    //     extensions — under-fire, never over;
+    //   • not a throwaway/tool path (excludedScanPath — tmp/, .claude/groundtruth/, absolute);
+    //   • the edit's CHANGED lines must contain CODE (splitCodeComment): a comment-only edit — already
+    //     set-diffed free of its untouched context lines by the mutation ledger — can't go stale a green.
+    // ANY background test run → abstain entirely: its completion may postdate a later edit, so seq order
+    // can't be trusted for it (bounded abstention; a documented FN, never a guessed FP).
+    // NORMALIZED-CODE mutation test (v1.1.1): the line-granular test ("any changed line contains code")
+    // fired stale-green on `total++; // count` → `total++; // the count` (the comment changed; the code on
+    // that line did NOT) and on pure whitespace reformats — both inert edits, both verified FPs. When the
+    // ledger carries the raw added/removed sides, compare their CODE PORTIONS instead: per line, strip the
+    // comment (splitCodeComment) and ALL whitespace; the mutation is real only if the normalized code SETS
+    // differ. Whitespace is stripped fully, not squeezed to one space: prettier-style reformats ADD spaces
+    // (`a=1` → `a = 1`) and squeezing would still fire on them — FP is fatal here, while the symmetric FN
+    // (a whitespace change INSIDE a string literal reads inert) is a documented abstain-direction residual.
+    // A changed string literal still differs after normalization (strings are code, not comment) → fires.
+    // Legacy `text`-only mutations (pre-v1.1.1 fixtures, foreign callers) keep the old line-granular test —
+    // set-diffing was done at ledger build there, so their verdicts must not drift. NOT an on-disk
+    // checksum/snapshot: that shape was rejected as a trust downgrade (SECURITY.md — disk isn't a boundary);
+    // this stays inside the transcript-grounded ledger.
+    const normCodeSet = (s, mext) => { const st = { block: false, fence: false };
+      return new Set(String(s).split('\n').map(l => splitCodeComment(l, mext, st).code.replace(/\s+/g, '')).filter(Boolean)); };
+    const mutTouchesCode = (m) => { const mext = extOf(m.path);
+      if (m.added !== undefined || m.removed !== undefined) {
+        const a = normCodeSet(m.added ?? '', mext), r = normCodeSet(m.removed ?? '', mext);
+        return [...a].some(l => !r.has(l)) || [...r].some(l => !a.has(l));
+      }
+      const mst = { block: false, fence: false };
+      return String(m.text).split('\n').some(l => splitCodeComment(l, mext, mst).code.trim() !== ''); };
+    // Real transcripts record ABSOLUTE file_path (the Edit/Write tool schema requires it), but
+    // excludedScanPath was built for git-relative paths and reads ANY absolute path as out-of-tree — so
+    // without relativizing first, codeMuts was ALWAYS empty on the one path that supplies mutations (Stop)
+    // and stale-green shipped silently INERT: green unit tests (relative fixture paths), dead in production
+    // — the exact silent-inertness the charter calls the cardinal sin (verified against live transcripts).
+    // Relativize against cwd (slash-normalized + case-insensitive prefix, for Windows drives / macOS HFS);
+    // a path that STAYS absolute is genuinely out-of-repo (a scratchpad write) and is correctly excluded.
+    const relPath = (p) => { const s = String(p).replace(/\\/g, '/');
+      const root = String(cwd).replace(/\\/g, '/').replace(/\/+$/, '') + '/';
+      return s.toLowerCase().startsWith(root.toLowerCase()) ? s.slice(root.length) : s; };
+    const codeMuts = (Array.isArray(mutations) ? mutations : [])
+      .map(m => ({ ...m, path: relPath(m.path) }))
+      .filter(m => CODE_EXT_RE.test(m.path) && !excludedScanPath(m.path) && mutTouchesCode(m));
+    const lastMut = codeMuts.reduce((a, b) => (a && a.seq >= b.seq ? a : b), null);
+    const lastTestSeq = testEvents.reduce((a, b) => Math.max(a, b.seq), 0);
+    const staleGreen = !!(lastTestSeq > 0 && !testEvents.some(x => x.background) && lastMut && lastMut.seq > lastTestSeq);
+    // (3) FILTERED RUN — `npm test -- --grep foo` / `pytest -k billing` match TEST_BUILD_RE on their prefix,
+    // so a one-test run backed an "all tests pass" claim (the WEAK_CHECK_RE shape, one tier over). Provable
+    // scope only, two conjuncts: (a) the claim's OWN SENTENCE asserts universality with the quantifier
+    // ADJACENT ("all tests" / "entire|whole|full [test] suite" / "every test") — "all 12 billing tests pass"
+    // after `pytest -k billing` is HONEST, and adjacency is what keeps it silent; (b) EVERY test segment run
+    // this session carries an unambiguous narrowing flag. Short flags are RUNNER-SCOPED where they collide:
+    // `-k` is pytest's expression but `make -k` is keep-going; `-t` is jest's testNamePattern but `mocha -t`
+    // is a timeout; `-m` is dropped entirely (`python -m pytest` is a FULL run). A bare FILE arg
+    // (`pytest tests/test_billing.py`) is NOT detected: a one-file repo's whole suite IS one file (this
+    // repo's own `node hooks/groundtruth.test.mjs`) — documented ceiling, not a guess.
+    const UNIVERSAL_RE = /\ball(?:\s+(?:of\s+)?the)?\s+tests\b|\b(?:entire|whole|full)\s+(?:test\s+)?suite\b|\bevery\s+test\b/i;
+    const GENERIC_FILTER_RE = /\s(?:--grep|--test-?name-?patterns?)(?:[= ]\S|$)/i;
+    const RUNNER_FILTERS = [
+      [/\bpytest\b|\btox\b/, /\s-k[= ]\S/],
+      [/\bgo test\b/, /\s-run[= ]\S/],
+      [/\bjest\b|\bvitest\b/, /\s-t[= ]\S/],
+      [/\bmocha\b|\bplaywright\b|\bcypress\b/, /\s-g[= ]\S/],
+      [/\brspec\b/, /\s(?:-e|--example)[= ]\S/],
+      [/\bdotnet test\b/, /\s--filter[= ]\S/],
+    ];
+    const segFiltered = (s) => GENERIC_FILTER_RE.test(s) || RUNNER_FILTERS.some(([r, f]) => r.test(s) && f.test(s));
+    const filteredOnly = (c) => { const ts = famSegs(c); return ts.length > 0 && ts.every(segFiltered); };
+    // famHits, not testHits: an unfiltered `npm run lint` alongside `pytest -k billing` is not the full
+    // suite run — without the fence it defeated `.every(filteredOnly)` and the "all tests" overclaim slid
+    // through (laundering FN). And `.length > 0`: with ONLY lint run, every() over an empty set is true —
+    // a phantom "every run was filtered" verdict with no relevant run at all (abstain instead).
+    const famHits = testHits.filter(c => famSegs(c).length > 0);
+    const onlyFiltered = ran && UNIVERSAL_RE.test(_passSentence) && famHits.length > 0 && famHits.every(filteredOnly);
     // sev:'warn', not 'block': the `ran` side is deterministic (recorded commands) but the CLAIM side is
     // prose-parsing of natural language — a heuristic with a live-demonstrated FP class (quoting/echoing
     // "tests pass"). A conjunction's severity is bounded by its weakest conjunct, and by this project's own
@@ -530,7 +750,14 @@ export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], 
     // silent block-loop fired on an agent merely quoting the phrase.)
     if (!ran) findings.push({ cls: 1, sev: 'warn', msg: `claimed tests/build pass${ev}, but no test/build command ran this session` });
     else if (/^tests?$/i.test(_passClaim[1]) && onlyWeak) findings.push({ cls: 1, sev: 'warn', msg: `claimed tests pass${ev}, but only a syntax/type check ran (${testHits[0].trim().slice(0, 40)}) — that is not a test run; verify in the runtime that ships` });
+    // else-if chain, most-grounded first: at most ONE core Class-1 finding per claim (a failed+stale run
+    // shouldn't stack two warns for the same lie). Exit status outranks the stdout substring sensor — the
+    // recorded exit is fact; the substring is a heuristic over noisy output. `!disclosesFailure` applies to
+    // BOTH failure branches: an honest "15/16 pass" naturally rides an exit-1 run.
+    else if (exitFailed && !disclosesFailure) findings.push({ cls: 1, sev: 'warn', msg: `claimed tests/build pass${ev}, but the last completed test/build command exited NON-ZERO (\`${lastRun.cmd.trim().slice(0, 40)}\`) — a crash/OOM/exit-1 with no recognizable failure line in its output is still a failed run` });
     else if (failed && !disclosesFailure) findings.push({ cls: 1, sev: 'warn', msg: `claimed tests/build pass${ev}, but a test run looks like it reported failures — double-check` });
+    else if (staleGreen) findings.push({ cls: 1, sev: 'warn', msg: `claimed tests/build pass${ev}, but the last test/build run predates the last source edit (${lastMut.path.split('/').pop()}) — the green is STALE; re-run after the edit to confirm` });
+    else if (onlyFiltered) findings.push({ cls: 1, sev: 'warn', msg: `claimed ALL tests pass${ev}, but every test run this session was FILTERED to a subset (${testHits[0].trim().slice(0, 40)}) — a filtered run cannot back an "all tests" claim` });
     // Anti-gaming: claimed green, but the ONLY files changed are tests → the test may have been
     // weakened to pass instead of the code being fixed. Warn-only (heuristic) so a legit
     // test-writing turn is never blocked. Fires only when the whole diff is test files.
@@ -869,12 +1096,21 @@ function renderAudit(findings) {
  * Extract { intent, bashCmds, results } from a transcript JSONL string.
  * intent = first non-sidechain user text (harness noise stripped); bashCmds =
  * Bash tool_use commands; results = tool_result {is_error, text}.
+ * v1.1.0 additive: bashEvents = ORDERED Bash calls PAIRED with their results
+ * ({cmd, seq, background, is_error, text} — is_error:null when unpaired), and
+ * mutations = ordered Edit/Write/MultiEdit {path, seq, text(changed lines)}.
  */
-export function parseTranscript(jsonlText) {
+export function parseTranscript(jsonlText, { includeSidechain = false } = {}) {
   const entries = (jsonlText || '').split('\n')
     .map(s => { try { return JSON.parse(s); } catch { return null; } })
     .filter(Boolean)
-    .filter(e => e.isSidechain !== true); // main session only — never a subagent's claims
+    // Default OFF: on the MAIN transcript a sidechain entry is a subagent's — its "user" turns are the
+    // orchestrator's task prompts, not human asks, and letting them into `asks` mints phantom deliverables.
+    // But at SubagentStop the payload's transcript_path is the subagent's OWN file, where EVERY entry is
+    // isSidechain:true — this filter deleted 100% of the subagent's evidence while its claim survived (a
+    // payload field), so every honest test-running subagent hit `!ran` ("no test/build command ran"): a
+    // structural FP, v1.1.1. That one caller opts in; every other caller keeps the filter.
+    .filter(e => includeSidechain || e.isSidechain !== true);
 
   const textOf = (content) => {
     if (typeof content === 'string') return content;
@@ -926,6 +1162,17 @@ export function parseTranscript(jsonlText) {
   }
 
   const bashCmds = [], mcpCmds = [], results = [], toolDiffParts = [], mcpSqlParts = [];
+  // v1.1.0 — PAIRED + ORDERED evidence, additive to the flat arrays above (which every existing caller keeps).
+  // The flat shape threw away exactly what the artifact-grounded Class-1 checks need:
+  //   • WHICH command a result belongs to — `tool_use.id` ↔ `tool_result.tool_use_id`. Without the pairing,
+  //     `npm test` exiting 1 whose output carries no TEST_FAIL_RE-recognizable string ("Killed", a bare
+  //     "command failed with exit code 1") was blessed as green: is_error was CAPTURED below and read by nothing.
+  //   • WHERE a Bash call sits relative to Edit/Write/MultiEdit — without an interleaved order, a green run
+  //     that PREDATES the final source edit still read as "tests ran, none failed" (the stale-green hole).
+  // `seq` is a monotonic position over ALL tool_use blocks in transcript order. The transcript is the harness's
+  // own append-ordered record — one of the two inputs the agent can't author — so the ordering is trustworthy.
+  const bashEvents = [], mutations = [], byToolId = new Map();
+  let seq = 0;
   let bgLaunched = 0, bgDone = 0;                  // background tasks launched vs completed (async_done evidence)
   for (const e of entries) {
     const content = e.message?.content;
@@ -935,7 +1182,16 @@ export function parseTranscript(jsonlText) {
     if (/task-notification/i.test(asText) && /\b(completed|status>\s*completed|finished)\b/i.test(asText)) bgDone++;
     if (!Array.isArray(content)) continue;
     for (const b of content) {
-      if (b?.type === 'tool_use' && b.name === 'Bash' && b.input?.command) bashCmds.push(b.input.command);
+      if (b?.type === 'tool_use') seq++;           // count EVERY tool_use (Read/Grep too) — relative order is global
+      if (b?.type === 'tool_use' && b.name === 'Bash' && b.input?.command) {
+        bashCmds.push(b.input.command);
+        // is_error:null = "no result paired" (in-flight, or a transcript without ids). A consumer MUST treat
+        // null as abstain, never as success — missing data must not bless a green (charter: fail-loud beats
+        // a silent false pass, and here the loud path is the still-running flat sensors, not a guess).
+        const ev = { cmd: b.input.command, seq, background: b.input.run_in_background === true, is_error: null, text: '' };
+        bashEvents.push(ev);
+        if (b.id) byToolId.set(b.id, ev);
+      }
       if (b?.type === 'tool_use' && (b.name === 'Workflow'
         || ((b.name === 'Bash' || b.name === 'Task' || b.name === 'Agent') && b.input?.run_in_background === true))) bgLaunched++;
       // no-git "Diff Ledger": reconstruct added lines from the agent's Edit/Write tool calls (the
@@ -945,6 +1201,23 @@ export function parseTranscript(jsonlText) {
           : b.name === 'Edit' ? String(b.input.new_string || '')
           : (b.input.edits || []).map(x => String(x.new_string || '')).join('\n');
         if (added) toolDiffParts.push(`+++ b/${b.input.file_path}\n` + added.split('\n').map(l => '+' + l).join('\n'));
+        // Ordered mutation ledger (stale-green evidence). `text` = the SET-DIFF of new-vs-old lines, not the
+        // raw new_string: an Edit carries unchanged CODE context lines (old_string needs them for uniqueness),
+        // so a comment-only tweak after a green run would otherwise read as "code touched" via its untouched
+        // context → a stale-green FP on a harmless comment edit. The old side is included so a pure DELETION
+        // of code (new_string empty/shorter) still counts — deleting code invalidates a green just as adding
+        // does. Pushed OUTSIDE the `if (added)` guard for exactly that deletion case.
+        const removed = b.name === 'Edit' ? String(b.input.old_string || '')
+          : b.name === 'MultiEdit' ? (b.input.edits || []).map(x => String(x.old_string || '')).join('\n') : '';
+        const aL = added.split('\n'), rL = removed.split('\n');
+        const aSet = new Set(aL), rSet = new Set(rL);
+        // v1.1.1: carry the raw added/removed SIDES too. The merged raw-line set-diff can't distinguish an
+        // inert edit from a real one when a single line changes only outside its code — `total++; // count`
+        // → `total++; // the count` differs raw on BOTH sides, so stale-green fired on a comment tweak that
+        // rode a code-carrying line (verified FP; same for whitespace reformats). analyze's mutTouchesCode
+        // needs the two sides separately to compare their NORMALIZED CODE portions instead.
+        mutations.push({ path: b.input.file_path, seq, added, removed,
+          text: [...aL.filter(l => !rSet.has(l)), ...rL.filter(l => !aSet.has(l))].join('\n') });
       }
       // MCP DB writes leave NO file and NO git diff — a migration/SQL runs straight against the database,
       // so an RLS hole or a secret in SQL is otherwise invisible. Capture the SQL/query args from any
@@ -956,10 +1229,16 @@ export function parseTranscript(jsonlText) {
         // sees the MCP channel, not just Bash — the tool name + SQL is the command the agent "ran".
         mcpCmds.push(`${b.name} ${sql}`.trim());
       }
-      if (b?.type === 'tool_result') results.push({ is_error: b.is_error === true, text: JSON.stringify(b.content || '') });
+      if (b?.type === 'tool_result') {
+        results.push({ is_error: b.is_error === true, text: JSON.stringify(b.content || '') });
+        // Pair the result back to its Bash call. Unmatched ids (a subagent's, a non-Bash tool's) just miss the
+        // map — the flat `results` above keeps them for the legacy substring sensors.
+        const ev = b.tool_use_id != null ? byToolId.get(b.tool_use_id) : undefined;
+        if (ev) { ev.is_error = b.is_error === true; ev.text = JSON.stringify(b.content || ''); }
+      }
     }
   }
-  return { intent, asks, commandsInvoked, commandInvocations, bashCmds, mcpCmds, results, bgPending: bgLaunched > bgDone, toolDiff: toolDiffParts.join('\n'), mcpSql: mcpSqlParts.join('\n') };
+  return { intent, asks, commandsInvoked, commandInvocations, bashCmds, mcpCmds, results, bashEvents, mutations, bgPending: bgLaunched > bgDone, toolDiff: toolDiffParts.join('\n'), mcpSql: mcpSqlParts.join('\n') };
 }
 
 /**
@@ -2098,6 +2377,51 @@ function main() {
 
   const cwd = process.env.CLAUDE_PROJECT_DIR || payload.cwd || process.cwd();
 
+  // ── SubagentStop (v1.1.1): grade the SUBAGENT's claim against the SUBAGENT's own evidence, and touch
+  // NOTHING shared. At SubagentStop the payload's transcript_path is the subagent's own file (every entry
+  // isSidechain:true) and last_assistant_message is the subagent's "done" — the main path's sidechain
+  // filter deleted 100% of that evidence while keeping the claim, so an honest subagent that ran its tests
+  // green hit `!ran` ("no test/build command ran"): a structural FP on EVERY test-running subagent. Worse,
+  // the shared-session-state writes below ran against the ORCHESTRATOR's contract: <session>.md was
+  // overwritten with the subagent's card, the referee snapshot mark advanced (eating the orchestrator's
+  // ratification window), tasks.json was rebuilt from the subagent's non-asks, and in block mode the SHARED
+  // attempts cap burned with no per-agent state behind it. So this branch parses WITH sidechain included,
+  // runs the pure analyze() over the subagent's own tool-ledger diff, and stops: no session.md, no
+  // findings.json, no snapshot advance, no tasks.json, no attempts — and NEVER a block decision.
+  if (payload.hook_event_name === 'SubagentStop') {
+    let sp = null;
+    try { sp = parseTranscript(readFileSync(payload.transcript_path, 'utf8'), { includeSidechain: true }); }
+    catch { /* unreadable/absent transcript → NO evidence: grading the claim anyway would re-mint the exact
+               structural FP this branch removes, so abstain entirely (charter: abstain outside the scope) */ }
+    if (!sp) process.exit(0);
+    // A transcript that PARSES but yields zero evidence AND zero task text (a 0-byte file mid-flush, a
+    // foreign-schema harness) is the same no-evidence case as an unreadable one: grading the claim against
+    // nothing re-mints the exact !ran FP this branch removes (verified: an empty transcript + "all tests
+    // pass" warned). A real subagent transcript always carries at least its task prompt (intent), so a
+    // genuinely lazy subagent — prompt present, no test run — is still graded and still caught.
+    if (!sp.intent && !sp.bashCmds.length && !sp.results.length && !sp.toolDiff && !sp.mutations.length) process.exit(0);
+    const findings = analyze({
+      claim: payload.last_assistant_message || '',
+      // Content scanners see the subagent's OWN authored writes (its tool ledger) — not the session git
+      // diff, which is the orchestrator-baseline's whole tree and is re-scanned at the main Stop anyway.
+      // gitDiff:'' keeps AG-B/AG-C abstaining here: the ledger replays a file's unchanged context lines as
+      // `+`, their known pre-existing-skip-reads-as-added FP vector (see the gDiff routing note in analyze).
+      diff: dropExcludedFiles(sp.toolDiff || ''), gitDiff: '',
+      bashCmds: sp.bashCmds, results: sp.results, cwd, bgPending: sp.bgPending,
+      bashEvents: sp.bashEvents, mutations: sp.mutations,
+    // Warn-only STRUCTURALLY, regardless of GROUNDTRUTH_BLOCK: the remediation loop's attempts counter is
+    // per-session, so a subagent block would burn the orchestrator's cap (2 → escalate) against a contract
+    // that isn't the orchestrator's. Demote in the findings themselves — a real block-tier catch (a secret
+    // in the ledger) regains its tier at the orchestrator's Stop, which re-scans the same tree.
+    }).map(f => f.sev === 'block' ? { ...f, sev: 'warn' } : f);
+    // intent:'' on purpose → Completeness renders ⚪ n/a: the subagent's "user" turns are the orchestrator's
+    // task text, and grading completeness against a prompt the human never typed would be a phantom contract.
+    const card = renderCard(findings, { session: `${payload.session_id || 'session'} (subagent)`, intent: '', blockEnabled: false });
+    process.stderr.write('\n' + card + '\n');
+    console.log(JSON.stringify({ systemMessage: card }));
+    process.exit(0);
+  }
+
   // Baseline diffing: diff against the session's START ref (captured at SessionStart) so committed
   // work is still seen; fall back to HEAD when no baseline was captured.
   let baseline = null;
@@ -2137,6 +2461,10 @@ function main() {
   const findings = analyze({
     claim: payload.last_assistant_message || '',
     diff: scanDiff, gitDiff: gitOnlyDiff, bashCmds: parsed.bashCmds, results: parsed.results, cwd, bgPending: parsed.bgPending,
+    // v1.1.0 paired+ordered transcript evidence (exit status / stale green / filtered runs). ONLY the Stop
+    // path has a transcript, so only it passes these — --pre-commit and --diff-range leave them null and the
+    // checks abstain there by construction (no ordering, no exit codes → never fire, never bless).
+    bashEvents: parsed.bashEvents, mutations: parsed.mutations,
   });
 
   // H2: an untracked file too large to fully scan is surfaced, never silently dropped (a secret padded

@@ -11,12 +11,13 @@ Design invariant, enforced in review: **a false positive is treated as fatal.** 
 ## Commands
 
 ```bash
-node hooks/groundtruth.test.mjs   # 502 assert-based unit checks, no deps, no framework
+node hooks/groundtruth.test.mjs   # 596 assert-based unit checks, no deps, no framework
 node hooks/redteam.mjs            # live adversarial harness (10 scenarios, sandboxed throwaway repos)
 npm test                          # alias for the unit checks
+npm run check-self                # same, but echoes the exit code as a GREEN/RED done-verdict
 ```
 
-The test file is a flat sequence of `assert(...)` calls — there is **no single-test runner**; you run the whole file (it's fast). Add a regression test in the same style next to the code it covers, and log the fix in `FIXES.md` (symptom → root cause → fix → regression test).
+The test file is a flat sequence of `ok(label, cond)` asserts — there is **no single-test runner**; you run the whole file (it's fast). It imports the pure exports of `groundtruth.mjs`/`compile-rules.mjs`/`symbol-integrity.mjs` directly, so **a new check is only testable if it's exported and pure.** Add a regression test in the same style next to the code it covers, and log the fix in `FIXES.md` (symptom → root cause → fix → regression test).
 
 CLI entry points (all on `hooks/groundtruth.mjs`, dispatched in `main()`):
 ```bash
@@ -39,7 +40,7 @@ Everything is one big deterministic engine in `hooks/groundtruth.mjs` (~2300 lin
 - `PostToolUse[Edit|Write|MultiEdit]` (`--watch-rules`) — recompiles doc rules when a rule-source doc is edited mid-session.
 - `Stop` / `SubagentStop` (no arg) — the main verdict path.
 
-**The Stop path** (`main()`, the no-arg branch ~line 2076): load baseline → `git diff <baseRef>` → parse transcript for intent/Bash-evidence/tool-ledger → merge the **tool Diff Ledger** (reconstructed Edit/Write so new untracked files are visible) → build a wider `scanDiff` (adds untracked file *content* + MCP SQL, for security scanners only) → run `analyze()` + compiled rules + dropped-symbol check + referee-tamper check → render + persist to `.claude/groundtruth/<session>.md`.
+**The Stop path** (`main()` starts ~line 1857; the no-arg branch is the fallthrough after every flag branch, ~line 2100): load baseline → `git diff <baseRef>` → parse transcript for intent/Bash-evidence/tool-ledger → merge the **tool Diff Ledger** (reconstructed Edit/Write so new untracked files are visible) → build a wider `scanDiff` (adds untracked file *content* + MCP SQL, for security scanners only) → run `analyze()` + compiled rules + dropped-symbol check + referee-tamper check → render + persist to `.claude/groundtruth/<session>.md`.
 
 Note the two diff variables — this distinction matters when editing: `diff`/`gitDiff` (authored changes) drives the ledger/open-loops/tamper; `scanDiff` (authored + untracked + MCP) drives `analyze`'s content checks. Reading untracked content into the *authored* diff would false-ground a task "done" on any prose mention of a filename.
 

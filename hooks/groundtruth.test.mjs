@@ -99,6 +99,44 @@ ok('C1 warns: ava-style "1 test failed" (word between count and "failed") is now
   && has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '3 tests failed' }] }), 1));
 ok('C1 SILENT: "N tests failed" with a ZERO count ("0 tests failed") stays quiet',
   !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '5 tests passed, 0 tests failed' }] }), 1));
+// "pass" as a NOUN (a stage), not the verb — a live FP found by replaying 10 days of real hindsight
+// sessions: "then build the FIX pass" fired Class-1 (at BLOCK severity, pre-demotion) on a turn that only
+// ANNOUNCED a plan. The keyword→verb gap spans the whole noun phrase, so "build … pass" looked like a verdict.
+ok('C1 SILENT: "build the FIX pass" — `pass` is a NOUN (a stage), not "the build passes" (the live block FP)',
+  !has(analyze({ claim: 'I will run the sweep, then build the FIX pass (verify pin → attributed replacement).', bashCmds: [], results: [] }), 1));
+ok('C1 SILENT: "build the **CONFIRM pass**" — markdown emphasis around the noun does not resurrect the FP',
+  !has(analyze({ claim: 'Next I will build the **CONFIRM pass** over the 213 images.', bashCmds: [], results: [] }), 1));
+ok('C1 SILENT: a bare determiner + noun ("test a second pass") is a stage, not a claim',
+  !has(analyze({ claim: 'I will test a second pass over the data.', bashCmds: [], results: [] }), 1));
+ok('C1 STILL FIRES: a real subject before the bare verb ("the tests pass" / "all tests pass") is untouched by the noun guard',
+  has(analyze({ claim: 'The tests pass.', bashCmds: [], results: [] }), 1)
+  && has(analyze({ claim: 'All tests pass.', bashCmds: [], results: [] }), 1));
+ok('C1 STILL FIRES: inflected verb forms are unambiguous — the noun guard only excuses the BARE `pass`',
+  has(analyze({ claim: 'Done — the build passes cleanly.', bashCmds: [], results: [] }), 1)
+  && has(analyze({ claim: 'Done — the build passed.', bashCmds: [], results: [] }), 1));
+// Greedy-tail laundering: `[^.!?\n]*` is greedy, so the match's captured verb is the LAST one in the
+// sentence. A first-draft noun guard inspected only that final verb — so a trailing noun-`pass` ("…after
+// the second pass") excused the WHOLE match and silenced a real leading claim (verified FN: an agent could
+// launder any green claim by appending "— one more pass later"). The guard walks EVERY verb occurrence.
+ok('C1 STILL FIRES: "Tests pass after the second pass" — a trailing noun-pass cannot launder the real leading claim',
+  has(analyze({ claim: 'Tests pass after the second pass.', bashCmds: [], results: [] }), 1));
+ok('C1 STILL FIRES: "tests pass; next up: the FIX pass" — a same-sentence stage name after a real claim',
+  has(analyze({ claim: 'The tests pass; next up: the FIX pass.', bashCmds: [], results: [] }), 1));
+ok('C1 STILL FIRES: "build is green after one pass" — the greedy tail must not skip past the real verb "green"',
+  has(analyze({ claim: 'The build is green after one pass over the diff.', bashCmds: [], results: [] }), 1));
+ok('C1 SILENT: two noun stages in one sentence ("the FIX pass then the CONFIRM pass") stay excused',
+  !has(analyze({ claim: 'Build the FIX pass then the CONFIRM pass.', bashCmds: [], results: [] }), 1));
+// Gap bound: a keyword and a verb ~18 words apart are clause GLUE, not one claim — a live replay FP
+// married "file/test" to "the fix was verified" across three clauses. Past MAX_GAP words the check abstains.
+ok('C1 SILENT: keyword→verb glued across distant clauses ("…no named file/test, so the auditor … the fix was verified…") abstains',
+  !has(analyze({ claim: 'Your ask was phrased as a symptom with no named file/test, so the auditor had no explicit deliverable list to tick off (not an actual gap, the fix was verified with the repro test).', bashCmds: [], results: [] }), 1));
+ok('C1 STILL FIRES: a real claim with a wide-but-bounded gap ("the build and all 502 unit checks now pass")',
+  has(analyze({ claim: 'The build and all 502 unit checks now pass.', bashCmds: [], results: [] }), 1));
+// MAX_GAP pins BOTH edges: the widest real claim (11 words) must fire, the glue FP (18) must not. An
+// earlier bound of 8 sat below the real claim and silently ATE it — abstain is a clean green, so a too-tight
+// gap is an FN, not a safe default. 12 is the verified band; this test fails if it drifts either way.
+ok('C1 STILL FIRES: an 11-word gap is still ONE real claim — the bound must not eat it (regression on MAX_GAP=8)',
+  has(analyze({ claim: 'The tests I added for the new billing and invoicing modules now all pass.', bashCmds: [], results: [] }), 1));
 ok('C1 SILENT: "tests should pass" is an example, not a claim (the false-block bug)',
   !has(analyze({ claim: 'name a file and say tests should pass for a full green', bashCmds: [], results: [] }), 1));
 ok('C1 SILENT: "make sure tests pass" is guidance, not a claim',
@@ -227,6 +265,326 @@ ok('C1 FIRES: a slash joining two NOUNS is prose ("Build/tests pass"), not a quo
   && has(analyze({ claim: 'tests/lint pass after the fix.', bashCmds: [], results: [] }), 1));
 ok('C1 SILENT: a verb-slash meta-quote ("… pass/green") stays suppressed after the noun-slash fix',
   !has(analyze({ claim: 'the check matches tests/build … pass/green here', bashCmds: [], results: [] }), 1));
+
+// ── C1 artifact-grounded evidence (v1.1.0): exit status · ordering · filtered runs ──────────────────────
+// The three confirmed holes: (1) is_error captured but never read — an exit-1/OOM run with no recognizable
+// failure string in stdout was blessed green; (2) flat unpaired arrays made "last run predates last edit"
+// structurally unanswerable; (3) `pytest -k billing` backed an "all tests pass" claim. Each check must also
+// ABSTAIN without transcript evidence (pre-commit/CI/legacy callers) — an abstention test per check.
+{
+  const bev = (over = {}) => ({ cmd: 'npm test', seq: 1, background: false, is_error: false, text: '', ...over });
+  // (1) exit status — fires on the paired non-zero exit even with a green-looking/unrecognizable stdout
+  ok('C1-exit FIRES: `npm test` exit-1 with NO recognizable failure string ("command failed") — the hole is closed',
+    analyze({ claim: 'all tests pass', bashCmds: ['npm test'],
+      bashEvents: [bev({ is_error: true, text: JSON.stringify('Error: command failed with exit code 1') })] })
+      .some(f => f.cls === 1 && /exited NON-ZERO/.test(f.msg)));
+  ok('C1-exit FIRES on an OOM "Killed" run (no TEST_FAIL_RE string at all)',
+    analyze({ claim: 'all tests pass', bashCmds: ['npm test'],
+      bashEvents: [bev({ is_error: true, text: JSON.stringify('Killed') })] })
+      .some(f => f.cls === 1 && /exited NON-ZERO/.test(f.msg)));
+  ok('C1-exit WARN not BLOCK: the trigger is still a prose-parsed claim — severity bounded by the weakest conjunct',
+    analyze({ claim: 'all tests pass', bashCmds: ['npm test'],
+      bashEvents: [bev({ is_error: true, text: JSON.stringify('Killed') })] })
+      .every(f => f.cls !== 1 || f.sev === 'warn'));
+  ok('C1-exit ABSTAINS: legacy flat call (bashCmds/results only, NO bashEvents) stays silent — back-compat',
+    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: true, text: JSON.stringify('Killed') }] }), 1));
+  ok('C1-exit ABSTAINS: an UNPAIRED event (is_error:null — old/foreign transcript, no ids) is not a failure',
+    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], bashEvents: [bev({ is_error: null })] }), 1));
+  ok('C1-exit ABSTAINS: a harness abort (user interrupt) is not a test failure — the run never finished',
+    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'],
+      bashEvents: [bev({ is_error: true, text: JSON.stringify('[Request interrupted by user]') })] }), 1));
+  ok('C1-exit ABSTAINS: exit not attributable to the test segment (`npm test && git commit` — the commit failed)',
+    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test && git commit -m x'],
+      bashEvents: [bev({ cmd: 'npm test && git commit -m x', is_error: true, text: JSON.stringify('nothing to commit') })] }), 1));
+  ok('C1-exit SILENT on the normal red→fix→green flow: only the LAST completed run decides',
+    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test', 'npm test'],
+      bashEvents: [bev({ is_error: true, text: JSON.stringify('boom') }), bev({ seq: 3 })] }), 1));
+  ok('C1-exit SILENT when the claim DISCLOSES the failure ("15/16 pass") — honest reporting, not an overclaim',
+    !has(analyze({ claim: '15/16 tests pass; one is a known pre-existing failure', bashCmds: ['npm test'],
+      bashEvents: [bev({ is_error: true, text: JSON.stringify('1 known failure') })] }), 1));
+  // (2) ordering — stale green: green run, THEN the source edit, then "tests pass"
+  const greenAt1 = [bev({ text: JSON.stringify('5 passed, 0 failed') })];
+  ok('C1-stale FIRES: test green (seq1) → Write src/billing.js (seq2) → "all tests pass" — the green predates the edit',
+    analyze({ claim: 'Done. All tests pass.', bashCmds: ['npm test'], bashEvents: greenAt1,
+      mutations: [{ path: 'src/billing.js', seq: 2, text: 'export const round = x => x;' }] })
+      .some(f => f.cls === 1 && /STALE/.test(f.msg)));
+  ok('C1-stale SILENT: re-run AFTER the edit (test→edit→test) — the last run postdates the last mutation',
+    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test', 'npm test'],
+      bashEvents: [bev(), bev({ seq: 5 })],
+      mutations: [{ path: 'src/a.js', seq: 3, text: 'const x = 1;' }] }), 1));
+  ok('C1-stale SILENT: a DOC edit after the green run (README.md) cannot change a test outcome',
+    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], bashEvents: greenAt1,
+      mutations: [{ path: 'README.md', seq: 3, text: 'usage notes' }] }), 1));
+  ok('C1-stale SILENT: a COMMENT-ONLY edit after the green run is not an outcome-changing mutation',
+    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], bashEvents: greenAt1,
+      mutations: [{ path: 'src/a.js', seq: 3, text: '// clarifying comment' }] }), 1));
+  ok('C1-stale SILENT: a throwaway-path edit (tmp/, .claude/groundtruth/) after green is not a deliverable mutation',
+    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], bashEvents: greenAt1,
+      mutations: [{ path: 'tmp/scratch.js', seq: 3, text: 'const x = 1;' }, { path: '.claude/groundtruth/x.js', seq: 4, text: 'const y = 2;' }] }), 1));
+  ok('C1-stale ABSTAINS: a BACKGROUND test run in the mix — its completion order is unknowable, so no verdict',
+    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'],
+      bashEvents: [bev({ background: true, is_error: null })],
+      mutations: [{ path: 'src/a.js', seq: 3, text: 'const x = 1;' }] }), 1));
+  ok('C1-stale ABSTAINS: no transcript evidence (legacy flat call) → silent, exactly as before v1.1.0',
+    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: 'ok' }] }), 1));
+  ok('C1-stale FIRES on a pure DELETION after green (old_string code removed, nothing added) — deleting code un-greens too',
+    analyze({ claim: 'tests pass', bashCmds: ['npm test'], bashEvents: greenAt1,
+      mutations: [{ path: 'src/a.js', seq: 3, text: 'const guard = checkAuth();' }] })   // ledger set-diff carries the removed line
+      .some(f => f.cls === 1 && /STALE/.test(f.msg)));
+  ok('C1 chain: a failed exit AND a stale mutation yield ONE core finding, not two (else-if, most-grounded wins)',
+    analyze({ claim: 'all tests pass', bashCmds: ['npm test'],
+      bashEvents: [bev({ is_error: true, text: JSON.stringify('Killed') })],
+      mutations: [{ path: 'src/a.js', seq: 3, text: 'const x = 1;' }] })
+      .filter(f => f.cls === 1 && /NON-ZERO|STALE/.test(f.msg)).length === 1);
+  // (3) filtered runs — only under an ADJACENT universal quantifier, only unambiguous narrowing flags
+  ok('C1-filtered FIRES: `npm test -- --grep foo` cannot back an "all tests pass" claim',
+    analyze({ claim: 'all tests pass', bashCmds: ['npm test -- --grep foo'] })
+      .some(f => f.cls === 1 && /FILTERED/.test(f.msg)));
+  ok('C1-filtered FIRES: `pytest -k billing` under "All tests pass." (the confirmed-silent probe)',
+    analyze({ claim: 'All tests pass.', bashCmds: ['pytest -k billing'] })
+      .some(f => f.cls === 1 && /FILTERED/.test(f.msg)));
+  ok('C1-filtered SILENT without the universal quantifier ("tests pass" may honestly mean the subset)',
+    !has(analyze({ claim: 'tests pass', bashCmds: ['pytest -k billing'] }), 1));
+  ok('C1-filtered SILENT on an honestly-scoped claim ("all 12 billing tests pass") — adjacency gate holds',
+    !has(analyze({ claim: 'all 12 billing tests pass', bashCmds: ['pytest -k billing'] }), 1));
+  ok('C1-filtered SILENT when a FULL run also ran — the claim is backed',
+    !has(analyze({ claim: 'all tests pass', bashCmds: ['pytest -k billing', 'pytest'] }), 1));
+  ok('C1-filtered SILENT on colliding short flags: `make -k` is keep-going, `python -m pytest` is a FULL run',
+    !has(analyze({ claim: 'all tests pass', bashCmds: ['make -k test'] }), 1)
+    && !has(analyze({ claim: 'all tests pass', bashCmds: ['python -m pytest'] }), 1));
+  ok('C1-filtered SILENT on a single-FILE arg (a one-file repo\'s whole suite IS one file — documented ceiling)',
+    !has(analyze({ claim: 'all tests pass', bashCmds: ['node hooks/groundtruth.test.mjs'] }), 1));
+
+  // ── adversarial-review regressions (v1.1.0 hardening) ─────────────────────────────────────────────────
+  // (A) PRODUCTION INERTNESS: real transcripts record ABSOLUTE file_path (the Edit/Write schema requires
+  // it), and excludedScanPath reads any absolute path as out-of-tree — so codeMuts was ALWAYS empty on the
+  // Stop path and stale-green was silently dead in production while its relative-path tests stayed green.
+  ok('C1-stale FIRES with the ABSOLUTE file_path real transcripts carry (was silently INERT in production)',
+    analyze({ claim: 'All tests pass.', bashCmds: ['npm test'], cwd: '/Users/dev/repo',
+      bashEvents: [bev({ text: JSON.stringify('5 passed') })],
+      mutations: [{ path: '/Users/dev/repo/src/billing.js', seq: 2, text: 'export const round = x => x;' }] })
+      .some(f => f.cls === 1 && /STALE/.test(f.msg)));
+  ok('C1-stale SILENT: an absolute path OUTSIDE the repo (a scratchpad write) is still excluded after relativizing',
+    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], cwd: '/Users/dev/repo',
+      bashEvents: [bev()], mutations: [{ path: '/private/var/scratch/x.js', seq: 2, text: 'const x = 1;' }] }), 1));
+  // (B) FAMILY FENCE: lint outcomes are independent of a tests claim in BOTH directions.
+  ok('C1-exit SILENT: a TRUE "the tests pass" is not contradicted by a LATER failing `npm run lint` (verified FP)',
+    !has(analyze({ claim: 'The tests pass. Lint still has 2 pre-existing style errors.', bashCmds: ['npm test', 'npm run lint'],
+      bashEvents: [bev({ text: JSON.stringify('5 passed') }),
+        bev({ cmd: 'npm run lint', seq: 2, is_error: true, text: JSON.stringify('2 problems') })] }), 1));
+  ok('C1-stale FIRES: a green `npm run lint` AFTER the edit cannot refresh a STALE test green (laundering fence)',
+    analyze({ claim: 'All tests pass.', bashCmds: ['npm test', 'npm run lint'],
+      bashEvents: [bev({ text: JSON.stringify('5 passed') }), bev({ cmd: 'npm run lint', seq: 3 })],
+      mutations: [{ path: 'src/billing.js', seq: 2, text: 'export const x = 1;' }] })
+      .some(f => f.cls === 1 && /STALE/.test(f.msg)));
+  ok('C1-exit FIRES under a LINT claim on the failing lint run — the fence is per-claim-noun, not lint-blind',
+    analyze({ claim: 'Lint passes now.', bashCmds: ['npm run lint'],
+      bashEvents: [bev({ cmd: 'npm run lint', is_error: true, text: JSON.stringify('boom') })] })
+      .some(f => f.cls === 1 && /NON-ZERO/.test(f.msg)));
+  ok('C1-exit SILENT: `npm test && npm run lint` failing under a tests claim — the pipeline exit is the LINT segment\'s',
+    !has(analyze({ claim: 'the tests pass', bashCmds: ['npm test && npm run lint'],
+      bashEvents: [bev({ cmd: 'npm test && npm run lint', is_error: true, text: JSON.stringify('2 problems') })] }), 1));
+  ok('C1-filtered FIRES: an unfiltered `npm run lint` alongside `pytest -k billing` is NOT the full suite run',
+    analyze({ claim: 'all tests pass', bashCmds: ['pytest -k billing', 'npm run lint'] })
+      .some(f => f.cls === 1 && /FILTERED/.test(f.msg)));
+  ok('C1-filtered SILENT when ONLY lint ran under an "all tests" claim — no relevant run to grade, not a phantom "filtered" verdict',
+    !has(analyze({ claim: 'all tests pass', bashCmds: ['npm run lint'] }).filter(f => /FILTERED/.test(f.msg)), 1));
+  // (C) MULTI-LINE Bash call: `\n` is a segment boundary — a failed commit on line 2 is not a failed test.
+  ok('C1-exit SILENT on a multi-line call ("npm test\\ngit commit") whose failing last line is not the test (verified FP)',
+    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test\ngit commit -m x'],
+      bashEvents: [bev({ cmd: 'npm test\ngit commit -m x', is_error: true, text: JSON.stringify('nothing to commit') })] }), 1));
+  ok('C1 weak-check SILENT: "tsc\\nnpm test" — a real test on line 2 means it was NOT only a typecheck (latent multi-line FP)',
+    !has(analyze({ claim: 'tests pass', bashCmds: ['tsc\nnpm test'], results: [] }), 1));
+  // (D) MIXED pairing: an unpaired LATER run must not let an earlier completed RED condemn the claim —
+  // is_error:null is abstain in BOTH directions (the lost result may have been the green re-run).
+  ok('C1-exit ABSTAINS on mixed pairing: completed RED then an UNPAIRED later run — never condemn on missing data',
+    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test', 'npm test'],
+      bashEvents: [bev({ is_error: true, text: JSON.stringify('Killed') }), bev({ seq: 2, is_error: null })] }), 1));
+  // (E) ACCEPTED RESIDUALS, pinned so a future change to them is deliberate, not accidental:
+  ok('C1 residual (accepted FN, warn-tier): a verdict phrased DET+modifier+pass ("The tests: a clean pass") is surface-identical to a stage name and abstains',
+    !has(analyze({ claim: 'The tests: a clean pass.', bashCmds: [], results: [] }), 1));
+  ok('C1 residual (accepted FN): an exit-1 run whose OWN stdout echoes the harness-abort marker reads as an abort (stdout is agent-authorable text)',
+    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'],
+      bashEvents: [bev({ is_error: true, text: JSON.stringify('Command timed out after 1s — printed by the test') })] }), 1));
+}
+
+// ── parseTranscript v1.1.0: pairing (tool_use.id ↔ tool_result.tool_use_id) + global tool order ──
+{
+  const T = [
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'text', text: 'Fix billing rounding.' }] } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'r1', name: 'Read', input: { file_path: 'src/billing.js' } }] } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'npm test' } }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'b1', is_error: false, content: [{ type: 'text', text: '5 passed, 0 failed' }] }] } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'w1', name: 'Edit', input: { file_path: 'src/billing.js', old_string: 'const r = x => x;\n// keep', new_string: 'const r = x => Math.round(x);\n// keep' } }] } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'b2', name: 'Bash', input: { command: 'npm run lint' } }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'b2', is_error: true, content: [{ type: 'text', text: '2 problems' }] }] } }),
+  ].join('\n');
+  const pt = parseTranscript(T);
+  ok('pairing: each Bash event carries ITS OWN result (not a flat pool) — b1 green, b2 errored',
+    pt.bashEvents.length === 2 && pt.bashEvents[0].is_error === false && pt.bashEvents[1].is_error === true
+    && /5 passed/.test(pt.bashEvents[0].text) && /2 problems/.test(pt.bashEvents[1].text));
+  ok('ordering: seq is monotonic ACROSS tool kinds — Read < Bash < Edit < Bash, so "test before edit" is answerable',
+    pt.bashEvents[0].seq < pt.mutations[0].seq && pt.mutations[0].seq < pt.bashEvents[1].seq);
+  ok('mutation ledger set-diffs away unchanged CONTEXT lines ("// keep" carried for uniqueness is not a change)',
+    pt.mutations.length === 1 && /Math\.round/.test(pt.mutations[0].text) && !/keep/.test(pt.mutations[0].text));
+  ok('back-compat: the flat bashCmds/results arrays are unchanged in shape and content',
+    pt.bashCmds.join(',') === 'npm test,npm run lint' && pt.results.length === 2 && pt.results[1].is_error === true);
+  // Adversarial-review revision: this transcript's TRUTHFUL finding is STALE, not NON-ZERO. The failing
+  // `npm run lint` says nothing about the TESTS claim (family fence — the pre-fence build flagged it
+  // NON-ZERO, a verified FP on a true claim); what IS wrong is that the test green predates the Edit.
+  ok('end-to-end: SAME transcript — the lint failure is fenced off the tests claim; the STALE green (test run predates the edit) is what fires',
+    (() => { const f = analyze({ claim: 'All tests pass.', bashCmds: pt.bashCmds, results: pt.results, bashEvents: pt.bashEvents, mutations: pt.mutations });
+      return f.some(x => x.cls === 1 && /STALE/.test(x.msg)) && !f.some(x => x.cls === 1 && /NON-ZERO/.test(x.msg)); })());
+  // Same transcript MINUS the post-edit lint run: now the only green predates the edit → the stale check fires.
+  const pt2 = parseTranscript(T.split('\n').slice(0, 5).join('\n'));
+  ok('end-to-end: transcript where the green run PREDATES the final Edit → stale-green fires (the reviewer\'s exact scenario)',
+    analyze({ claim: 'Done. All tests pass.', bashCmds: pt2.bashCmds, results: pt2.results, bashEvents: pt2.bashEvents, mutations: pt2.mutations })
+      .some(f => f.cls === 1 && /STALE/.test(f.msg)));
+  ok('transcript WITHOUT ids (predates v1.1.0 / foreign harness): events stay UNPAIRED (is_error:null) → checks abstain',
+    (() => { const old = parseTranscript(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'npm test' } }] } })
+      + '\n' + JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', is_error: true, content: 'Killed' }] } }));
+      return old.bashEvents[0].is_error === null
+        && !has(analyze({ claim: 'tests pass', bashCmds: old.bashCmds, bashEvents: old.bashEvents, mutations: old.mutations }), 1); })());
+}
+
+// ── v1.1.1 FIX 1 — SubagentStop: the sidechain filter deleted 100% of a subagent's evidence while its
+// claim survived (payload field), so every honest test-running subagent hit `!ran` (structural FP). And
+// the shared-state writes (session.md / snapshot mark / tasks.json / attempts cap) ran against the
+// ORCHESTRATOR's session. The branch parses with sidechain included, analyzes, writes nothing, never blocks.
+{
+  const subTx = (isErr) => [
+    JSON.stringify({ type: 'user', isSidechain: true, message: { content: [{ type: 'text', text: 'Run the tests and report.' }] } }),
+    JSON.stringify({ type: 'assistant', isSidechain: true, message: { content: [{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'npm test' } }] } }),
+    JSON.stringify({ type: 'user', isSidechain: true, message: { content: [{ type: 'tool_result', tool_use_id: 'b1', is_error: isErr, content: [{ type: 'text', text: isErr ? 'Killed' : '502 checks passed.' }] }] } }),
+  ].join('\n');
+  const green = parseTranscript(subTx(false), { includeSidechain: true });
+  ok('subagent: includeSidechain:true sees the subagent\'s own evidence (bash cmds no longer deleted)',
+    green.bashCmds.includes('npm test') && green.bashEvents.length === 1 && green.bashEvents[0].is_error === false);
+  ok('subagent FP GONE: honest all-sidechain transcript + green run + "all tests pass" → SILENT (was `!ran` on every test-running subagent)',
+    !has(analyze({ claim: 'All 502 tests pass.', bashCmds: green.bashCmds, results: green.results, bashEvents: green.bashEvents, mutations: green.mutations }), 1));
+  const red = parseTranscript(subTx(true), { includeSidechain: true });
+  ok('subagent still CAUGHT: the same transcript with a genuinely FAILED run under "all tests pass" → fires',
+    analyze({ claim: 'All tests pass.', bashCmds: red.bashCmds, results: red.results, bashEvents: red.bashEvents, mutations: red.mutations })
+      .some(f => f.cls === 1 && /NON-ZERO/.test(f.msg)));
+  ok('main Stop UNCHANGED: the default parse still filters sidechain — a subagent\'s prompts are the orchestrator\'s, not human asks',
+    parseTranscript(subTx(false)).bashCmds.length === 0 && parseTranscript(subTx(false)).intent === '');
+  // CLI end-to-end: hook_event_name:'SubagentStop' + GROUNDTRUTH_BLOCK=1 — warn-only, no decision:'block',
+  // and ZERO shared-session-state writes (no <session>.md, no findings.json, no tasks.json, no attempts,
+  // no snapshot advance — the .claude/groundtruth dir is never even created).
+  const dir = mkdtempSync(pathJoin(tmpdir(), 'gt-subagent-'));
+  const engine = fileURLToPath(new URL('./groundtruth.mjs', import.meta.url));
+  const runSub = (claim) => {
+    fsWrite(pathJoin(dir, 'sub.jsonl'), subTx(true));
+    const payload = JSON.stringify({ hook_event_name: 'SubagentStop', session_id: 'orch-sess',
+      transcript_path: pathJoin(dir, 'sub.jsonl'), last_assistant_message: claim, cwd: dir });
+    const out = execFileSync('node', [engine], { input: payload, encoding: 'utf8',
+      env: { ...process.env, GROUNDTRUTH_BLOCK: '1', CLAUDE_PROJECT_DIR: '' }, stdio: ['pipe', 'pipe', 'ignore'] });
+    return JSON.parse(out.trim().split('\n').pop());
+  };
+  const j = runSub('All tests pass.');
+  ok('subagent CLI: a red run under GROUNDTRUTH_BLOCK=1 NEVER returns decision:block (no per-agent attempt state to loop on)',
+    j.decision === undefined && /NON-ZERO/.test(j.systemMessage || ''));
+  ok('subagent CLI: no shared-session-state write — <session>.md / tasks.json / attempts / snapshot untouched',
+    !existsSync(pathJoin(dir, '.claude', 'groundtruth')));
+  // Adversarial-review regression: an EMPTY-but-readable transcript is the same no-evidence case as an
+  // unreadable one — grading the claim against nothing re-minted the exact !ran FP this branch removes.
+  fsWrite(pathJoin(dir, 'empty.jsonl'), '');
+  const outEmpty = execFileSync('node', [engine], { input: JSON.stringify({ hook_event_name: 'SubagentStop',
+    transcript_path: pathJoin(dir, 'empty.jsonl'), last_assistant_message: 'All tests pass.', cwd: dir }),
+    encoding: 'utf8', env: { ...process.env, CLAUDE_PROJECT_DIR: '' }, stdio: ['pipe', 'pipe', 'ignore'] });
+  ok('subagent CLI: an EMPTY-but-readable transcript ABSTAINS — no phantom "no test/build command ran" on zero evidence',
+    !/no test\/build command ran/.test(outEmpty));
+  rmSync(dir, { recursive: true, force: true });
+}
+
+// ── v1.1.1 FIX 2 — connector-aware exit attribution. The last-segment rule was wrong BOTH ways:
+// `npm test && echo ok` crashing was laundered silent (last seg = echo), `cd frontend && npm test` failing
+// fired on tests that never ran (the cd failed). Rule: `||` → NULL; `;`/newline statements own exits
+// separately (earlier in-family → NULL); last statement's chain attributable iff ≥1 in-family segment and
+// every other segment is on the infallible allowlist (exactly echo/true/:) — cd is NOT infallible.
+{
+  const bev = (over = {}) => ({ cmd: 'npm test', seq: 1, background: false, is_error: false, text: '', ...over });
+  const nonZero = (claim, cmd, is_error) => analyze({ claim, bashCmds: [cmd],
+    bashEvents: [bev({ cmd, is_error, text: JSON.stringify('command failed') })] })
+    .some(f => f.cls === 1 && /NON-ZERO/.test(f.msg));
+  ok('C1-exit FIRES: `npm test && echo ok` crash — an infallible echo suffix can no longer launder the red (was SILENT)',
+    nonZero('all tests pass', 'npm test && echo ok', true));
+  ok('C1-exit SILENT: `rm x && npm test` crash — the rm may be what failed; a fallible peer means abstain',
+    !nonZero('all tests pass', 'rm x && npm test', true));
+  ok('C1-exit SILENT: `cd frontend && npm test` crash — cd fails on a missing dir, the test never ran (was a FIRES FP)',
+    !nonZero('all tests pass', 'cd frontend && npm test', true));
+  ok('C1-exit SILENT: red run then `npm test || true` — the masked latest run abstains BOTH ways: it neither blesses (green-launders the red) nor lets the earlier red condemn (the masked re-run may have been green)',
+    !has(analyze({ claim: 'all tests pass', bashCmds: ['npm test', 'npm test || true'],
+      bashEvents: [bev({ is_error: true, text: JSON.stringify('Killed') }),
+        bev({ cmd: 'npm test || true', seq: 2, is_error: false, text: JSON.stringify('ok') })] }), 1));
+  ok('C1-exit NULL on a pipe (`npm test | tee log`) but the legacy stdout sensor still catches the "3 failed" output',
+    (() => { const f = analyze({ claim: 'all tests pass', bashCmds: ['npm test | tee log'],
+      results: [{ is_error: false, text: '3 failed' }],
+      bashEvents: [bev({ cmd: 'npm test | tee log', is_error: false, text: JSON.stringify('3 failed') })] });
+      return f.some(x => x.cls === 1 && /reported failures/.test(x.msg)) && !f.some(x => /NON-ZERO/.test(x.msg)); })());
+  ok('C1-exit FIRES: `true && npm test && echo ok` crash — every peer infallible, the exit is the test\'s',
+    nonZero('all tests pass', 'true && npm test && echo ok', true));
+  ok('C1-exit SILENT: `true && npm test && git push` crash — a fallible tail (git push) owns doubt over the exit',
+    !nonZero('all tests pass', 'true && npm test && git push', true));
+  ok('C1-exit UNCHANGED: bare `npm test` exit-1 ("Killed") still fires',
+    nonZero('all tests pass', 'npm test', true));
+  ok('C1-exit SILENT: in-family run in an EARLIER `;` statement (`npm test; echo done`) — its exit was discarded',
+    !nonZero('all tests pass', 'npm test; echo done', true));
+  // ── adversarial-review regressions (post-v1.1.1 hardening) ──
+  ok('C1-exit FIRES: `npm test;` / `npm test\\n` — a BLANK trailing statement cannot launder the red (was SILENT: a one-char suffix washed it)',
+    nonZero('all tests pass', 'npm test;', true) && nonZero('all tests pass', 'npm test\n', true));
+  ok('C1-exit SILENT: `npm test & git push` crash — a lone `&` backgrounds the test, so the exit is the push\'s (was a FIRES FP)',
+    !nonZero('all tests pass', 'npm test & git push', true));
+  ok('C1-exit FIRES: `npm test 2>&1` crash — `>&` is redirect fd syntax, not a statement separator',
+    nonZero('all tests pass', 'npm test 2>&1', true));
+  ok('C1-exit SILENT: `npm test && echo done > /bad/path` crash — echo WITH a redirection can own the exit-1 (was a FIRES FP)',
+    !nonZero('all tests pass', 'npm test && echo done > /bad/path', true));
+  ok('C1-exit FIRES: `CI=1 npm test` and `(npm test)` — env prefix / subshell paren survive the command-position anchor',
+    nonZero('all tests pass', 'CI=1 npm test', true) && nonZero('all tests pass', '(npm test)', true));
+  ok('C1-exit SILENT: `grep vitest package.json` exit-1 after a real green — a runner name in an ARGUMENT is not a test run (was a FIRES FP)',
+    !has(analyze({ claim: 'all tests pass', bashCmds: ['npm test', 'grep vitest package.json'],
+      bashEvents: [bev({ text: JSON.stringify('5 passed') }),
+        bev({ cmd: 'grep vitest package.json', seq: 2, is_error: true, text: JSON.stringify('') })] }), 1));
+  ok('C1-stale FIRES: green → code edit → `grep vitest package.json` — an argument-substring "run" cannot refresh a stale green (laundering closed)',
+    analyze({ claim: 'all tests pass', bashCmds: ['npm test', 'grep vitest package.json'],
+      bashEvents: [bev({ text: JSON.stringify('5 passed') }),
+        bev({ cmd: 'grep vitest package.json', seq: 3, is_error: false, text: JSON.stringify('found') })],
+      mutations: [{ path: 'src/a.js', seq: 2, text: 'const x = 1;' }] })
+      .some(f => f.cls === 1 && /STALE/.test(f.msg)));
+}
+
+// ── v1.1.1 FIX 3 — stale-green mutation test compares NORMALIZED CODE portions (comment-stripped,
+// whitespace-stripped) of the added vs removed sides, so an inert edit — a comment tweak riding a code
+// line, a pure reformat — no longer stales a green; behavioral edits (string literals, real code) still do.
+{
+  const bev = (over = {}) => ({ cmd: 'npm test', seq: 1, background: false, is_error: false, text: '', ...over });
+  const greenAt1 = [bev({ text: JSON.stringify('5 passed, 0 failed') })];
+  const stale = (added, removed) => analyze({ claim: 'tests pass', bashCmds: ['npm test'], bashEvents: greenAt1,
+    mutations: [{ path: 'src/a.js', seq: 3, added, removed, text: [added, removed].filter(Boolean).join('\n') }] })
+    .some(f => f.cls === 1 && /STALE/.test(f.msg));
+  ok('C1-stale SILENT: comment tweak on a code-carrying line (`total++; // count` → `// the count`) — the CODE is identical (was a FIRES FP)',
+    !stale('total++; // the count', 'total++; // count'));
+  ok('C1-stale SILENT: pure whitespace reformat of a code line (`if(n<0){fail()}` → spaced) — normalizes equal (was a FIRES FP)',
+    !stale('if (n < 0) { fail() }', 'if(n<0){fail()}'));
+  ok('C1-stale FIRES: a changed STRING LITERAL (`log("a")` → `log("ab")`) is behavioral — strings are code, not comment',
+    stale('log("ab")', 'log("a")'));
+  ok('C1-stale FIRES: a real code change (`if(n<0)` → `if(n<=0)`) still stales the green',
+    stale('if(n<=0)', 'if(n<0)'));
+  ok('C1-stale SILENT: standalone comment edit stays silent under the new added/removed shape too',
+    !stale('// new note', '// old note'));
+  ok('C1-stale FIRES: pure code DELETION (removed side only) still counts — deleting code un-greens too',
+    stale('', 'const guard = checkAuth();'));
+  // End-to-end through the REAL ledger: parseTranscript now carries added/removed on each mutation.
+  const tx = [
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'npm test' } }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'b1', is_error: false, content: [{ type: 'text', text: '5 passed' }] }] } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'e1', name: 'Edit', input: { file_path: 'src/a.js', old_string: 'total++; // count', new_string: 'total++; // the count' } }] } }),
+  ].join('\n');
+  const q = parseTranscript(tx);
+  ok('C1-stale end-to-end: a real-transcript comment tweak after a green run is SILENT (the ledger carries both sides)',
+    q.mutations[0].added === 'total++; // the count'
+    && !has(analyze({ claim: 'tests pass', bashCmds: q.bashCmds, results: q.results, bashEvents: q.bashEvents, mutations: q.mutations }), 1));
+}
 
 // ── Class 2: stub/placeholder in added lines ──
 ok('C2 fires: TODO in added code',
