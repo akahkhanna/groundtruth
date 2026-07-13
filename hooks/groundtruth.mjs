@@ -603,9 +603,8 @@ export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], 
     const ev = ` ("${claim.slice(_passClaim.index, _passClaim.index + _passClaim[0].length).trim().slice(0, 60)}")`;   // slice the ORIGINAL (offsets align) so evidence has no blanking artifacts
     const testHits = bashCmds.filter(c => TEST_BUILD_RE.test(c));
     const ran = testHits.length > 0;
-    // Failure = a TEST RESULT that clearly reports failures — NOT any errored tool / stray ✗ / "Error:"
-    // anywhere in the noisy session (that breadth caused the false block). Narrow + warn-only (heuristic).
-    const failed = results.some(r => TEST_FAIL_RE.test(r.text));
+    // NOTE: `failed` (the failure-substring sensor) is defined BELOW, once `lastRun` exists — it is scoped to
+    // the run that actually BACKS the claim, not to every result in the session. See the v1.2.2 note there.
     // A "tests pass" claim backed ONLY by a syntax/type check (node --check, tsc, cargo check, …) is the
     // ESM-class trap: raw-node / compile green ≠ the runtime that actually ships. Warn (not block) — the noun
     // is specifically "tests", so FP is low, but a legit tsc-as-test turn shouldn't halt. Split on shell
@@ -688,6 +687,33 @@ export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], 
     const HARNESS_ABORT_RE = /\[Request interrupted|doesn'?t want to proceed|Command timed out after/i;
     const completedRuns = testEvents.filter(x => !x.background && x.is_error !== null && !HARNESS_ABORT_RE.test(x.text));
     const lastRun = completedRuns.length ? completedRuns[completedRuns.length - 1] : null;
+    // (1b) FAILURE-SUBSTRING sensor, SCOPED to the run that backs the claim (v1.2.2). It used to scan EVERY
+    // `results` entry in the session — so it fired on:
+    //   • a red run that was then FIXED and re-run GREEN (the last run is green; the stale failure text from
+    //     the earlier red lingers in `results` forever) — the normal red→fix→green flow, warned every turn;
+    //   • ANY tool output or pasted text merely CONTAINING "FAIL"/"N failed" — a probe script printing a
+    //     `**FAIL**` marker, a quoted CI log, a pasted report. Nothing to do with the test run at all.
+    // Measured: this was the single noisiest finding in GT's own development (~40 fires in one session, ~all
+    // false). Fix: when the paired `bashEvents` exist (the Stop path), test only the LAST COMPLETED FAMILY
+    // RUN's own stdout — the run that actually backs the claim, exactly the run the exit-status sensor above
+    // judges (the two sensors now agree on WHICH run is on trial; they only differ on how it failed —
+    // non-zero exit vs a failure line in otherwise-exit-0 output, which is why BOTH are kept: a misconfigured
+    // runner that prints "3 failed" and still exits 0 is invisible to the exit code).
+    // Fallback (no drift): with NO bashEvents — `--pre-commit`, `--diff-range`, a transcript with no tool ids,
+    // any legacy caller — `lastRun` is null and we keep the session-wide scan, i.e. exactly the old behavior.
+    // Accepted FN (documented, shared with the exit sensor — the shape is ANY trailing green in-family run,
+    // not just build): a red `npm test` followed by a green `npm run build` / `tsc --noEmit` / a filtered or
+    // file-scoped test run makes THAT the last family run, so the earlier red is not re-reported (probes 7/14,
+    // v1.2.2 review). The family fence is deliberate (v1.1.1) and the last family run is the evidence the
+    // claim rests on. Bounds that keep the laundering path narrow: a green LINT does not wash a red test (the
+    // fence excludes it → the red stays lastRun and fires); a filtered green under an "ALL tests" claim is
+    // caught by onlyFiltered (whose red-defeats-every inversion is fixed below, v1.2.2); a `|| true` masked
+    // re-run whose own output prints failures is still caught here (its text IS lastRun.text); and a
+    // same-command matching rule to close the rest was weighed and REJECTED — this repo's own honest idiom
+    // (red `npm test` → fix → green `node hooks/groundtruth.test.mjs`) changes the command string, so it
+    // would false-fire on the exact red→fix→green flow this scoping exists to keep silent. CI's fresh
+    // full-suite run is the enforcement backstop for the residual (SECURITY.md's layer split).
+    const failed = lastRun ? TEST_FAIL_RE.test(lastRun.text) : results.some(r => TEST_FAIL_RE.test(r.text));
     // CONNECTOR-AWARE exit attribution (v1.1.1) — the old "final shell segment must be the test" rule was
     // wrong in BOTH directions: `npm test && echo ok` crashing read as unattributable (last seg = echo) and
     // the red was LAUNDERED silent behind a decorative suffix (verified FN), while `cd frontend && npm test`
@@ -810,7 +836,26 @@ export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], 
     // through (laundering FN). And `.length > 0`: with ONLY lint run, every() over an empty set is true —
     // a phantom "every run was filtered" verdict with no relevant run at all (abstain instead).
     const famHits = testHits.filter(c => famSegs(c).length > 0);
-    const onlyFiltered = ran && UNIVERSAL_RE.test(_passSentence) && famHits.length > 0 && famHits.every(filteredOnly);
+    // RED-DEFEATS-EVERY inversion (v1.2.2, exposed by scoping `failed` above): famHits grades COMMAND STRINGS
+    // with no outcome attached, so an unfiltered run defeated `.every(filteredOnly)` even when that run
+    // FAILED — red `npm test` → green `npm test -- --grep trivial` → "All tests pass." came out fully silent
+    // (the exit/substring sensors judge the green lastRun; onlyFiltered saw an unfiltered famHit and stood
+    // down). Net effect: adding a FAILING full run made the verdict CLEANER than the filtered run alone — an
+    // inversion, and a one-command laundering recipe (verified by probe). It was masked pre-v1.2.2 only
+    // because the session-wide substring sensor happened to fire on the red's stale text. Fix: when outcome
+    // data exists and is trustworthy — no unpaired and no background family run, the same abstain conditions
+    // the exit and stale-green sensors already hold (a lost or out-of-order result may have been the full
+    // green run; condemning past it would be deciding on missing data) — grade the GREEN COMPLETED runs
+    // instead: only a green unfiltered run can back an "all tests" claim, so only one defeats the check.
+    // Otherwise (no events / no green completed run / untrustworthy pairing or ordering) keep the legacy
+    // command-string grade verbatim — zero drift for --pre-commit / --diff-range / legacy callers, and the
+    // red-only session stays with the (stricter) legacy grade, where the earlier exit/substring branches of
+    // the else-if chain own the verdict anyway.
+    const greenRuns = completedRuns.filter(r => r.is_error === false);
+    const greensTrustable = greenRuns.length > 0 && !unpairedFg && !testEvents.some(x => x.background);
+    const onlyFiltered = ran && UNIVERSAL_RE.test(_passSentence) && (greensTrustable
+      ? greenRuns.every(r => filteredOnly(r.cmd))
+      : famHits.length > 0 && famHits.every(filteredOnly));
     // sev:'warn', not 'block': the `ran` side is deterministic (recorded commands) but the CLAIM side is
     // prose-parsing of natural language — a heuristic with a live-demonstrated FP class (quoting/echoing
     // "tests pass"). A conjunction's severity is bounded by its weakest conjunct, and by this project's own

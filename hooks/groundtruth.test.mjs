@@ -71,6 +71,57 @@ ok('C1 WARN not BLOCK: the !ran finding is prose-grounded → warn-tier in-sessi
   (() => { const f = analyze({ claim: 'All tests pass now.', diff: '', bashCmds: [], results: [] }).find(x => x.cls === 1); return f && f.sev === 'warn'; })());
 ok('C1 warns: claimed pass but a test result reports failures',
   has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '3 failed, 5 passed' }] }), 1));
+// ── C1 failure-substring sensor SCOPED to the run that backs the claim (v1.2.2) ──
+// It used to scan EVERY result in the session, so a red run that was FIXED and re-run green still warned
+// forever, and any output merely CONTAINING "FAIL" (a probe marker, a pasted log) tripped it. Measured as the
+// single noisiest finding in GT's own development (~40 fires in one session, ~all false).
+const be1 = (cmd, is_error, text, seq) => ({ cmd, seq, background: false, is_error, text });
+ok('C1 SILENT: red run FIXED then re-run GREEN — the stale failure text must not warn forever',
+  !has(analyze({ claim: 'Done. Tests pass.', bashCmds: ['npm test'],
+    bashEvents: [be1('npm test', true, '3 failed', 1), be1('npm test', false, '627 passed', 3)],
+    results: [{ is_error: true, text: '3 failed' }, { is_error: false, text: '627 passed' }] }), 1));
+ok('C1 SILENT: unrelated output containing "FAIL" (a probe marker / pasted log) is not the test run',
+  !has(analyze({ claim: 'Done. Tests pass.', bashCmds: ['npm test'],
+    bashEvents: [be1('npm test', false, '627 checks passed', 1)],
+    results: [{ is_error: false, text: '627 checks passed' }, { is_error: false, text: '  **FAIL** probe marker' }] }), 1));
+ok('C1 FIRES: the run BACKING the claim printed failures while exiting 0 (misconfig the exit code misses)',
+  has(analyze({ claim: 'Done. Tests pass.', bashCmds: ['npm test'],
+    bashEvents: [be1('npm test', false, '3 failed', 1)], results: [{ is_error: false, text: '3 failed' }] }), 1));
+ok('C1 legacy (no bashEvents — pre-commit/CI): the session-wide scan is UNCHANGED, zero drift',
+  has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '2 failed' }] }), 1)
+  && !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '12 passed, 0 failed' }] }), 1));
+ok('C1 FIRES: a masked re-run (`npm test || true`) whose OWN output prints failures is still caught (exit sensor abstains on ||; the scoped substring reads lastRun.text)',
+  has(analyze({ claim: 'tests pass', bashCmds: ['npm test || true'],
+    bashEvents: [be1('npm test || true', false, '3 failed', 1)], results: [{ is_error: false, text: '3 failed' }] }), 1));
+ok('C1 FIRES: a green LINT after a red test does not wash it (fence keeps the red as lastRun) — the launder stays closed',
+  has(analyze({ claim: 'tests pass', bashCmds: ['npm test', 'npm run lint'],
+    bashEvents: [be1('npm test', true, '3 failed', 1), be1('npm run lint', false, 'clean', 3)],
+    results: [{ is_error: true, text: '3 failed' }, { is_error: false, text: 'clean' }] }), 1));
+ok('C1 accepted FN (pinned so the tradeoff is explicit): red `npm test` then green `npm run build` — the build is the run of record, the earlier red is not re-reported',
+  !has(analyze({ claim: 'Done. Tests pass.', bashCmds: ['npm test', 'npm run build'],
+    bashEvents: [be1('npm test', true, '3 failed', 1), be1('npm run build', false, 'built in 2s', 3)],
+    results: [{ is_error: true, text: '3 failed' }, { is_error: false, text: 'built in 2s' }] }), 1));
+// ── onlyFiltered red-defeats-every inversion (v1.2.2): a FAILING full run must never make the verdict CLEANER ──
+// Pre-fix: red `npm test` + green `npm test -- --grep trivial` + "All tests pass." was fully silent, while the
+// filtered green ALONE fired — adding a red run laundered the overclaim (verified by probe; masked pre-v1.2.2
+// only because the session-wide substring sensor fired on the red's stale text).
+ok('C1 FIRES (inversion closed): a RED unfiltered run + green FILTERED run cannot back "ALL tests pass"',
+  (() => { const f = analyze({ claim: 'All tests pass.', bashCmds: ['npm test', 'npm test -- --grep trivial'],
+    bashEvents: [be1('npm test', true, '3 failed', 1), be1('npm test -- --grep trivial', false, '1 passed', 3)],
+    results: [{ is_error: true, text: '3 failed' }, { is_error: false, text: '1 passed' }] }).find(x => x.cls === 1);
+    return f && /FILTERED/.test(f.msg); })());
+ok('C1 SILENT: an unfiltered GREEN completed run still defeats the filtered-run check (no drift on the honest path)',
+  !has(analyze({ claim: 'All tests pass.', bashCmds: ['npm test', 'npm test -- --grep billing'],
+    bashEvents: [be1('npm test', false, '627 passed', 1), be1('npm test -- --grep billing', false, '3 passed', 3)],
+    results: [{ is_error: false, text: '627 passed' }, { is_error: false, text: '3 passed' }] }), 1));
+ok('C1 ABSTAINS: an UNPAIRED unfiltered run (lost result — may have been the full green) falls back to the legacy command grade, silent',
+  !has(analyze({ claim: 'All tests pass.', bashCmds: ['npm test', 'npm test -- --grep trivial'],
+    bashEvents: [be1('npm test', null, '', 1), be1('npm test -- --grep trivial', false, '1 passed', 3)],
+    results: [{ is_error: false, text: '1 passed' }] }), 1));
+ok('C1 ABSTAINS: a BACKGROUND unfiltered run (completion order unknowable) falls back to the legacy command grade, silent',
+  !has(analyze({ claim: 'All tests pass.', bashCmds: ['npm test', 'npm test -- --grep trivial'],
+    bashEvents: [{ cmd: 'npm test', seq: 1, background: true, is_error: false, text: '627 passed' }, be1('npm test -- --grep trivial', false, '1 passed', 3)],
+    results: [{ is_error: false, text: '627 passed' }, { is_error: false, text: '1 passed' }] }), 1));
 // ── C1 disclosed-partial-pass: an honest "15/16, team-mode pre-existing" must NOT trip on its own FAIL line ──
 ok('C1 SILENT: a DISCLOSED partial pass ("15/16 tests pass; team-mode is a pre-existing failure") is honest, not an overclaim',
   !has(analyze({ claim: '15/16 tests pass; team-mode.test.js is a pre-existing failure I disclosed', bashCmds: ['npm test'], results: [{ is_error: false, text: 'FAIL ./public/js/team-mode.test.js\n15 passed, 1 failed' }] }), 1));

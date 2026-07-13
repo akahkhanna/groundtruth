@@ -148,25 +148,26 @@ buyer's key (the per-turn audit is deterministic + free; only the opt-in `/groun
 
 Running Groundtruth on the session that *builds* Groundtruth is the worst case for self-match: the work
 product is saturated with the tool's own trigger strings (test-pass/fail language, filenames, eval/CI
-branches). Two FP families there have a real fix ratio and are **tracked, not yet done**:
+branches). Two FP families were tracked here. One is **fixed**; the other is a deliberate **no-fix**.
 
-- **Class 1 warn ("a test run looks like it reported failures") is a session-wide substring scan, not a
-  last-run check.** The `failed && !disclosesFailure` branch tests `TEST_FAIL_RE` against **every**
-  `results` entry in the session — so it fires when (a) an earlier run failed and was then fixed and
-  re-run **green** (the last run is green; the stale failure text persists), or (b) prose / pasted output
-  merely *contains* `FAIL`/`N failed`. **Fix:** bind the failure-substring check to the **last completed
-  test run's own stdout** via the paired `bashEvents` the v1.1.0 exit layer already built (the
-  last-completed-run + attribution logic exists) — a fixed-then-green turn and unrelated failure text in
-  prose then stop tripping it. Keep the substring sensor (it catches the exit-0-but-printed-"3 failed"
-  misconfig the exit code misses) — just **scope it to the last run**, don't replace it.
-- **Class 9 (special-casing / overfit) self-matches Groundtruth's OWN source.** The one file that must
-  discuss test/CI/eval branching is the tool that *detects* test/CI/eval branching — so its comments
-  (`// EVAL_SUPPRESS_RE`, `// … GROUNDTRUTH_KEY …`) and code (`renderCard(...)`) trip it. **Fix (narrow,
-  not a blanket self-exclude):** reuse the existing declaring-file precedent (a compiled rule never fires
-  on the doc that declares it — FIXES R2) so the detector doesn't fire on the source that *defines* its
-  own patterns. A blanket "skip the tool's own path" is rejected — it would hide real special-casing in
-  GT itself; the exclusion must be pattern-scoped, not path-scoped. Low priority (a dogfooding artifact,
-  not a buyer-facing FP), documented so it isn't mistaken for signal.
-
-Both are *precision* work on shipped checks, not new capability — same bar as every FIXES entry (reproduce
-the FP, fix at root, pin a regression), just not yet started.
+- **~~Class 1 warn: session-wide substring scan~~ — FIXED in v1.2.2.** The `failed` sensor scanned **every**
+  `results` entry in the session, so it fired on (a) a red run that was then fixed and re-run **green** (the
+  stale failure text lingers forever — the normal red→fix→green flow warned every turn) and (b) any output
+  merely *containing* `FAIL`/`N failed` (a probe marker, a pasted log). Measured at ~40 fires in one session
+  of GT's own development, nearly all false. Now bound to `lastRun` — the same run the exit-status sensor
+  judges. Both sensors kept: exit catches a crash with no failure string, substring catches a runner that
+  prints "3 failed" and still exits 0. No `bashEvents` (pre-commit/CI/legacy) → the old session-wide scan
+  verbatim, zero drift (pre-change suite re-run green against the new engine). See FIXES v1.2.2.
+- **Class 9 self-matching Groundtruth's own source — DELIBERATE NO-FIX (not a bug).** Worth recording *why*,
+  because the fix originally proposed here **does not survive contact**. `EVAL_CODE_RE` matches
+  `GROUNDTRUTH_[A-Z]\w*`, and this engine genuinely *does* branch on `process.env.GROUNDTRUTH_BLOCK` /
+  `GROUNDTRUTH_KEY`. So the detector is **correctly** identifying a real runtime branch on the evaluator —
+  it is only *legitimate* here because this IS the evaluator. The comment/code split it already does is
+  working; there is no prose-as-code bug to fix. That leaves **identity** as the only sound discriminator
+  between "the tool reading its own config" and "a project gaming the tool" — i.e. exactly the path-scoped
+  self-exclusion this note previously rejected, and rightly: it would blind Class 9 to *real* special-casing
+  inside Groundtruth, which is the one codebase where gaming the checker matters most. The earlier
+  "pattern-scoped, reuse the declaring-file precedent (FIXES R2)" idea doesn't apply — R2 works because a
+  rule's *provenance* is recorded; an env-var branch has no declaring file. **Conclusion: accept the noise.**
+  It hits only people developing Groundtruth itself, never users, and the alternative trades a real security
+  property for cosmetic quiet. Documented so it isn't re-litigated, and isn't mistaken for signal.
