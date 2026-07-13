@@ -1398,6 +1398,33 @@ const READ_INTENT_RE = /\b(?:look(?:ing|ed)?\s+(?:at|into|through)|read|review|a
 // A turn read as a QUESTION (interrogative) — a distinct FP class from the dismissals above ("is report.js
 // right?"), also answered in conversation with no diff.
 const QUESTION_RE = /\?\s*$|^\s*(?:why|what|whats?|how|is|are|was|were|does|do|did|should|shall|can|could|would|will|which|when|where|who|whom|whose)\b/i;
+// DECLARATIVE / EXISTENTIAL — the user stating a FACT about something that ALREADY EXISTS ("I do have
+// image_attributions.md on downloads folder", "there is a notes.md on my desktop"), not commissioning work.
+// LIVE FP (real hindsight session): the user saying they HAD a file minted it as a HARD deliverable — and the
+// file lived in ~/Downloads, OUTSIDE the repo, so it could never ground in a git diff, so the task could never
+// close: it nagged every turn and, under block mode, escalated to a BLOCK on a deliverable that was never
+// requested and cannot exist. That is the v1.0.5 phantom-deliverable / block-mode wedge arriving through a new
+// door (there: a pasted tool listing; here: a statement of possession). isTrackableRequest() could not catch it
+// because a declarative is neither a dismissal (NON_REQUEST_RE) nor a question (QUESTION_RE), so it fell through
+// its `!framed → track` fast path. Gated on NO co-occurring REQUEST_VERB_RE, so "I have a notes.md — add it to
+// the repo" and "I have a bug in parser.js, fix it" stay HARD; and it DEMOTES to soft (surfaced once,
+// auto-expires, never blocks) rather than dropping — the demote-never-drop invariant: if the user really did
+// mean it as an ask, it still surfaces.
+const DECLARATIVE_RE = /\b(?:i|we)\s+(?:do\s+|already\s+)?(?:have|had|has)\b|\b(?:i|we)['’]ve\s+(?:already\s+)?got\b|\bthere\s+(?:is|are|was|were|exists?)\b|\bexists?\s+(?:in|on|at|under)\b/i;
+// A declarative that reports a PROBLEM or a LACK is a commission in declarative clothing — "we have a bug:
+// cache.js returns stale data", "I've got a broken migration in schema.sql", "there is no error handling in
+// parser.js", "I have three files that need updating" are all real asks with no REQUEST_VERB in reach. The
+// first cut of the declarative gate demoted every one of them to soft (adversarial review of v1.2.1 — the FN
+// direction, the completeness backstop going quiet). This gate can only RESTORE pre-v1.2.1 hardness, never
+// create new hardness, so it cannot introduce a new FP; over-matching merely falls back to the old behavior.
+const PROBLEM_RE = /\b(?:bug|issue|problem|defect|error|fail(?:s|ed|ing|ure)?|broken|breaks?|crash\w*|flak(?:y|iness)|leak\w*|stale|race|regress\w*|vulnerab\w*|typos?|wrong|incorrect|missing|outdated|needs?|lack\w*|without)\b|\bno\s+\w+/i;
+// Anaphoric commission — the request verb lives in a DIFFERENT clause than the token, aimed back at it through
+// a pronoun: "I have a notes.md. Add it to the repo." splitClauses puts notes.md in the declarative clause and
+// `add` in a clause with no token of its own, so per-clause gating alone demoted the token and the ask's hard
+// set came out EMPTY — even for the fully explicit "…. Can you add it to the repo?" (adversarial review of
+// v1.2.1). A token-less trackable request clause whose object is a pronoun means the ask DID commission the
+// thing the declarative named → the demotion is void. Same restore-only safety property as PROBLEM_RE.
+const ANAPHORIC_PRONOUN_RE = /\b(?:it|that|this|them|those|these)\b/i;
 // Trackable iff it is NOT (framed as observation/question with no surviving action verb). The verb test runs
 // on the text with the dismissal phrases STRIPPED — critical, because "no fix needed" itself contains the
 // verb "fix"; testing the raw string would let that negated "fix" mark the aside as a real request (the bug
@@ -1466,14 +1493,29 @@ export function classifyDeliverables(text) {
   const paste = pasteStripped(full);
   const isRef = (tok) => { const b = tok.replace(/`/g, ''); return full.includes(b) && !paste.includes(b); };
   const hard = new Set(), soft = new Set();
-  for (const clause of splitClauses(full)) {
+  const clauses = splitClauses(full);
+  // Ask-wide anaphora scan, computed ONCE (like paste-provenance): does ANY clause command work on a pronoun
+  // while naming no token of its own ("Add it to the repo")? If so, the pronoun's referent is the token some
+  // OTHER (declarative) clause named — the declarative demotion below must not fire. See ANAPHORIC_PRONOUN_RE.
+  // NOTE: readsOnly shares this cross-clause blindness ("look at notes.md. Then add it.") but predates the
+  // declarative gate and the corpus is tuned to it — restoring hardness there is a separate, deliberate change.
+  const anaphoricReq = clauses.some(cl =>
+    REQUEST_VERB_RE.test(cl) && ANAPHORIC_PRONOUN_RE.test(cl) && extractTokens(cl).length === 0 && isTrackableRequest(cl));
+  for (const clause of clauses) {
     const req = isTrackableRequest(clause);
     // A read-intent clause with NO write/action verb names inputs, not deliverables → DEMOTE its tokens to soft
     // (a one-time aside that auto-expires, never a blocking open-loop), never DROP them. Closes the "look at
     // cluePrompts.js" false open-loop while keeping "review auth.js and add a guard" hard (add ∈ REQUEST_VERB).
     const readsOnly = READ_INTENT_RE.test(clause) && !REQUEST_VERB_RE.test(clause);
+    // A DECLARATIVE clause names a thing that ALREADY EXISTS ("I do have image_attributions.md on downloads
+    // folder"), not one to produce — see DECLARATIVE_RE. Same demotion as read-intent: soft, never dropped.
+    // NOT declarative when the clause reports a problem/lack (PROBLEM_RE — "we have a bug: cache.js…") or when
+    // another clause commands work on a pronoun referring back to it (anaphoricReq — "I have a notes.md. Add
+    // it."). Both gates only restore pre-v1.2.1 hardness, so they cannot mint a new false positive.
+    const declarative = DECLARATIVE_RE.test(clause) && !REQUEST_VERB_RE.test(clause)
+      && !PROBLEM_RE.test(clause) && !anaphoricReq;
     for (const tok of extractTokens(clause))
-      (req && !readsOnly && !isRef(tok) ? hard : soft).add(tok);
+      (req && !readsOnly && !declarative && !isRef(tok) ? hard : soft).add(tok);
   }
   for (const t of hard) soft.delete(t);                                        // hard wins over soft
   return { hard: [...hard], soft: [...soft] };

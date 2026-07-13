@@ -1765,6 +1765,54 @@ ok('C2: an agent naming the deliverable in its reply canNOT demote the ask (no a
   classifyDeliverables('add a csv export to report.js').hard.includes('report.js'));
 ok('a user-novel token in a real request is HARD',
   classifyDeliverables('add a guard to app.js').hard.includes('app.js'));
+// DECLARATIVE demotion (v1.2.1) — the user stating a file EXISTS is not commissioning it. Live FP from a real
+// hindsight session: "I do have image_attributions.md on downloads folder" minted a HARD deliverable; the file
+// was in ~/Downloads (outside the repo) so it could never ground in a diff → the task never closed, nagged every
+// turn, and under block mode escalated to a BLOCK on work never requested. Demote to SOFT, never drop.
+ok('DECLARATIVE: "I do have image_attributions.md on downloads folder" is SOFT, not a HARD unclosable loop',
+  (() => { const c = classifyDeliverables('I do have image_attributions.md on downloads folder'); return c.soft.includes('image_attributions.md') && !c.hard.includes('image_attributions.md'); })());
+ok('DECLARATIVE: existential "there is a notes.md on my desktop" is SOFT',
+  (() => { const c = classifyDeliverables('there is a notes.md on my desktop'); return c.soft.includes('notes.md') && !c.hard.includes('notes.md'); })());
+ok('DECLARATIVE does NOT swallow a real request: a REQUEST_VERB in the same clause keeps it HARD',
+  classifyDeliverables('I have a bug in parser.js, fix it').hard.includes('parser.js')
+  && classifyDeliverables('I have to rewrite cache.js').hard.includes('cache.js')
+  && classifyDeliverables('I have a notes.md — add it to auth.js').hard.includes('auth.js'));
+ok('DECLARATIVE: a plain imperative naming the same file is still HARD (no false negative)',
+  classifyDeliverables('Add an image_attributions.md to the repo').hard.includes('image_attributions.md'));
+// Adversarial review of v1.2.1 (FN direction): the first cut of the declarative gate swallowed PROBLEM REPORTS —
+// declarative in form, commission in function. "we have a bug", "there is no X", "broken", "need updating" all
+// demoted to soft, i.e. the completeness backstop went quiet on real asks. PROBLEM_RE restores pre-v1.2.1 hardness.
+ok('PROBLEM report is NOT a benign declarative: "we have a bug: cache.js returns stale data" stays HARD',
+  classifyDeliverables('we have a bug: cache.js returns stale data').hard.includes('cache.js'));
+ok('PROBLEM report: "I\'ve got a broken migration in schema.sql" stays HARD',
+  classifyDeliverables("I've got a broken migration in schema.sql").hard.includes('schema.sql'));
+ok('NEGATIVE existential is a request, not a possession: "there is no error handling in parser.js" stays HARD',
+  classifyDeliverables('there is no error handling in parser.js').hard.includes('parser.js'));
+ok('NEGATIVE existential: "we have no rate limiting in api.js" stays HARD',
+  classifyDeliverables('we have no rate limiting in api.js').hard.includes('api.js'));
+ok('"I have three files that need updating: a.js, b.js, c.js" — need = ask, all three stay HARD',
+  (() => { const c = classifyDeliverables('I have three files that need updating: a.js, b.js, c.js'); return ['a.js', 'b.js', 'c.js'].every(f => c.hard.includes(f)); })());
+ok('PROBLEM report via bare "exists in": "a race condition exists in cache.js" stays HARD',
+  classifyDeliverables('a race condition exists in cache.js').hard.includes('cache.js'));
+// Adversarial review of v1.2.1 (FN direction), the cross-clause anaphora hole: splitClauses puts the token in the
+// declarative clause and the request verb in the NEXT clause with only a pronoun — per-clause gating alone left
+// the ask's hard set EMPTY even for a fully explicit "…. Can you add it to the repo?". anaphoricReq voids the demotion.
+ok('ANAPHORA: "I have a notes.md. Add it to the repo." — verb in the next clause, token stays HARD',
+  classifyDeliverables('I have a notes.md. Add it to the repo.').hard.includes('notes.md'));
+ok('ANAPHORA: the live-FP phrasing PLUS an explicit "Can you add it to the repo?" is HARD, not swallowed',
+  classifyDeliverables('I do have image_attributions.md on downloads folder. Can you add it to the repo?').hard.includes('image_attributions.md'));
+ok('ANAPHORA does not over-reach: a co-occurring NON-anaphoric request leaves the declarative SOFT',
+  (() => { const c = classifyDeliverables('I do have image_attributions.md on downloads folder. Also fix the typo in the changelog.'); return c.soft.includes('image_attributions.md') && !c.hard.includes('image_attributions.md'); })());
+// End-to-end: a declarative-demoted (soft) task must NEVER reach block severity — not even under a matching
+// false done-claim — while a hard task under the same claim still blocks. This is the block-mode wedge the
+// declarative gate exists to prevent, asserted at the surfacing layer, not just at classification.
+ok('e2e: soft declarative task surfaces as info (never block) even under a matching done-claim; hard still blocks',
+  (() => {
+    const ledger = updateTaskLedger([], ['I do have image_attributions.md on downloads folder', 'add a csv export to report.js'], '');
+    const claim = 'Done — image_attributions.md handled and report.js csv export complete.';
+    const sev = Object.fromEntries(ledger.map(t => [t.tier, surfaceOpenLoop(t, claim).finding?.sev]));
+    return sev.soft === 'info' && sev.hard === 'block';
+  })());
 // M2 regression: paste-provenance computed on the FULL ask (fence survives clause-splitting).
 ok('paste-provenance (fence): a token only inside a ``` fence is a reference (SOFT), not a HARD open loop',
   (() => { const c = classifyDeliverables('why does this crash?\n```\nconst x = doTheThing(payload)\n```'); return c.soft.includes('doTheThing') && !c.hard.includes('doTheThing'); })());
