@@ -8,6 +8,36 @@ Tracks `groundtruth-architecture.md` **v0.4**. What's built, and what's left to 
 > sure your agent did it right." The pressure to overclaim is worst while writing launch copy; this
 > line exists to stop future-you doing the exact thing the tool exists to catch.
 
+## Verification tiers (what "deterministic vs needs-a-model" actually splits into)
+
+"Deterministic vs needs-a-model" compressed two independent axes — *judgment* and *execution cost* — and
+mis-filed things as a result (a reviewer caught it). The honest split is four tiers by **what resource
+closes the question**:
+
+- **T1 — artifact you already hold.** The git-diff + the transcript. Hermetic: same claim + same diff →
+  same verdict, no execution, free, no side effects. Everything shipped today.
+- **T1.5 — execution evidence the agent already produced, read from the transcript.** The false-"tests
+  pass" family: it runs nothing, it audits the run the agent *claims* against the harness's own record
+  (exit code, ordering, `TEST_FAIL_RE`). Also shipped. Cheapest execution-shaped check there is.
+- **T2 — empirical (produce a NEW artifact by execution).** Mutation testing, property fuzz, coverage.
+  Algorithmic, **no model** — but **not** "deterministic" in T1's sense: real suites are flaky, timing-
+  and env-dependent, side-effectful. Two hard limits: (a) a produced artifact is computed by
+  *agent-authored code*, so it is **not a trust anchor** the way the diff/transcript are — a test that
+  asserts on a hash of the source file scores a perfect mutation kill while asserting nothing; it holds
+  against a sloppy agent, not an adversarial one. (b) it over-reports (equivalent mutants, scope
+  mismatch, flakiness). Under the FP-fatal charter that makes the **model-free** tier the *dangerous*
+  one — the charter binds by **failure direction**, not by mechanism — so T2 belongs in the **CI rung**
+  (`--diff-range`, where a red check is human-overridable), warn/abstain-heavy, never the per-turn hook.
+- **T3 — model judge.** Genuinely judgment. Failures are unbounded and unauditable; can be argued out of
+  a verdict. Opt-in only (`/groundtruth-rules-ai`), never a gate.
+
+The **oracle-free residual** — "picked a worse-but-passing approach," worse relative to an intent nobody
+wrote down — sits above all four: no artifact to diff, and a model scores against a spec that doesn't
+exist. This is **never shipped as a verdict** (positioning guard). The tool already refuses it (the
+thin-prompt LOW-CONFIDENCE warning), and the **rules compiler is the machine that shrinks it**: the moment
+"worse" is writable (`use X not Y`, `never Z`) it compiles to a T1 predicate. The residual is the set of
+preferences nobody wrote down — the fix is inducing the human to write them, not a smarter judge.
+
 ## Built
 
 - **Audit mode** (§3) — `node hooks/groundtruth.mjs --audit`: whole-repo debt inventory (classes 2 + 4),
@@ -20,14 +50,18 @@ Tracks `groundtruth-architecture.md` **v0.4**. What's built, and what's left to 
   special-casing/overfit.
 - **Completeness (5 scope-miss)** — a named deliverable absent from the diff (open-loop / task ledger;
   deliberately crude name-matching). **Directive-override (7)** — your docs compiled into deterministic
-  predicates + enforced (the differentiator, delivered without an LLM). NOT shipped (these need the
-  semantic/LLM layer): spec-substitution, 8 regression-blind, and the *semantic* versions of 5/7.
+  predicates + enforced (the differentiator, delivered without an LLM). NOT shipped: spec-substitution
+  and the *semantic* versions of 5/7 need the **T3 model layer**; **8 regression-blind is T2 (empirical)
+  — a test run, not a judgment call** — so it belongs in the CI rung, not the model layer it was filed
+  under.
   (Class 6 was reserved for spec-substitution but is now shipped as the deterministic dropped-symbol
   check above; the semantic spec-substitution idea remains unshipped and unnumbered.)
 - **Class 9 — special-casing / overfit (v0.6, warn-only)**: non-test source that detects it's under
   test/CI/audit (gaming Groundtruth's own env, or a CI/test env branch). Deterministic core only;
-  **deferred** (named, not half-built): 9c hardcoded-answer-lifted-from-a-test → the LLM layer; 9d
-  passes-only-the-visible-test → needs the hidden oracle, the LLM layer.
+  **deferred** (named, not half-built): 9c hardcoded-answer-lifted-from-a-test → the T3 model layer; 9d
+  passes-only-the-visible-test → needs the hidden oracle, which is **T2 (empirical — mutation/hidden-test
+  run), not the model layer** it was filed under; a *cheap slice* of it (an added test that makes no call,
+  so it provably can't fail) is T1 and is now **shipped** (`vacuousTestFindings`, warn-only).
 - **Output-contract hardening (v0.6, warn-only)**: a compiled rule whose `unless_re` matches everything
   is surfaced as INERT (armed-but-neutered), and an inline exemption added the same turn as the violation
   is surfaced, not silently honored — closing the "neuter the instrument without tripping tamper" hole.
@@ -107,3 +141,32 @@ Deeper analysis that also lands here: semantic intent↔diff matching (beyond fi
 Platform absorption (sell the **taxonomy**, not the plumbing) · false positives (warn-first,
 evidence-always) · rule-source ambiguity (auto-discovery + `groundtruth.rules`) · checker cost on the
 buyer's key (the per-turn audit is deterministic + free; only the opt-in `/groundtruth-rules-ai` uses the model, on demand) · gate gaming (§14 anti-gaming).
+
+---
+
+## Known FP surface — deferred precision (found by dogfooding GT on its own development)
+
+Running Groundtruth on the session that *builds* Groundtruth is the worst case for self-match: the work
+product is saturated with the tool's own trigger strings (test-pass/fail language, filenames, eval/CI
+branches). Two FP families there have a real fix ratio and are **tracked, not yet done**:
+
+- **Class 1 warn ("a test run looks like it reported failures") is a session-wide substring scan, not a
+  last-run check.** The `failed && !disclosesFailure` branch tests `TEST_FAIL_RE` against **every**
+  `results` entry in the session — so it fires when (a) an earlier run failed and was then fixed and
+  re-run **green** (the last run is green; the stale failure text persists), or (b) prose / pasted output
+  merely *contains* `FAIL`/`N failed`. **Fix:** bind the failure-substring check to the **last completed
+  test run's own stdout** via the paired `bashEvents` the v1.1.0 exit layer already built (the
+  last-completed-run + attribution logic exists) — a fixed-then-green turn and unrelated failure text in
+  prose then stop tripping it. Keep the substring sensor (it catches the exit-0-but-printed-"3 failed"
+  misconfig the exit code misses) — just **scope it to the last run**, don't replace it.
+- **Class 9 (special-casing / overfit) self-matches Groundtruth's OWN source.** The one file that must
+  discuss test/CI/eval branching is the tool that *detects* test/CI/eval branching — so its comments
+  (`// EVAL_SUPPRESS_RE`, `// … GROUNDTRUTH_KEY …`) and code (`renderCard(...)`) trip it. **Fix (narrow,
+  not a blanket self-exclude):** reuse the existing declaring-file precedent (a compiled rule never fires
+  on the doc that declares it — FIXES R2) so the detector doesn't fire on the source that *defines* its
+  own patterns. A blanket "skip the tool's own path" is rejected — it would hide real special-casing in
+  GT itself; the exclusion must be pattern-scoped, not path-scoped. Low priority (a dogfooding artifact,
+  not a buyer-facing FP), documented so it isn't mistaken for signal.
+
+Both are *precision* work on shipped checks, not new capability — same bar as every FIXES entry (reproduce
+the FP, fix at root, pin a regression), just not yet started.

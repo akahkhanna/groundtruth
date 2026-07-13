@@ -431,6 +431,76 @@ export function testWeakeningFindings(claim = '', diff = '') {
   return out;
 }
 
+// VACUOUS TEST (Class 1) — an ADDED test that provably cannot fail. This is the cheap T1 slice of the
+// "passes-only-the-visible-test / asserts-nothing" class (the rest is T2, mutation testing — see ROADMAP
+// "Verification tiers"). Scoped (Fable) to be FALSE-POSITIVE-free, not broad: a JS/TS test whose body
+// makes NO call, no `throw`, no `await`, and no chai-`should` getter chain (ACTION_RE explains the last
+// two). In JS an assertion is otherwise ALWAYS a call (`expect(...)`, `assertEquals`),
+// so "no call" ⇒ "no assertion" — AND it isn't a legitimate "doesn't throw" smoke test either, because a
+// smoke test CALLS the code under test. A call-free, throw-free body is dead: it can only pass. That kills
+// the two FP classes a token-scan ("no `assert` keyword") dies on — a DELEGATED assertion (`checkUser(x)`
+// asserting three files away) has a call, and a TABLE-DRIVEN assertion in a shared loop has a call. Fires
+// ONLY on a fully-added, brace-BALANCED block: an edited test's body may live outside the diff hunk, so an
+// unbalanced block abstains. JS/TS grammar ONLY — pytest/Go assert via `assert`/`t.Error` STATEMENTS, not
+// calls, so "no call" would falsely flag `assert x == 1`; those files never match JS_TEST_FILE_RE.
+const JS_TEST_FILE_RE = /\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)(?:__tests__|tests?|spec)\/[^/]*\.[cm]?[jt]sx?$/i;
+const TEST_OPEN_RE = /\b(?:it|test|specify)\s*\(\s*(['"`])(?:\\.|(?!\1)[\s\S])*?\1\s*,\s*(?:async\s+)?(?:function\b[^(]*)?\([^)]*\)\s*(?:=>\s*)?\{/g;
+// A "real action" in the body: a construction, a throw, a method call `.foo(`, or a bare call `foo(` that
+// isn't a control-flow keyword. `console.*(…)` is stripped before this runs (an allowed no-op).
+// Two call-free forms that CAN still fail are also actions (each was a verified FP in review):
+// `await <expr>` — awaiting a pre-built promise rejects → fails, no call needed; and `.should` — chai's
+// should-style asserts via a GETTER chain (`x.should.be.true`), the one mainstream JS assertion that is
+// not a call. "No call ⇒ cannot fail" only holds once both are counted as actions.
+const ACTION_RE = /\bnew\b|\bthrow\b|\bawait\b|\.\s*should\b|\.\s*[A-Za-z_$][\w$]*\s*\(|(?<![.\w$])(?!(?:if|for|while|switch|catch|return|do|else|yield|typeof|void|delete|in|of|instanceof)\b)[A-Za-z_$][\w$]*\s*\(/;
+export function vacuousTestFindings(claim = '', diff = '') {
+  const out = [];
+  if (!claimsSuccess(claim)) return out;                 // same negation/quote-aware success gate as AG-C
+  const byFile = {}; let cur = '';
+  for (const l of String(diff).split('\n')) {
+    const h = l.match(/^\+\+\+ b\/(.+)$/); if (h) { cur = h[1] === '/dev/null' ? '' : h[1]; continue; }
+    if (!cur || !JS_TEST_FILE_RE.test(cur)) continue;
+    if (l[0] === '+' && !l.startsWith('+++')) (byFile[cur] ||= []).push(l.slice(1));
+    // Non-added line (context / removal / @@) between added lines → GAP sentinel. Without it, joining
+    // added lines flattens the gap and an added `it(... {` + `});` WRAPPED around a context-line assertion
+    // reads as a fully-added EMPTY block — a verified FP on an honest "wrap existing asserts in it()" edit
+    // (same for a stray brace pair joined across two hunks). A block whose span crosses \0 abstains below.
+    else { const a = byFile[cur]; if (a && a[a.length - 1] !== '\u0000') a.push('\u0000'); }
+  }
+  for (const [f, lines] of Object.entries(byFile)) {
+    const raw = lines.join('\n');                         // quotes INTACT so the test-name string still matches
+    // `mask` is length-aligned to `raw` (every blanking preserves length): strings, comments AND regex
+    // literals become spaces, so a `{`/`(`/`//` inside any of them can't unbalance braces, fake a call, or
+    // fake a comment. We MATCH the declaration on `raw` (needs the quotes) but do all brace-matching +
+    // action detection on `mask` (same offsets). One combined pass, leftmost-first, because order bugs are
+    // real: blanking `//` before `/* */` ate the `*/` of any block comment containing a URL. Regex literals
+    // MUST be blanked (two verified FPs: `/^\}/` early-closed the brace-match and truncated the body before
+    // its assertion; `/\/\//` read as a line comment and blanked the assertion). A `/` counts as a regex
+    // start only after a punctuator/keyword — the same positions JS itself lexes a regex, so `a / b`
+    // division is never eaten (eating a division that wraps the body's only call would be an FP).
+    const mask = blankStrings(raw).replace(
+      /\/\*[\s\S]*?\*\/|\/\/[^\n]*|(?<=(?:[=(,:;!&|?{}[\n^%*+~<>-]|\breturn|\bcase|\btypeof)\s*)\/(?![/*])(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^[/\\\n])+\/[a-z]*/g,
+      s => ' '.repeat(s.length));
+    TEST_OPEN_RE.lastIndex = 0;
+    let m;
+    while ((m = TEST_OPEN_RE.exec(raw))) {
+      if (mask[m.index] === ' ') continue;                // the `it(` sits in a string/comment, not real code
+      let depth = 1, i = TEST_OPEN_RE.lastIndex;          // brace-match forward from the body-opening `{`, on mask
+      for (; i < mask.length && depth > 0; i++) { const c = mask[i]; if (c === '{') depth++; else if (c === '}') depth--; }
+      if (depth !== 0) continue;                          // unbalanced within the added text → partial/edited block → abstain
+      // Span crosses a GAP sentinel → the "block" is added fragments joined across non-added lines, not a
+      // fully-added test — its real body lives outside the diff. Checked on RAW (a string blanked in mask
+      // could hide the sentinel). Abstain.
+      if (raw.slice(m.index, i).includes('\u0000')) continue;
+      const body = mask.slice(TEST_OPEN_RE.lastIndex, i - 1).replace(/\bconsole\s*\.\s*\w+\s*\([^)]*\)/g, ' ');
+      if (!ACTION_RE.test(body)) {
+        out.push({ cls: 1, sev: 'warn', msg: `claimed success, but an added test in ${f.split('/').pop()} makes no call and no assertion — it cannot fail (a test that asserts nothing is not coverage); add an assertion or mark it \`.todo\`` });
+        break;                                            // one per file is enough
+      }
+    }
+  }
+  return out;
+}
+
 /**
  * Pure deterministic Tier-1 analysis. Returns findings[].
  * ctx: { claim, diff, bashCmds:[cmd], results:[{is_error, text}], cwd }
@@ -772,6 +842,8 @@ export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], 
   findings.push(...testExclusionFindings(claim, gDiff, bashCmds));
   // AG-C — claimed success but an EXISTING test was WEAKENED (strict assertion → loose) or DISABLED. Warn-only.
   findings.push(...testWeakeningFindings(claim, gDiff));
+  // Vacuous test — claimed success but an ADDED JS/TS test makes no call/assertion → provably can't fail. Warn-only.
+  findings.push(...vacuousTestFindings(claim, gDiff));
 
   // async_done — claimed done/clean while the work is actually unfinished. Two grounds: the claim
   // CONTRADICTS itself (says still-running/deferred), OR a background task was launched this session

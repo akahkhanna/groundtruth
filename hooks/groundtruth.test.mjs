@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { analyze, stripQuotedForClaim, claimsSuccess, testExclusionFindings, testWeakeningFindings, untrackedAdded, parseTranscript, scanContent, attributeDebt, runCompiledRules, compileRuleRe, intentConfidence, renderCard, shouldAskStar, projectFindings, advanceSnapshot, freshRatifiers, remediationDecision, renderCorrective, blockOutcomeNote, liveNoticeCmds, editorCli, openLoops, runProcedures, envFindings, updateTaskLedger, loadGtConfig, pendingApprovals, applyConfirmedDeferrals, humanDeferrals, taskId, refereeTamper, compareSnapshot, integrityScope, GAMED_FILE_RE, priorFindingsContext, sessionHasCommit, proposedStale, isTrackableRequest, isSecret, excludedScanPath, dropExcludedFiles, classifyDeliverables, surfaceOpenLoop, preCommitHookScript, parseDiffRange } from './groundtruth.mjs';
+import { analyze, stripQuotedForClaim, claimsSuccess, testExclusionFindings, testWeakeningFindings, vacuousTestFindings, untrackedAdded, parseTranscript, scanContent, attributeDebt, runCompiledRules, compileRuleRe, intentConfidence, renderCard, shouldAskStar, projectFindings, advanceSnapshot, freshRatifiers, remediationDecision, renderCorrective, blockOutcomeNote, liveNoticeCmds, editorCli, openLoops, runProcedures, envFindings, updateTaskLedger, loadGtConfig, pendingApprovals, applyConfirmedDeferrals, humanDeferrals, taskId, refereeTamper, compareSnapshot, integrityScope, GAMED_FILE_RE, priorFindingsContext, sessionHasCommit, proposedStale, isTrackableRequest, isSecret, excludedScanPath, dropExcludedFiles, classifyDeliverables, surfaceOpenLoop, preCommitHookScript, parseDiffRange } from './groundtruth.mjs';
 import { parseCorrectivePairs, parseForbidTokens, isArmableToken, extractCandidates, compile, repoSourceExts } from './compile-rules.mjs';
 import { checkDroppedSymbols, collectDefs } from './symbol-integrity.mjs';
 
@@ -225,6 +225,44 @@ ok('AG-C: exact→partial (toEqual → toContain) is a downgrade (launch-kit pat
   twf('done, green', '+++ b/x.test.js\n-  expect(list).toEqual([1,2,3]);\n+  expect(list).toContain(1);'));
 ok('AG-C SILENT: a hedged claim ("still failing, relaxed one assertion to isolate") does not fire (Fable #3)',
   !twf('still failing — relaxed one assertion to isolate the mock', '+++ b/x.test.js\n-  expect(x).toBe(5);\n+  expect(x).toBeTruthy();'));
+// VACUOUS TEST — an added JS/TS test that provably can't fail (no call, no assertion). Warn-only, T1 slice.
+const vtf = (claim, diff) => vacuousTestFindings(claim, diff).some(f => f.cls === 1);
+ok('VACUOUS: an added test with an empty body → fires (asserts nothing, cannot fail)',
+  vtf('Done. Tests pass.', '+++ b/calc.test.js\n+it("works", () => {\n+});'));
+ok('VACUOUS: body with only a comment + console.log → fires (no assertion, cannot fail)',
+  vtf('done, green', '+++ b/x.test.js\n+test("does the thing", () => {\n+  // TODO real assertions\n+  console.log("ran");\n+});'));
+ok('VACUOUS SILENT: a real assertion (expect().toBe) → silent',
+  !vtf('tests pass', '+++ b/x.test.js\n+it("adds", () => {\n+  expect(add(2,3)).toBe(5);\n+});'));
+ok('VACUOUS SILENT: a DELEGATED assertion (helper asserts elsewhere) → silent (the FP a token-scan dies on)',
+  !vtf('tests pass', '+++ b/x.test.js\n+it("valid user", () => {\n+  assertValidUser(buildUser());\n+});'));
+ok('VACUOUS SILENT: a "doesn\'t throw" smoke test (constructs/calls the SUT) → silent',
+  !vtf('tests pass', '+++ b/x.test.js\n+it("constructs", () => {\n+  new Parser();\n+});')
+  && !vtf('tests pass', '+++ b/x.test.js\n+it("boots", () => {\n+  service.start();\n+});'));
+ok('VACUOUS SILENT: a table-driven test (assertion in a shared loop, still a call) → silent',
+  !vtf('tests pass', '+++ b/x.test.js\n+it("cases", () => {\n+  for (const c of cases) {\n+    expect(fn(c.in)).toEqual(c.out);\n+  }\n+});'));
+ok('VACUOUS SILENT: no success claim → claim-gated, does not fire',
+  !vtf('still writing the test, WIP', '+++ b/x.test.js\n+it("todo", () => {\n+});'));
+ok('VACUOUS SILENT: a PYTHON test with a bare `assert` statement (not a call) → abstains (JS/TS grammar only)',
+  !vtf('tests pass', '+++ b/test_calc.py\n+def test_add():\n+    assert add(2, 3) == 5'));
+ok('VACUOUS SILENT: an EDITED test (body not fully in the hunk → unbalanced braces) → abstains',
+  !vtf('tests pass', '+++ b/x.test.js\n+  expect(x).toBe(1);'));   // a stray added line, no it(){} block → nothing to match
+ok('VACUOUS SILENT: a non-test JS file that happens to contain it("x",()=>{}) → not a test file, ignored',
+  !vtf('tests pass', '+++ b/src/router.js\n+it("route", () => {\n+});'));
+// v1.2.0 pre-merge adversarial pass — four verified FP families, each an HONEST turn that fired. Fixed at root.
+ok('VACUOUS SILENT: wrapping a CONTEXT-line assertion in a new it() (open+close added, body NOT added) → gap sentinel abstains',
+  !vtf('Done, tests pass', '+++ b/x.test.js\n@@ -1,1 +1,3 @@\n+it("wrapped", () => {\n   expect(fn()).toBe(1);\n+});'));
+ok('VACUOUS SILENT: a stray added brace pair JOINED across two hunks of the same file → gap sentinel abstains',
+  !vtf('Done, tests pass', '+++ b/x.test.js\n@@ -1,2 +1,3 @@\n+it("a", () => {\n   expect(x).toBe(1);\n@@ -10,1 +11,2 @@\n   old();\n+});'));
+ok('VACUOUS SILENT: a regex literal containing } (/^\\}/) no longer early-closes the brace-match and truncates the body before its assertion',
+  !vtf('tests pass', '+++ b/x.test.js\n+it("x", () => {\n+  const re = /^\\}/;\n+  expect(strip("x")).toMatch(re);\n+});'));
+ok('VACUOUS SILENT: a regex literal containing // no longer reads as a line comment that blanks the assertion on the same line',
+  !vtf('tests pass', '+++ b/x.test.js\n+it("x", () => {\n+  const p = /\\/\\//.test(s) ? fn(s) : gn(s);\n+});'));
+ok('VACUOUS SILENT: chai should-style GETTER chain (x.should.be.true) is a call-free assertion that CAN fail → action',
+  !vtf('tests pass', '+++ b/x.test.js\n+it("flag", () => {\n+  config.enabled.should.be.true;\n+});'));
+ok('VACUOUS SILENT: bare `await promise` (no call) can REJECT → can fail — await is an action',
+  !vtf('tests pass', '+++ b/x.test.js\n+it("boots", async () => {\n+  await ready;\n+});'));
+ok('VACUOUS: regex-blanking does not eat DIVISION — a no-call body containing `a / b` still fires',
+  vtf('tests pass', '+++ b/x.test.js\n+it("x", () => {\n+  const y = a / b;\n+});'));
 ok('claimsSuccess: plain claim true; hedged/negated false; quoted false',
   claimsSuccess('Done, tests pass.') === true && claimsSuccess('Not done yet, still WIP.') === false
   && claimsSuccess('the finding said `tests pass` — I was quoting') === false);
