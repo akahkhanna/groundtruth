@@ -1797,6 +1797,20 @@ const PROBLEM_RE = /\b(?:bug|issue|problem|defect|error|fail(?:s|ed|ing|ure)?|br
 // v1.2.1). A token-less trackable request clause whose object is a pronoun means the ask DID commission the
 // thing the declarative named → the demotion is void. Same restore-only safety property as PROBLEM_RE.
 const ANAPHORIC_PRONOUN_RE = /\b(?:it|that|this|them|those|these)\b/i;
+// A REQUEST_VERB in PASSIVE/PERFECT voice reports what ALREADY HAPPENED — it commands nothing. "Game.js has
+// been modified heavily" (live FP t7dep, real hindsight session) describes the file's state, but its
+// "modified" satisfied REQUEST_VERB_RE and helped mint game.js as a HARD deliverable in an ask that
+// commanded no change at all. Blank `<aux> (been) (adverb)* <participle>` before a REQUEST_VERB test; an
+// ACTIVE imperative elsewhere survives the blanking ("parser.js was refactored — now update docs.md" keeps
+// `update`). Used by the diagnosisOnly gate ONLY — the per-clause readsOnly/verifyOnly/declarative gates
+// keep their corpus-pinned raw-clause tests (widening them is a separate, deliberate change).
+// `recently` is NOT in the adverb alternation — `\w+ly` already matches it, and listing it twice made the
+// loop AMBIGUOUS: 2^n backtracking paths when the trailing participle fails. Adversarial review (Fable,
+// v1.3.2): 28 repeated "recently"s in one user ask took ~57 s — and dePassive runs on every CUMULATIVE ask
+// every Stop, so one poisoned paste would wedge the hook for the rest of the session (a hang is a silent
+// pass on every future turn — the cardinal sin). Every remaining branch is disjoint from `\w+ly`.
+const PASSIVE_VOICE_RE = /\b(?:has|have|had|was|were|is|are|been|being|gets?|got)\s+(?:been\s+)?(?:(?:\w+ly|already|just|since|also|never|not)\s+)*\w+(?:ed|en)\b/gi;
+const dePassive = (s) => String(s).replace(PASSIVE_VOICE_RE, ' ');
 // Trackable iff it is NOT (framed as observation/question with no surviving action verb). The verb test runs
 // on the text with the dismissal phrases STRIPPED — critical, because "no fix needed" itself contains the
 // verb "fix"; testing the raw string would let that negated "fix" mark the aside as a real request (the bug
@@ -1873,6 +1887,45 @@ export function classifyDeliverables(text) {
   // declarative gate and the corpus is tuned to it — restoring hardness there is a separate, deliberate change.
   const anaphoricReq = clauses.some(cl =>
     REQUEST_VERB_RE.test(cl) && ANAPHORIC_PRONOUN_RE.test(cl) && extractTokens(cl).length === 0 && isTrackableRequest(cl));
+  // DIAGNOSIS-ONLY ask (ask-wide, like paste-provenance/anaphora): NO clause commands a change (REQUEST_VERB
+  // tested with passive phrases blanked — see PASSIVE_VOICE_RE) and at least one clause asks a question or
+  // asks to look/verify. "Staging game.js is the one we need. Game.js has been modified heavily… Can you see
+  // what is happening." (live FP t7dep, real hindsight session) asks for an EXPLANATION — its correct outcome
+  // may be an EMPTY diff (here the agent RESTORED the file: net-zero change WAS the success), so a
+  // diff-groundable deliverable does not exist, and minting one is the unclosable-HARD block-mode wedge —
+  // the FOURTH instance of the v1.0.5/v1.2.1/v1.3.1 root defect. Demote ALL tokens to soft (surfaced once,
+  // auto-expires, never blocks) — demote-never-drop. The question/read/verify-clause requirement keeps a
+  // verbless problem-report commission ("cache.js returns stale data") at its v1.2.1 hardness, and any live
+  // REQUEST_VERB anywhere in the ask ("…fix it") switches the gate off entirely.
+  // KNOWN CEILING (documented, not solved): a genuinely-commanded restore ("revert game.js") still can't
+  // CLOSE on its net-zero diff — grading absence-of-change is not diff-groundable; `defer <id>` is the out.
+  // A second ceiling (Fable, v1.3.2 review): the off-switch's verb list IS the scope boundary — a commission
+  // whose verb escapes both lists ("deploy X. does it work?") demotes to soft when a question co-occurs, as
+  // does the rare pseudo-cleft ("What you must do is harden auth.js" — dePassive reads `is harden` as
+  // aux+participle). Bounded: soft still surfaces once (demote-never-drop), and the FP direction is closed.
+  // Three probe-verified traps shape the implementation:
+  //   • a determiner-preceded REQUEST_VERB is a NOUN, not a command — "staging should have the keyboard
+  //     hiding fix" (t7dep itself) kept the gate off through noun-"fix"; blank `the/a/its… (word){0,2} fix`
+  //     before the verb test. Grammatically safe: a determiner never precedes an imperative.
+  //   • READ/VERIFY are tested with the clause's own TOKENS blanked — `validator.js` ⊂ validat\w+ satisfied
+  //     VERIFY from inside the filename and re-opened FN-2 ask-wide ("validator.js needs updating" demoted).
+  //   • QUESTION is tested on the RAW clause — token-blanking can make a clause START at its copula
+  //     (" is outdated" reads as interrogative `^is`), turning a problem-report into a fake question.
+  // `(?!to\b)` in the determiner gap: "auth.js is the file TO FIX" is an infinitive COMMISSION, not a noun
+  // phrase — without it deNoun blanked "the file to fix" and the whole ask demoted (Fable probe, v1.3.2).
+  const deNoun = (s) => s.replace(/\b(?:the|a|an|this|that|these|those|its|my|our|your|their|any|no)\s+(?:(?!to\b)[\w-]+\s+){0,2}(?:fix(?:es)?|changes?|updates?|edits?|patch(?:es)?|builds?|moves?|drops?|splits?|upgrades?|cleanups?|reworks?|refactors?|reverts?)\b/gi, ' ');
+  // Off-switch verbs BEYOND REQUEST_VERB_RE, scoped to THIS gate only: each can only DISABLE the new
+  // demotion (worst case = the pre-v1.3.2 behavior), so unlike widening REQUEST_VERB_RE itself — which
+  // feeds every hardness gate and could MINT new unclosable-HARD tasks ("the flag is disabled" would defeat
+  // readsOnly) — this list is strictly safe to grow. From the review's probes: "bump the version in
+  // package.json. does CI pass?" is a commission with a co-occurring question and must stay hard.
+  const EXTRA_REQUEST_VERB_RE = /\b(?:bump|install|uninstall|pin|disable|enable|configur\w+|deploy|apply|run|regenerate|restore|scaffold)\b/i;
+  const deVoiced = deNoun(dePassive(full));
+  const diagnosisOnly = !REQUEST_VERB_RE.test(deVoiced) && !EXTRA_REQUEST_VERB_RE.test(deVoiced)
+    && clauses.some(cl => {
+      let d = cl; for (const t of extractTokens(cl)) d = d.split(t).join(' ');
+      return QUESTION_RE.test(cl) || READ_INTENT_RE.test(d) || VERIFY_INTENT_RE.test(d);
+    });
   for (const clause of clauses) {
     const req = isTrackableRequest(clause);
     // A read-intent clause with NO write/action verb names inputs, not deliverables → DEMOTE its tokens to soft
@@ -1913,7 +1966,7 @@ export function classifyDeliverables(text) {
     const declarative = DECLARATIVE_RE.test(clause) && !REQUEST_VERB_RE.test(clause)
       && !PROBLEM_RE.test(clause) && !anaphoricReq;
     for (const tok of toks)
-      (req && !readsOnly && !verifyOnly && !declarative && !isRef(tok) ? hard : soft).add(tok);
+      (req && !readsOnly && !verifyOnly && !declarative && !diagnosisOnly && !isRef(tok) ? hard : soft).add(tok);
   }
   for (const t of hard) soft.delete(t);                                        // hard wins over soft
   return { hard: [...hard], soft: [...soft] };
@@ -1934,25 +1987,42 @@ export function updateTaskLedger(prior = [], asks = [], diff = '') {
   const changedLower = changed.toLowerCase();
   const code = codeOnlyAdded(diff);
   const byKey = new Map(prior.map(t => [t.task, t]));
+  const reap = new Set(), minted = new Set();   // two-phase reap — see the collision note below
   for (const a of asks) {
     const { hard, soft } = classifyDeliverables(a);
     // A task's deliverable = the tokens OF ITS OWN TIER. A HARD task must NOT be closed by a soft/reference
     // token that happens to ground ("`handleUpload` is fine, but fix retry.js" → retry.js is the deliverable;
     // handleUpload landing must not green it — Fable H1). A soft task closes on its own soft tokens.
     const deliverable = hard.length ? hard : soft;
-    if (!deliverable.length) continue;                        // no gradeable deliverable at all → not tracked
     const tier = hard.length ? 'hard' : 'soft';               // hard = imperative request; soft = aside/reference
     const task = a.length > 100 ? a.slice(0, 100) + '…' : a;
+    // Re-derive tier + deliverable from TODAY'S classifier EVERY turn — never trust the persisted values.
+    // The ledger OUTLIVES classifier fixes: t1d7d ("I do have image attirbutions.md…", real hindsight
+    // session) was minted HARD pre-v1.2.1 and kept nagging for 300+ turns AFTER the declarative fix
+    // shipped, because tier was only backfilled when null. Classification is deterministic over the ask
+    // text, so re-deriving is idempotent — and it makes every classifier fix retroactively heal live
+    // ledgers instead of leaving each closed FP class immortal in every session that minted it. The same
+    // logic reaps an ask that no longer yields ANY deliverable (it should never have minted); a persisted
+    // task whose ask is absent from the transcript is left untouched (fail-open, e.g. legacy truncation).
+    // The reap is TWO-PHASE (collected here, applied after the loop, minted keys win): the key is the ask
+    // TRUNCATED to 100 chars, so two DIFFERENT asks sharing a 100-char prefix (a templated preamble, a
+    // re-sent prompt edited past the cutoff) collide — and an inline delete let the no-deliverable ask
+    // silently reap the commissioning ask's LIVE task whenever it came later in the transcript (order-
+    // dependent loss of the exact contract memory the ledger exists to keep — Fable, v1.3.2 review).
+    // Collisions now resolve toward TRACKING (fail-toward-nag, order-independent).
+    if (!deliverable.length) { reap.add(task); continue; }
+    minted.add(task);
     let t = byKey.get(task);
-    if (!t) { t = { id: taskId(task), task, deliverable, tier, status: 'pending' }; byKey.set(task, t); }
+    if (!t) { t = { id: taskId(task), task, status: 'pending' }; byKey.set(task, t); }
     if (!t.id) t.id = taskId(t.task);                          // backfill id on tasks from older ledgers
-    if (t.tier == null) t.tier = tier;                        // backfill tier on older ledgers
+    t.tier = tier; t.deliverable = deliverable;
     // Recompute status from the diff EVERY turn — NEVER trust a persisted 'done'. An agent can forge
     // status:"done" straight into tasks.json (out of band, invisible to the tamper diff-scan), so 'done'
     // must be re-derived: a task is done iff its deliverable still grounds (in CODE for a symbol — a comment
     // mention doesn't close it) in the cumulative diff. 'deferred' is human-confirmed (applyConfirmedDeferrals).
     if (t.status !== 'deferred') t.status = deliverable.some(n => grounds(n, changed, changedLower, code)) ? 'done' : 'pending';
   }
+  for (const k of reap) if (!minted.has(k)) byKey.delete(k);
   return [...byKey.values()];
 }
 
@@ -2981,8 +3051,8 @@ function main() {
   // out-of-repo throwaway (scratchpad/tmp/absolute) — those reach the scan only via the tool-ledger and are
   // not deliverables. The ledger/open-loops keep the UNfiltered `diff` (namedDeliverables already excludes
   // scratchpad), so this only narrows the content scanners.
-  const scanDiff = dropExcludedFiles(diff + ut.content
-    + (parsed.mcpSql ? `\n+++ b/<mcp-sql>\n` + parsed.mcpSql.split('\n').map((l) => '+' + l).join('\n') : ''));
+  const mcpFrag = parsed.mcpSql ? `\n+++ b/<mcp-sql>\n` + parsed.mcpSql.split('\n').map((l) => '+' + l).join('\n') : '';
+  const scanDiff = dropExcludedFiles(diff + ut.content + mcpFrag);
 
   const findings = analyze({
     claim: payload.last_assistant_message || '',
@@ -3001,7 +3071,15 @@ function main() {
     msg: `untracked file not fully secret-scanned — ${f}` });   // `f` carries the reason (per-file cap hit, or total budget exhausted)
 
   // §10: also evaluate the deterministic rules compiled from this repo's own docs (CLAUDE.md/skills).
-  findings.push(...runCompiledRules(scanDiff, loadCompiledRules(cwd)));
+  // AUTHORED reality only (git + tool ledger + MCP SQL) — NOT scanDiff. Compiled rules grade the agent's
+  // CHANGES ('forbid_in_added', "never commit X"), and scanDiff's untracked-content merge includes
+  // pre-existing BYSTANDER files nobody touched this session. LIVE FP (real hindsight session): the
+  // no-commit-local-only-files rule fired 🔴 on scripts/dev-server.mjs — a file never committed, never
+  // staged, never edited, merely PRESENT untracked in the working tree — because its on-disk shebang line
+  // entered scanDiff as an "added" line and the rule's line_re (\S) matched it. Presence is not a change.
+  // Accepted trade (warn-FN over false-🔴): a NEW file authored via a Bash heredoc now dodges doc rules —
+  // the security scanners still see it through scanDiff, and the pre-commit/CI gates re-check the real diff.
+  findings.push(...runCompiledRules(dropExcludedFiles(diff + mcpFrag), loadCompiledRules(cwd)));
 
   // Class 6 — a dropped symbol left dangling under a preservation claim (symbol-integrity.mjs). Claim-gated
   // here (the Stop-hook honesty run); the pre-commit path runs it gate-free. `scanDiff` (not `diff`) so a

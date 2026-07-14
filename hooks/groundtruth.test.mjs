@@ -2158,6 +2158,122 @@ ok('soft expiry: an aged-out soft aside stops nagging (no finding, marked stale)
 ok('soft first-surface: a soft aside surfaces ONCE as info (never block, even with a done-claim)',
   (() => { const s = surfaceOpenLoop({ id: 't4', task: 'the 304 is fine', deliverable: ['handleBar'], tier: 'soft', status: 'pending' }, 'Done — handleBar shipped'); return s.finding && s.finding.sev === 'info'; })());
 
+// ── Ledger self-healing (live FP t1d7d, real hindsight session): a task minted HARD by a PRE-FIX classifier
+// stayed HARD for 300+ turns after v1.2.1 shipped the declarative fix, because tier was only backfilled when
+// null. tier + deliverable are now RE-DERIVED from today's classifier every turn (idempotent — classification
+// is deterministic over the ask text), so a classifier fix retroactively heals every live ledger.
+{
+  const ask = 'I do have image attirbutions.md on downloads folder';   // the real t1d7d ask (typo and all)
+  const stale = [{ id: 't1d7d', task: ask, deliverable: ['attirbutions.md'], tier: 'hard', status: 'pending', age: 302, surfaced: true }];
+  const healed = updateTaskLedger(stale, [ask], '');
+  ok('ledger healing: a persisted pre-fix HARD task re-derives to soft once the classifier demotes its ask',
+    healed.length === 1 && healed[0].tier === 'soft' && healed[0].age === 302);   // age preserved → next surface expires it
+  ok('ledger healing: an aged-out healed task goes STALE on its next surface (the 300-turn nag ends)',
+    surfaceOpenLoop(healed[0], '').task.status === 'stale');
+  // Reap: an ask that no longer yields ANY deliverable should never have minted — its persisted task goes too.
+  const ghost = [{ id: 'tg', task: 'thanks, that all looks good now', deliverable: ['ghost.js'], tier: 'hard', status: 'pending' }];
+  ok('ledger healing: a persisted task whose ask now yields NO deliverable is REAPED',
+    updateTaskLedger(ghost, ['thanks, that all looks good now'], '').length === 0);
+  // Fail-open: a persisted task whose ask is ABSENT from the transcript (legacy truncation, compaction) is untouched.
+  ok('ledger healing: a persisted task with no matching ask this turn is left as-is (fail-open)',
+    updateTaskLedger(ghost, ['unrelated new ask'], '').some(t => t.id === 'tg'));
+  // Human-set deferral survives the re-derive (only tier/deliverable are recomputed, never a confirmed status).
+  const def = [{ id: 'td', task: 'fix retry.js', deliverable: ['retry.js'], tier: 'hard', status: 'deferred' }];
+  ok('ledger healing: re-derive does not disturb a deferred status',
+    updateTaskLedger(def, ['fix retry.js'], '')[0].status === 'deferred');
+}
+
+// ── DIAGNOSIS-ONLY gate (live FP t7dep, real hindsight session): an ask that is all state-reports + a
+// question commands NO change — its correct outcome may be an EMPTY diff (the agent RESTORED game.js; net-zero
+// was the success), so minting a HARD diff-groundable deliverable is the unclosable-wedge class again.
+{
+  const t7dep = 'Staging game.js is the one we need. Game.js has been modified heavily and staging should have the keyboard hiding fix not head. Can you see what is happening. Staging game.js and head game.js are different in each sense as its heavily rerfactored on staging into components';
+  const c = classifyDeliverables(t7dep);
+  ok('diagnosis-only: the real t7dep ask (passive "has been modified", noun-"fix", question clause) demotes ALL tokens to soft',
+    c.hard.length === 0 && c.soft.includes('game.js'));
+  ok('diagnosis-only: a problem report + read question with no change verb demotes to soft (diagnosis is the ask)',
+    classifyDeliverables('login.js is broken — can you look into what is happening?').hard.length === 0);
+  ok('diagnosis-only OFF on an active change verb ANYWHERE in the ask ("…Fix the keyboard handling.")',
+    classifyDeliverables('Can you see what is happening with game.js? Fix the keyboard handling.').hard.includes('game.js'));
+  ok('diagnosis-only OFF without a question/read/verify clause: a verbless problem-report commission keeps its v1.2.1 hardness',
+    classifyDeliverables('cache.js returns stale data').hard.includes('cache.js'));
+  // deNoun: a determiner-preceded REQUEST_VERB is a noun ("the caching fix"), not a command — it must not
+  // hold the gate open; the same word as a live imperative must.
+  ok('diagnosis-only: noun-"fix" does not defeat the gate ("why is render.js slow? I think the caching fix helped")',
+    classifyDeliverables('why is render.js slow? I think the caching fix helped').hard.length === 0);
+  ok('diagnosis-only OFF on imperative "fix" ("why is render.js slow? fix the caching in render.js")',
+    classifyDeliverables('why is render.js slow? fix the caching in render.js').hard.includes('render.js'));
+  // dePassive: passive/perfect voice reports state; an active imperative in the same ask survives the blanking.
+  ok('dePassive: "parser.js has been refactored. can you check it still builds?" → soft (report + verify question)',
+    classifyDeliverables('parser.js has been refactored. can you check it still builds?').hard.length === 0);
+  ok('dePassive: an ACTIVE verb after a passive report keeps the ask HARD ("parser.js was refactored badly. refactor it again")',
+    classifyDeliverables('parser.js was refactored badly. refactor it again').hard.includes('parser.js'));
+  // The two traps probe-verified during the fix: VERIFY hiding inside a filename must not re-open FN-2
+  // ask-wide, and token-blanking must not fake a question-start copula.
+  ok('diagnosis-only does NOT re-open FN-2: "validator.js needs updating" stays HARD (validat\\w+ inside the filename)',
+    classifyDeliverables('validator.js needs updating').hard.includes('validator.js'));
+  ok('diagnosis-only: token-blanking cannot fake a question ("outdated.js is outdated" is a report, stays HARD)',
+    classifyDeliverables('outdated.js is outdated').hard.includes('outdated.js'));
+  // ── The three v1.3.2 adversarial-review (Fable) findings, pinned ──
+  // (1) ReDoS: `recently` doubled with `\w+ly` in PASSIVE_VOICE_RE's adverb loop → 2^n backtracking; 28
+  // repeats took ~57 s, and dePassive runs on every CUMULATIVE ask every Stop — one poisoned paste would
+  // wedge the hook for the whole session (a hang = a silent pass on every future turn, the cardinal sin).
+  ok('ReDoS pin: 40 stacked ambiguous adverbs classify in bounded time (the alternation is unambiguous)',
+    (() => { const t0 = Date.now(); classifyDeliverables('was ' + 'recently '.repeat(40) + 'x can you see what is happening with game.js?'); return Date.now() - t0 < 2000; })());
+  // (3) the off-switch coverage gap: a commission whose verb is outside REQUEST_VERB_RE, with a question
+  // co-occurring, must stay HARD (EXTRA_REQUEST_VERB_RE, scoped to the gate so it can only disable demotion).
+  ok('diagnosis-only OFF on gate-scoped extra verbs: "bump the version in package.json. does CI pass?" stays HARD',
+    classifyDeliverables('bump the version in package.json. does CI pass?').hard.includes('package.json'));
+  ok('diagnosis-only OFF on "install lodash and pin it in package.json. is that ok?" (install/pin)',
+    classifyDeliverables('install lodash and pin it in package.json. is that ok?').hard.includes('package.json'));
+  // deNoun must not blank an infinitive commission: "the file TO FIX" is a command, not a noun phrase.
+  ok('deNoun: an infinitive commission survives ("auth.js is the file to fix. can you?" stays HARD)',
+    classifyDeliverables('auth.js is the file to fix. can you?').hard.includes('auth.js'));
+  ok('deNoun still blanks a true noun phrase ("the keyboard hiding fix" does not hold the gate open)',
+    classifyDeliverables('why is render.js slow? staging should have the keyboard hiding fix').hard.length === 0);
+}
+// (2) reap collision: two DIFFERENT asks sharing a 100-char prefix collide on the truncated ledger key; the
+// inline delete let the no-deliverable ask reap the commissioning ask's LIVE task when it came later in the
+// transcript (order-dependent silent loss). Two-phase reap: minted keys win, both orders keep the task.
+{
+  const pre = 'please review the following long preamble that pads this ask well past the hundred character mark!! ';
+  const A = pre + 'now fix retry.js';                       // commissions retry.js
+  const B = pre + 'thanks, that all looks good now';        // yields nothing, same truncated key
+  ok('reap collision: commissioning ask BEFORE the colliding no-deliverable ask — task survives',
+    updateTaskLedger([], [A, B], '').some(t => (t.deliverable || []).includes('retry.js')));
+  ok('reap collision: commissioning ask AFTER the colliding no-deliverable ask — task survives (order-independent)',
+    updateTaskLedger([], [B, A], '').some(t => (t.deliverable || []).includes('retry.js')));
+}
+
+// ── Compiled rules grade AUTHORED changes only (live 🔴 FP, real hindsight session): the Stop path fed
+// runCompiledRules the wider scanDiff, whose untracked-content merge exists for the SECURITY scanners — so a
+// forbid rule fired on scripts/dev-server.mjs, an untracked BYSTANDER file never committed, never staged,
+// never edited. End-to-end through the real Stop path: same repo, same rule — untracked-only → silent;
+// the same file actually AUTHORED into the diff → still fires (no FN traded in).
+{
+  const repo = mkdtempSync(pathJoin(tmpdir(), 'gt-rulescope-'));
+  try {
+    const git = (args) => execFileSync('git', args, { cwd: repo, stdio: ['ignore', 'pipe', 'ignore'] });
+    git(['init', '-q']);
+    git(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--allow-empty', '-q', '-m', 'init']);
+    fsMkdir(pathJoin(repo, '.claude', 'groundtruth'), { recursive: true });
+    fsWrite(pathJoin(repo, '.claude', 'groundtruth', 'compiled-rules.json'), JSON.stringify([
+      { id: 'no-commit-local-only', source: 'seed-rules.json (per-project, file-scoped)', kind: 'forbid_in_added',
+        file_re: '(^|/)scripts/dev-server\\.mjs$', line_re: '\\S', severity: 'warn', message: 'never commit dev-server' }]));
+    fsMkdir(pathJoin(repo, 'scripts'), { recursive: true });
+    fsWrite(pathJoin(repo, 'scripts', 'dev-server.mjs'), '#!/usr/bin/env node\nconsole.log(1)\n');
+    const engine = fileURLToPath(new URL('./groundtruth.mjs', import.meta.url));
+    const run = () => execFileSync('node', [engine], {
+      input: JSON.stringify({ hook_event_name: 'Stop', session_id: 'rulescope', cwd: repo, last_assistant_message: 'done' }),
+      encoding: 'utf8', env: { ...process.env, GROUNDTRUTH_BLOCK: '', CLAUDE_PROJECT_DIR: '' }, stdio: ['pipe', 'pipe', 'ignore'] });
+    ok('rule scope: an untracked BYSTANDER file does NOT fire a compiled rule (presence in the tree is not a change)',
+      !/never commit dev-server/.test(run()));
+    git(['add', 'scripts/dev-server.mjs']);            // now it IS authored change (git diff HEAD sees the index)
+    ok('rule scope: the same file AUTHORED into the diff still fires the rule (the fix trades no FN here)',
+      /never commit dev-server/.test(run()));
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+}
+
 // ── Class 6: dropped symbol left dangling under a preservation claim (symbol-integrity.mjs) ──
 // The rule: preservation/refactor/rename/merge claim · a def the diff REMOVED · defined NOWHERE in the
 // tree · still CALLED (bare `foo(` or self `this.foo()`) → warn quoting the dead callsite. grepTree is
