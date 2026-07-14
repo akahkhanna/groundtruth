@@ -1,6 +1,6 @@
 {
   "name": "groundtruth",
-  "version": "1.2.2",
+  "version": "1.3.1",
   "private": true,
   "description": "Audits whether an agent actually did what it was asked. DONE = `npm test` green on disk, proven by the exit code — never an agent's say-so.",
   "scripts": {

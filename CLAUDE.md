@@ -11,7 +11,7 @@ Design invariant, enforced in review: **a false positive is treated as fatal.** 
 ## Commands
 
 ```bash
-node hooks/groundtruth.test.mjs   # 638 assert-based unit checks, no deps, no framework
+node hooks/groundtruth.test.mjs   # 702 assert-based unit checks, no deps, no framework
 node hooks/redteam.mjs            # live adversarial harness (10 scenarios, sandboxed throwaway repos)
 npm test                          # alias for the unit checks
 npm run check-self                # same, but echoes the exit code as a GREEN/RED done-verdict

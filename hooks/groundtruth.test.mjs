@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { analyze, stripQuotedForClaim, claimsSuccess, testExclusionFindings, testWeakeningFindings, vacuousTestFindings, untrackedAdded, parseTranscript, scanContent, attributeDebt, runCompiledRules, compileRuleRe, intentConfidence, renderCard, shouldAskStar, projectFindings, advanceSnapshot, freshRatifiers, remediationDecision, renderCorrective, blockOutcomeNote, liveNoticeCmds, editorCli, openLoops, runProcedures, envFindings, updateTaskLedger, loadGtConfig, pendingApprovals, applyConfirmedDeferrals, humanDeferrals, taskId, refereeTamper, compareSnapshot, integrityScope, GAMED_FILE_RE, priorFindingsContext, sessionHasCommit, proposedStale, isTrackableRequest, isSecret, excludedScanPath, dropExcludedFiles, classifyDeliverables, surfaceOpenLoop, preCommitHookScript, parseDiffRange } from './groundtruth.mjs';
+import { analyze, stripQuotedForClaim, claimsSuccess, testExclusionFindings, testWeakeningFindings, vacuousTestFindings, mojibakeFindings, agentFindings, parseAgentFile, untrackedAdded, parseTranscript, scanContent, attributeDebt, runCompiledRules, compileRuleRe, intentConfidence, renderCard, shouldAskStar, projectFindings, advanceSnapshot, freshRatifiers, remediationDecision, renderCorrective, blockOutcomeNote, liveNoticeCmds, editorCli, openLoops, runProcedures, envFindings, updateTaskLedger, loadGtConfig, pendingApprovals, applyConfirmedDeferrals, humanDeferrals, taskId, refereeTamper, compareSnapshot, integrityScope, GAMED_FILE_RE, priorFindingsContext, sessionHasCommit, proposedStale, isTrackableRequest, isSecret, excludedScanPath, dropExcludedFiles, classifyDeliverables, surfaceOpenLoop, preCommitHookScript, parseDiffRange } from './groundtruth.mjs';
 import { parseCorrectivePairs, parseForbidTokens, isArmableToken, extractCandidates, compile, repoSourceExts } from './compile-rules.mjs';
 import { checkDroppedSymbols, collectDefs } from './symbol-integrity.mjs';
 
@@ -299,6 +299,16 @@ ok('VACUOUS SILENT: an EDITED test (body not fully in the hunk → unbalanced br
   !vtf('tests pass', '+++ b/x.test.js\n+  expect(x).toBe(1);'));   // a stray added line, no it(){} block → nothing to match
 ok('VACUOUS SILENT: a non-test JS file that happens to contain it("x",()=>{}) → not a test file, ignored',
   !vtf('tests pass', '+++ b/src/router.js\n+it("route", () => {\n+});'));
+// v1.3.1 — LIVE FP from a real hindsight session (directionCheck.test.js). Blanking strings BEFORE comments
+// let an apostrophe in ordinary prose ("France's") open a phantom string literal that ran to the next quote
+// far below, swallowing the body's braces AND its `await dc.checkRound(...)` call — the block extracted as
+// EMPTY and a test that plainly asserted was reported as asserting nothing. Fixed by one leftmost-first
+// string|comment|regex pass. The two directions are pinned together: prose-quote must not eat code, and a
+// `//` inside a STRING must still be blanked (the inverse ordering bug).
+ok('VACUOUS SILENT: an apostrophe in a body COMMENT ("France\'s") must not swallow the real call/assert',
+  !vtf('tests pass', '+++ b/a.test.js\n+test("geneva", async () => {\n+  // inside metropolitan France\'s longitude span [-5.14, 9.56]\n+  const out = await dc.checkRound(x);\n+  assert.strictEqual(out.claims[0].verdict, "PASS");\n+});'));
+ok('VACUOUS: a `//` inside a STRING is still blanked (leftmost-wins both ways — an empty body still fires)',
+  vtf('tests pass', '+++ b/a.test.js\n+it("x", () => {\n+  const u = "http://a.b";\n+});'));
 // v1.2.0 pre-merge adversarial pass — four verified FP families, each an HONEST turn that fired. Fixed at root.
 ok('VACUOUS SILENT: wrapping a CONTEXT-line assertion in a new it() (open+close added, body NOT added) → gap sentinel abstains',
   !vtf('Done, tests pass', '+++ b/x.test.js\n@@ -1,1 +1,3 @@\n+it("wrapped", () => {\n   expect(fn()).toBe(1);\n+});'));
@@ -1775,6 +1785,35 @@ ok('dropExcludedFiles: an excluded file block is stripped, a normal one kept', (
     !runCompiledRules('+++ b/x.js\n+  // never call eval() here', evalRule).length);
   ok('rule comment-skip: the same call-rule DOES fire on a real eval() in code',
     runCompiledRules('+++ b/x.js\n+  const r = eval(src);', evalRule).some(f => f.cls === 'R'));
+  // v1.3.1 — LIVE FP (real hindsight session): R3 stripped comments for CALL rules only, so an
+  // IDENTIFIER/MEMBER rule kept scanning prose — a rule forbidding `import.meta` fired on the very COMMENT
+  // explaining the rule ("// never use import.meta here"), while the code had none. Default inverted:
+  // code-only for every rule, raw ONLY for rules that plainly target comments (lint directives / markers).
+  const imRule = [{ id: 'no-import-meta', kind: 'forbid_in_added', file_re: '\\.js$', line_re: 'import\\.meta', message: 'api/_lib/* is CJS' }];
+  ok('rule comment-skip: an IDENTIFIER rule (import.meta, no call paren) does NOT fire on its own explanatory comment',
+    !runCompiledRules('+++ b/api/_lib/x.js\n+  // never use import.meta here (CJS)', imRule).length);
+  ok('rule comment-skip: the same identifier rule DOES fire on real import.meta in code',
+    runCompiledRules('+++ b/api/_lib/x.js\n+  const u = import.meta.url;', imRule).some(f => f.cls === 'R'));
+  ok('rule comment-skip: a COMMENT-TARGETING rule still sees comments (no rule goes inert)',
+    runCompiledRules('+++ b/x.js\n+  // @ts-ignore', [{ id: 'no-ts-ignore', kind: 'forbid_in_added', file_re: '\\.js$', line_re: '@ts-ignore', message: 'no @ts-ignore' }]).some(f => f.cls === 'R')
+    && runCompiledRules('+++ b/x.js\n+  // TODO: later', [{ id: 'no-todo', kind: 'forbid_in_added', file_re: '\\.js$', line_re: 'TODO', message: 'no TODO' }]).some(f => f.cls === 'R'));
+  // v1.3.1 review — the FIRST cut of the inversion classified "targets comments" by SOURCE SUBSTRINGS of the
+  // rule regex (/@|ignore|disable|suppress|todo|hack…/), which sent every decorator rule, npm-scope import
+  // rule, and identifier rule containing one of those words down the raw-line path — re-opening the exact
+  // prose-comment FP the inversion exists to close (all verified by probe). Classification is now by what
+  // the rule's compiled regex MATCHES against canonical directive text. The five re-opened FPs, pinned:
+  ok('rule comment-skip: a DECORATOR rule (`@Injectable\\s*\\(` — `@` in the source) does NOT fire on a prose comment',
+    !runCompiledRules('+++ b/x.ts\n+  // we removed the @Injectable() decorator here', [{ id: 'r', kind: 'forbid_in_added', file_re: '\\.ts$', line_re: '@Injectable\\s*\\(', message: 'no field injection' }]).length);
+  ok('rule comment-skip: the same decorator rule DOES fire on a real decorator in code',
+    runCompiledRules('+++ b/x.ts\n+@Injectable()', [{ id: 'r', kind: 'forbid_in_added', file_re: '\\.ts$', line_re: '@Injectable\\s*\\(', message: 'no field injection' }]).some(f => f.cls === 'R'));
+  ok('rule comment-skip: an npm-scope import rule (`@old-scope/`) does NOT fire on a prose comment',
+    !runCompiledRules("+++ b/x.js\n+  // previously: import x from '@old-scope/pkg'", [{ id: 'r', kind: 'forbid_in_added', file_re: '\\.js$', line_re: "from .@old-scope/", message: 'migrated' }]).length);
+  ok('rule comment-skip: identifier rules that merely CONTAIN ignore/suppress/todo (`ignoreErrors(`, `suppressWarnings(`, `todoList`) stay code-only',
+    !runCompiledRules('+++ b/x.js\n+  // do NOT call ignoreErrors() here', [{ id: 'r', kind: 'forbid_in_added', file_re: '\\.js$', line_re: '\\bignoreErrors\\s*\\(', message: 'handle errors' }]).length
+    && !runCompiledRules('+++ b/x.java\n+  // never suppressWarnings() in prod', [{ id: 'r', kind: 'forbid_in_added', file_re: '\\.java$', line_re: 'suppressWarnings\\s*\\(', message: 'no' }]).length
+    && !runCompiledRules('+++ b/x.js\n+  // the old todoList variable was renamed', [{ id: 'r', kind: 'forbid_in_added', file_re: '\\.js$', line_re: '\\btodoList\\b', message: 'renamed' }]).length);
+  ok('rule comment-skip: a COMMENT-ANCHORED marker rule (`//\\s*TODO`) still classifies as comment-targeting (probes are spelled as they appear in comments)',
+    runCompiledRules('+++ b/x.js\n+  // TODO later', [{ id: 'r', kind: 'forbid_in_added', file_re: '\\.js$', line_re: '//\\s*TODO', message: 'no TODO' }]).some(f => f.cls === 'R'));
   const provRule = [{ id: 'no-foo', source: 'extracted from ARCHITECTURE.md:5', kind: 'forbid_in_added', file_re: '\\.md$', line_re: '\\bfoobar\\b', message: 'avoid foobar' }];
   ok('rule provenance: a rule extracted from ARCHITECTURE.md does NOT fire on ARCHITECTURE.md itself',
     !runCompiledRules('+++ b/ARCHITECTURE.md\n+never write foobar in code', provRule).length);
@@ -1816,6 +1855,164 @@ ok('C2: an agent naming the deliverable in its reply canNOT demote the ask (no a
   classifyDeliverables('add a csv export to report.js').hard.includes('report.js'));
 ok('a user-novel token in a real request is HARD',
   classifyDeliverables('add a guard to app.js').hard.includes('app.js'));
+// AGENT INTEGRITY (v1.3.1) — a subagent that can NEVER load fails OPEN: no error, no log, it just never
+// fires, and any doc saying "enforced by the X subagent" then rests on nothing. REAL INCIDENT (hindsight):
+// 16 agents sat in `hindsight-vercel/.claude/agents/` — one level BELOW the repo root — so Claude Code (which
+// resolves .claude/agents/ from the CWD upward and never descends) never saw one of them, silently, for weeks.
+// SCOPE: we prove an agent CANNOT fire; we never claim one WILL (selection is the model's discretion).
+const AG = (rel, src) => ({ rel, src });
+const HEALTHY = AG('.claude/agents/pr-reviewer.md', '---\nname: pr-reviewer\ndescription: MUST BE USED before opening a PR.\nmodel: claude-opus-4-8\n---\nBody\n');
+const agf = (agents, docs = []) => agentFindings(agents, docs).filter(f => f.cls === 'agent');
+ok('AGENT: an agents dir BELOW the repo root is invisible when launched from the root (the 16-agent incident)',
+  agf([AG('hindsight-vercel/.claude/agents/qa.md', '---\nname: qa\ndescription: d\n---\nB\n')]).length === 1);
+ok('AGENT SILENT: the SAME agent at the repo root is fine (the fix must clear the finding)',
+  agf([AG('.claude/agents/qa.md', '---\nname: qa\ndescription: d\n---\nB\n')]).length === 0);
+ok('AGENT: no YAML frontmatter → can never load (reviewer.md opened with "## Workflow")',
+  agf([AG('.claude/agents/reviewer.md', '## Workflow\n\n1. Draft a plan.\n')]).some(f => /NO YAML frontmatter/.test(f.msg)));
+ok('AGENT: a missing name: or description: → cannot load',
+  agf([AG('.claude/agents/a.md', '---\ndescription: d\n---\n')]).some(f => /no `name:`/.test(f.msg))
+  && agf([AG('.claude/agents/b.md', '---\nname: b\n---\n')]).some(f => /no `description:`/.test(f.msg)));
+ok('AGENT: a DOTTED model id is provably malformed (claude-opus-4.8 → claude-opus-4-8) and falls back silently',
+  agf([AG('.claude/agents/d.md', '---\nname: d\ndescription: d\nmodel: claude-opus-4.8\n---\n')]).some(f => /never contains a dot/.test(f.msg)));
+ok('AGENT SILENT: a well-formed but UNKNOWN model is NOT flagged — no stale allowlist (must not FP on a future model)',
+  agf([AG('.claude/agents/d.md', '---\nname: d\ndescription: d\nmodel: claude-sonnet-9\n---\n')]).length === 0);
+ok('AGENT: two agents with byte-identical descriptions are unroutable (the router selects on description)',
+  agf([AG('.claude/agents/i1.md', '---\nname: i1\ndescription: Implements a specced change.\n---\n'),
+       AG('.claude/agents/i2.md', '---\nname: i2\ndescription: Implements a specced change.\n---\n')]).some(f => /byte-identical/.test(f.msg)));
+ok('AGENT: a duplicate name across two files is a collision',
+  agf([AG('.claude/agents/a.md', '---\nname: dup\ndescription: x\n---\n'),
+       AG('.claude/agents/b.md', '---\nname: dup\ndescription: y\n---\n')]).some(f => /declared twice/.test(f.msg)));
+// Phantom agent reference — Class 4 (phantom ref) over agents: a doc resting on an agent that cannot load.
+// v1.3.1 review: the phantom fires ONLY when the name RESOLVES to a repo agent file that provably cannot
+// load. "No file in the repo" proves nothing — agents also come from plugins, harness built-ins
+// (`general-purpose`, `Explore`) and user-level ~/.claude/agents, all invisible to this scan; the draft's
+// unresolved arm fired on ordinary hyphenated prose and on built-in names (verified FPs, pinned below).
+ok('AGENT: a doc resting on an agent whose FILE exists but cannot load (nested, the incident shape) is a PHANTOM reference',
+  agf([HEALTHY, AG('hindsight-vercel/.claude/agents/migration-reviewer.md', '---\nname: migration-reviewer\ndescription: d\n---\nB\n')],
+      [{ rel: 'CLAUDE.md', src: 'Migrations are enforced by the auto-invoked migration-reviewer subagent.' }])
+    .some(f => /phantom reference/.test(f.msg)));
+ok('AGENT: the phantom also fires when the file exists at the root but cannot parse ("CANNOT LOAD")',
+  agf([AG('.claude/agents/reviewer.md', '## Workflow\n')], [{ rel: 'CLAUDE.md', src: 'Invoke the `reviewer` subagent until APPROVED.' }])
+    .some(f => /CANNOT LOAD/.test(f.msg)));
+ok('AGENT SILENT (FP guard): a doc naming an agent with NO repo file abstains — could be a plugin/built-in/user-level agent',
+  agf([HEALTHY], [{ rel: 'CLAUDE.md', src: 'Migrations are enforced by the auto-invoked migration-reviewer subagent.' }]).length === 0);
+ok('AGENT SILENT (FP guard): hyphenated PROSE before "subagent" is not an agent name (well-documented / read-only)',
+  agf([HEALTHY], [{ rel: 'CLAUDE.md', src: 'Keep a well-documented subagent for each domain. Spawn a read-only subagent to explore.' }]).length === 0);
+ok('AGENT SILENT (FP guard): harness BUILT-IN agent types are not phantoms (general-purpose, `Explore`)',
+  agf([HEALTHY], [{ rel: 'CLAUDE.md', src: 'Use the general-purpose subagent, or the `Explore` subagent.' }]).length === 0);
+ok('AGENT SILENT (FP guard): the bare word "the" in "the … subagent" must NOT read as an agent name',
+  agf([HEALTHY], [{ rel: 'CLAUDE.md', src: 'Ask the subagent for help. Delegate to a subagent.' }]).length === 0);
+// v1.3.1 — the BARE-word phantom. The draft required a backtick or a hyphen, which MISSED the real incident's
+// second blocker: CLAUDE.md said "invoke the reviewer subagent until it returns APPROVED" (unhyphenated,
+// unbackticked) while reviewer.md existed with NO frontmatter and so could never load. Safe to widen because
+// the fire condition is RESOLUTION to a repo agent file that cannot load — prose and built-ins resolve to
+// nothing and abstain.
+ok('AGENT: a BARE-word reference ("invoke the reviewer subagent") fires when reviewer.md exists but cannot load',
+  agf([AG('.claude/agents/reviewer.md', '## Workflow\n'), HEALTHY],
+      [{ rel: 'CLAUDE.md', src: 'Invoke the reviewer subagent until it returns APPROVED.' }])
+    .some(f => /reviewer/.test(f.msg) && /CANNOT LOAD/.test(f.msg)));
+ok('AGENT SILENT (FP guard): bare prose that resolves to no repo agent file abstains (plugins/built-ins are invisible)',
+  agf([HEALTHY], [{ rel: 'CLAUDE.md', src: 'Use a well-documented subagent. Use the general-purpose subagent. Use the Explore subagent.' }]).length === 0);
+ok('AGENT: the doc cross-check resolves CASE-INSENSITIVELY (a sentence-start "Reviewer" is still reviewer.md)',
+  agf([AG('.claude/agents/reviewer.md', '## Workflow\n')], [{ rel: 'CLAUDE.md', src: 'Reviewer subagent handles the diff.' }])
+    .some(f => /CANNOT LOAD/.test(f.msg)));
+ok('AGENT: one finding per broken agent per doc — three mentions do not triple-report',
+  agf([AG('.claude/agents/reviewer.md', '## Workflow\n')],
+      [{ rel: 'CLAUDE.md', src: 'the reviewer subagent. the reviewer subagent. the Reviewer subagent.' }])
+    .filter(f => /CANNOT LOAD/.test(f.msg)).length === 1);
+ok('AGENT SILENT (FP guard): referencing a LOADABLE agent is not a phantom',
+  agf([HEALTHY], [{ rel: 'CLAUDE.md', src: 'Use the pr-reviewer subagent before a PR.' }]).length === 0);
+ok('AGENT SILENT (FP guard): a basename ref to a file that loads under a DIFFERENT name abstains ("CANNOT LOAD" would be false)',
+  agf([AG('.claude/agents/qa-bot.md', '---\nname: qa\ndescription: d\n---\nB')], [{ rel: 'CLAUDE.md', src: 'Run the `qa-bot` subagent.' }]).length === 0);
+ok('AGENT SILENT: a healthy agent produces no finding at all',
+  agf([HEALTHY]).length === 0);
+// v1.3.1 review — parser FPs, each verified by live probe against the draft, pinned here:
+ok('AGENT SILENT: a UTF-8 BOM before the frontmatter is still a loadable file (YAML loaders strip it)',
+  agf([AG('.claude/agents/a.md', '\uFEFF---\nname: a\ndescription: d\n---\nB')]).length === 0);
+ok('AGENT SILENT: two DIFFERENT block-scalar descriptions (`description: >-`) are not byte-identical — the value is the indented block, not ">-"',
+  agf([AG('.claude/agents/b1.md', '---\nname: b1\ndescription: >-\n  Reviews database migrations.\n---\nB'),
+       AG('.claude/agents/b2.md', '---\nname: b2\ndescription: >-\n  Audits API contracts.\n---\nB')]).length === 0);
+ok('AGENT: two IDENTICAL block-scalar descriptions still collide (the folded value is compared, not skipped)',
+  agf([AG('.claude/agents/b1.md', '---\nname: b1\ndescription: >-\n  Same text.\n---\nB'),
+       AG('.claude/agents/b2.md', '---\nname: b2\ndescription: >-\n  Same text.\n---\nB')]).some(f => /byte-identical/.test(f.msg)));
+ok('AGENT SILENT: a trailing YAML comment on name: (`qa-bot # main QA agent`) parses as qa-bot — the doc ref resolves loadable',
+  agf([AG('.claude/agents/c.md', '---\nname: qa-bot # main QA agent\ndescription: d\n---\nB')],
+      [{ rel: 'CLAUDE.md', src: 'Run the `qa-bot` subagent before merge.' }]).length === 0);
+ok('AGENT SILENT: a BEDROCK model id legitimately contains dots (us.anthropic.…-v1:0) — only a BARE claude-* id can be proven dotted-wrong',
+  agf([AG('.claude/agents/d.md', '---\nname: d\ndescription: d\nmodel: us.anthropic.claude-opus-4-8-20250601-v1:0\n---\nB')]).length === 0);
+// Completion-pass review (v1.3.1): the case-folded maps serve DOC-PROSE resolution only — identity stays exact.
+ok('AGENT SILENT (FP guard): names differing ONLY IN CASE (QALead vs qalead) are DISTINCT agents — `name:` matching is exact, so "declared twice" would be false',
+  agf([AG('.claude/agents/QALead.md', '---\nname: QALead\ndescription: lead QA\n---\nB'),
+       AG('.claude/agents/qalead.md', '---\nname: qalead\ndescription: other work\n---\nB')]).every(f => !/declared twice/.test(f.msg)));
+ok('AGENT: an exact duplicate STILL collides when a case-variant sibling was seen first (the folded key holds all spellings)',
+  agf([AG('.claude/agents/a.md', '---\nname: Reviewer\ndescription: x\n---\nB'),
+       AG('.claude/agents/b.md', '---\nname: reviewer\ndescription: y\n---\nB'),
+       AG('.claude/agents/c.md', '---\nname: reviewer\ndescription: z\n---\nB')]).some(f => /declared twice/.test(f.msg)));
+ok('AGENT SILENT (FP guard): a broken agent file naming ITSELF in its body ("You are the reviewer subagent") is self-mention, not a doc resting on it — check (2) already reports the file once',
+  (() => { const self = AG('.claude/agents/reviewer.md', '# You are the reviewer subagent\nReview the diff.');
+    const fs = agf([self], [self]);
+    return fs.every(f => !/phantom reference/.test(f.msg)) && fs.some(f => /NO YAML frontmatter/.test(f.msg)); })());
+ok('AGENT: a doc referencing an unloadable agent by its DECLARED NAME (≠ basename) still resolves and fires',
+  agf([AG('.claude/agents/x.md', '---\nname: checker\n---\nB')],
+      [{ rel: 'CLAUDE.md', src: 'Merges are gated by the checker subagent.' }]).some(f => /phantom reference/.test(f.msg)));
+ok('AGENT SILENT: a nested+root pair with the SAME name is NOT a collision (the nested copy never loads — the exact mid-migration state)',
+  agf([AG('pkg/.claude/agents/qa.md', '---\nname: qa\ndescription: d\n---\nB'),
+       AG('.claude/agents/qa.md', '---\nname: qa\ndescription: d\n---\nB')]).every(f => !/declared twice/.test(f.msg)));
+ok('parseAgentFile: reads name/description/model, and reports missing frontmatter',
+  parseAgentFile('---\nname: n\ndescription: d\nmodel: sonnet\n---\nB').name === 'n'
+  && parseAgentFile('## no frontmatter').frontmatter === false);
+ok('parseAgentFile: CRLF frontmatter and quoted values parse (name: "f" → f)',
+  parseAgentFile('---\r\nname: e\r\ndescription: d\r\n---\r\nB').name === 'e'
+  && parseAgentFile('---\nname: "f"\ndescription: \'g\'\n---\nB').name === 'f');
+// MOJIBAKE (v1.3.0) — encoding corruption: UTF-8 read as Latin-1 and re-saved as UTF-8. From a REAL incident
+// (hindsight 1618e35): 756 mangled sequences in one file; the code still RAN so the daily email shipped garbage
+// for days. Its parent commit was clean and 365/374 ADDED lines carried mojibake — a staged-diff scan catches it.
+// NOTE: every fixture is built by round-tripping through Buffer, NEVER pasted literally — a literal mojibake
+// byte in this test file would make the check fire on Groundtruth's OWN commit (self-match).
+const moji = (ch) => Buffer.from(ch, 'utf8').toString('latin1');   // the exact corruption: utf8 bytes read as latin1
+const mf = (diff) => mojibakeFindings(diff).some(f => f.cls === 'mojibake');
+ok('MOJIBAKE: a garbled em-dash in an added line fires',
+  mf('+++ b/src/mail.js\n+const sep = "' + moji('—') + '";'));
+ok('MOJIBAKE: every STRONG symbol from the real incident fires alone (em-dash, box-draw, arrow, check, warn — 3-/4-byte leads)',
+  ['—', '─', '→', '✓', '✅', '⚠', '🔥'].every(ch => mf('+++ b/a.js\n+const x = "' + moji(ch) + '";')));
+// WEAK (2-byte-lead) pairs need corroboration: a garbled é/· fires only alongside a second hit. One weak pair
+// alone abstains — that is the residual legit-adjacency class (caps-Portuguese word-final letter + guillemet).
+ok('MOJIBAKE: two weak pairs in a file fire (garbled café + naïve)',
+  mf('+++ b/a.js\n+const s = "' + moji('café naïve') + '";'));
+ok('MOJIBAKE ABSTAINS: ONE weak pair alone (a single garbled middot) — below the corroboration bar by design',
+  !mf('+++ b/a.js\n+const x = "' + moji('·') + '";'));
+ok('MOJIBAKE: double-encoded (mojibake of mojibake) still fires — its output is itself weak pairs, plural',
+  mf('+++ b/a.js\n+const s = "' + moji(moji('—')) + '";'));
+ok('MOJIBAKE SILENT: legitimate UTF-8 is clean — accents, symbols, box-drawing, emoji (the FP that would kill it)',
+  !mf('+++ b/src/i18n.js\n+const a = "café";\n+const b = "São Paulo";\n+const c = "âme";\n+const d = "✅ ok";\n+const e = "a — b";\n+const f = "──────";\n+const g = "🔥";'));
+// v1.3.0 review FPs, pinned: ð is a real word-final letter (Icelandic) and â a real letter (French); smart
+// punctuation lives in the CP1252 continuation set. Under the draft's optional-arity regex ALL of these fired.
+ok('MOJIBAKE SILENT: Icelandic word-final ð + smart punctuation („það“ ‘það’ það… það—og) — arity gate holds',
+  !mf('+++ b/is.js\n+const a = "„að“";\n+const b = "‘það’";\n+const c = "það…";\n+const d = "það—og";'));
+ok('MOJIBAKE SILENT: caps-Portuguese word-final letter + ellipsis / tight guillemet (one weak pair) abstains',
+  // the guillemet pair is CONCATENATED so this source file itself never contains a weak pair (self-match safety)
+  !mf('+++ b/pt.js\n+const a = "ATÉ AMANHÃ…";\n+const b = "«IRM' + 'Ã' + '»";'));
+ok('MOJIBAKE SILENT: a REPAIR (mojibake only on the REMOVED side) is not a finding — added-lines-only scan',
+  !mf('+++ b/src/mail.js\n-const sep = "' + moji('—') + '";\n+const sep = "—";'));
+ok('MOJIBAKE: NOT claim-gated — fires with an empty claim, which is what --pre-commit/--diff-range pass',
+  analyze({ claim: '', diff: '+++ b/src/mail.js\n+const s = "' + moji('—') + '";', bashCmds: [], results: [] })
+    .some(f => f.cls === 'mojibake'));
+ok('MOJIBAKE: the message names the file and round-trips the sequence back to the character it should have been',
+  (() => { const f = mojibakeFindings('+++ b/api/_lib/autoPublish.js\n+const s = "' + moji('—') + '";')[0];
+    return f && f.msg.includes('autoPublish.js') && f.msg.includes('"—"'); })());
+// The CP1252 misread (0x80-0x9F shown as printable specials, not C1 controls). The draft decoded these with
+// `& 0xff`, which is wrong for the specials (ellipsis is U+2026 -> 0x26, em-dash U+2014 -> 0x14): a CP1252-misread
+// ellipsis was mis-NAMED "looks like a garbled U+2B26-class char" and most others lost the name entirely.
+// Fixtures built from CODEPOINTS (0xE2 + U+20AC + 0xA6 = what a CP1252 misread of an ellipsis E2 80 A6 displays
+// as) so no strong mojibake literal ever sits in this source file.
+ok('MOJIBAKE: a CP1252-misread ellipsis fires AND is round-trip-named as the ellipsis it should have been',
+  (() => { const f = mojibakeFindings('+++ b/a.js\n+"' + String.fromCharCode(0xE2, 0x20AC, 0xA6) + '"')[0];
+    return f && f.msg.includes('"…"'); })());
+ok('MOJIBAKE: a CP1252-misread em-dash (0xE2 + U+20AC + U+201D) names the em-dash, not a masked wrong char',
+  (() => { const f = mojibakeFindings('+++ b/a.js\n+"' + String.fromCharCode(0xE2, 0x20AC, 0x201D) + '"')[0];
+    return f && f.msg.includes('"—"'); })());
+ok('MOJIBAKE: a file literally named __proto__ neither crashes nor hides the finding (null-proto byFile)',
+  mojibakeFindings('+++ b/__proto__\n+"' + moji('——') + '"').some(f => f.cls === 'mojibake'));
 // DECLARATIVE demotion (v1.2.1) — the user stating a file EXISTS is not commissioning it. Live FP from a real
 // hindsight session: "I do have image_attributions.md on downloads folder" minted a HARD deliverable; the file
 // was in ~/Downloads (outside the repo) so it could never ground in a diff → the task never closed, nagged every
@@ -1830,6 +2027,31 @@ ok('DECLARATIVE does NOT swallow a real request: a REQUEST_VERB in the same clau
   && classifyDeliverables('I have a notes.md — add it to auth.js').hard.includes('auth.js'));
 ok('DECLARATIVE: a plain imperative naming the same file is still HARD (no false negative)',
   classifyDeliverables('Add an image_attributions.md to the repo').hard.includes('image_attributions.md'));
+// VERIFICATION demotion (v1.3.1) — an ask for a VERDICT, where "nothing needed changing" is a SUCCESSFUL
+// outcome and the correct diff is EMPTY. LIVE FP (real hindsight session): "[block] open loop — game.js not
+// in the diff", where a clean game.js WAS the deliverable. Third instance of one root defect (v1.0.5 pasted
+// listing, v1.2.1 declarative, now this): an unclosable HARD deliverable is the block-mode wedge.
+ok('VERIFY: "verify game.js does not need updating" is SOFT — an empty diff is SUCCESS, not an open loop',
+  (() => { const c = classifyDeliverables('verify game.js does not need updating'); return c.soft.includes('game.js') && !c.hard.includes('game.js'); })());
+ok('VERIFY: check / make sure / confirm / ensure / validate / double-check all demote',
+  ['check that game.js still works', 'make sure game.js is consistent', 'confirm game.js is unaffected',
+   'ensure game.js follows the CJS rule', 'validate game.js against the spec', 'double-check game.js']
+    .every(a => classifyDeliverables(a).soft.includes('game.js') && !classifyDeliverables(a).hard.includes('game.js')));
+ok('VERIFY does NOT swallow a real change request: a change verb in the clause keeps it HARD',
+  classifyDeliverables('check game.js and fix it if broken').hard.includes('game.js')
+  && classifyDeliverables('make sure game.js is consistent — update it if not').hard.includes('game.js')
+  && classifyDeliverables('verify the schema then add a migration to game.js').hard.includes('game.js'));
+ok('VERIFY: `make` as a genuine construction verb is untouched ("make a new parser.js" stays HARD)',
+  classifyDeliverables('make a new parser.js').hard.includes('parser.js'));
+// The two FN holes the first cut of the verify demotion opened — both are the ledger going silently INERT on
+// a genuine deliverable (the cardinal sin), and both are pinned here because this exact class has now
+// recurred three times (v1.2.1 declarative, and twice more below).
+ok('VERIFY FN-1: a change verb in a LATER clause keeps it HARD ("Check game.js. Then update it.")',
+  ['Check game.js. Then update it.', 'Verify game.js. Fix it if broken.', 'Make sure game.js is consistent. Change it if not.']
+    .every(a => classifyDeliverables(a).hard.includes('game.js')));
+ok('VERIFY FN-2: a verify verb hiding INSIDE the FILENAME must not demote its own commission',
+  classifyDeliverables('validator.js needs updating').hard.includes('validator.js')          // validator.js ⊂ validat\w+
+  && classifyDeliverables('check-migration-rls.mjs is broken, please rewrite').hard.includes('check-migration-rls.mjs'));
 // Adversarial review of v1.2.1 (FN direction): the first cut of the declarative gate swallowed PROBLEM REPORTS —
 // declarative in form, commission in function. "we have a bug", "there is no X", "broken", "need updating" all
 // demoted to soft, i.e. the completeness backstop went quiet on real asks. PROBLEM_RE restores pre-v1.2.1 hardness.
@@ -2105,6 +2327,29 @@ ok('soft first-surface: a soft aside surfaces ONCE as info (never block, even wi
   } catch { /* non-zero / crash → both stay false → fails loud */ }
   ok('compile-rules CLI: run-as-main guard fires cross-platform — prints PROPOSED + writes proposed-rules.json',
     ranMain && wrote);
+  rmSync(dir, { recursive: true, force: true });
+}
+
+// ── AGENT INTEGRITY wiring: an UNTRACKED agent file must be scanned (v1.3.1 review) ──
+// A brand-new, not-yet-committed agent is the single most likely place for a broken one to live — the
+// tracked-only `git ls-files` draft was blind to exactly that (verified by sandbox probe). collectAgents
+// now lists `--cached --others --exclude-standard`; this drives the REAL `--audit` CLI over a throwaway
+// repo whose only agent is untracked and broken, and asserts the finding surfaces.
+{
+  const dir = mkdtempSync(pathJoin(tmpdir(), 'gt-agent-'));
+  let found = false;
+  try {
+    const g = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8' });
+    g('init', '-q', '.');
+    fsWrite(pathJoin(dir, 'README.md'), 'hi\n');
+    g('add', '-A'); g('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init');
+    fsMkdir(pathJoin(dir, '.claude', 'agents'), { recursive: true });
+    fsWrite(pathJoin(dir, '.claude', 'agents', 'new-agent.md'), '## Workflow\nno frontmatter\n');   // untracked on purpose
+    const script = fileURLToPath(new URL('./groundtruth.mjs', import.meta.url));
+    const out = execFileSync('node', [script, '--audit'], { cwd: dir, encoding: 'utf8' });
+    found = /new-agent\.md has NO YAML frontmatter/.test(out);
+  } catch { /* crash / non-zero → found stays false → fails loud */ }
+  ok('agent wiring: --audit surfaces an UNTRACKED broken agent (ls-files --others; the most common broken case)', found);
   rmSync(dir, { recursive: true, force: true });
 }
 

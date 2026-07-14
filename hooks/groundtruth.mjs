@@ -41,7 +41,8 @@ const CLASS_NAME = { 1: 'false test/build claim', 2: 'stub/placeholder', 3: 'sil
   B1: 'RLS off on new table', B3: 'permissive policy (anon-readable)', C1: 'hardcoded secret', C2: 'private key',
   R: 'compiled rule (from your docs)', openloop: 'open loop (asked, not delivered)', P: 'procedure (step skipped / out of order)',
   ENV: 'env file not gitignored (secret-leak risk)', test_exclusion: 'test excluded/skipped to pass',
-  test_weakened: 'test weakened/disabled to pass' };
+  test_weakened: 'test weakened/disabled to pass', mojibake: 'encoding corruption (mojibake)',
+  agent: 'subagent cannot load (silently inert)' };
 const CLASS_BUCKET = { 1: 'Ignored', 2: 'Missed→Ignored', 3: 'Ignored', 4: 'Missed', 6: 'Missed→Ignored', async_done: 'Ignored',
   B1: 'Ignored', B3: 'Ignored', C1: 'Ignored', C2: 'Ignored', R: 'Ignored' };
 
@@ -431,6 +432,247 @@ export function testWeakeningFindings(claim = '', diff = '') {
   return out;
 }
 
+// MOJIBAKE — encoding corruption. UTF-8 bytes read as Latin-1/CP1252 and re-saved as UTF-8, so every
+// non-ASCII char in the file is silently mangled (an em-dash becomes a 3-char sequence). The code still
+// RUNS — which is exactly why nothing catches it: the source STRINGS are corrupt, so the program faithfully
+// emits garbage.
+// REAL INCIDENT (hindsight, commit 1618e35): a bad write re-encoded api/_lib/autoPublish.js — 756 mangled
+// sequences; the daily email shipped garbage for days. Its PARENT commit was clean and 365 of the 374 ADDED
+// lines carried mojibake, so a staged-diff scan would have caught it AT COMMIT TIME. That is the whole point
+// of this check, and why it is deliberately NOT claim-gated: corrupted bytes are corrupted regardless of what
+// the agent SAID, and the pre-commit/CI paths pass claim:'' — a claim-gated check would be inert exactly at
+// the gate where it earns its keep.
+// SIGNATURE: a UTF-8 LEAD byte seen as a char (0xC2→Â 0xC3→Ã 0xE2→â 0xF0→ð) IMMEDIATELY followed by a
+// CONTINUATION byte (0x80–0xBF) seen as a char. Under Latin-1 the continuation lands in the C1 CONTROL range
+// (–, invisible); under CP1252 those slots map to printable specials (€ ‚ ƒ „ … † ‡ ˆ ‰ Š ‹ Œ Ž
+// ' ' " " • – — ˜ ™ š › œ ž Ÿ). BOTH are covered — the Latin-1 half is the one that actually fired here, and
+// it is invisible in a terminal, which is why this hid for so long.
+// SCOPE (honest): Latin-1/CP1252 misreads only — including double-encoding, whose output still contains these
+// pairs. It does NOT catch U+FFFD replacement damage, UTF-16/BOM garbage, or UTF-8 misread as CP1251/KOI8-R/
+// Shift-JIS — different signatures; abstaining there beats guessing.
+// ADDED lines only — so a REPAIR commit (mojibake only on the `-` side) stays silent, for free.
+const MOJI_CONT = '[\\u0080-\\u00BF\\u20AC\\u201A\\u0192\\u201E\\u2026\\u2020\\u2021\\u02C6\\u2030\\u0160\\u2039'
+  + '\\u0152\\u017D\\u2018\\u2019\\u201C\\u201D\\u2022\\u2013\\u2014\\u02DC\\u2122\\u0161\\u203A'
+  + '\\u0153\\u017E\\u0178]';                                         // continuation byte (0x80-0xBF) seen as a char
+// ARITY IS THE FP KILLER: each lead requires EXACTLY the continuation count real UTF-8 carries — Â/Ã (2-byte
+// lead) one, â (3-byte) two, ð (4-byte) three. The draft made the 2nd/3rd continuation OPTIONAL, so a legit
+// letter followed by ONE continuation-class char fired: Icelandic ð is a real word-final letter and smart
+// punctuation is in the CP1252 continuation set, so „það“ / ‘það’ / það… / það—og all false-fired (live probe,
+// v1.3.0 review). Real mojibake ALWAYS carries full arity, so requiring it costs no recall on the incident class.
+// Continuations for the 2-byte leads are further restricted to raw 0x80-0xBF (no CP1252 specials): CP1252 and
+// Latin-1 agree on 0xA0-0xBF, so this only drops CP1252-misread of UPPERCASE 0xC0-0xDF letters — and it removes
+// the whole "word-final letter + smart punctuation" legit-adjacency class ("ATÉ AMANHÃ…" false-fired in the same probe).
+const MOJIBAKE_RE = new RegExp('[\\u00C2\\u00C3][\\u0080-\\u00BF]'
+  + '|\\u00E2' + MOJI_CONT + '{2}'
+  + '|\\u00F0' + MOJI_CONT + '{3}', 'g');
+// â/ð + full arity is STRONG evidence: 2-3 CONSECUTIVE continuation-class chars never occur in legitimate text.
+// A 2-byte-lead pair is WEAK: caps-Portuguese word-final letter immediately before a closing guillemet (0xBB) —
+// IRMA-tilde inside tight French quotes — is a real if exotic legit adjacency, so it needs corroboration (the
+// >=2 gate below). Spelled out, not quoted literally, so this comment can never self-match its own check.
+const MOJI_STRONG_LEAD = /[\u00E2\u00F0]/;
+// CP1252 specials → their byte, for the round-trip. The draft masked with `& 0xff`, which is WRONG for these
+// (€ is U+20AC → & 0xff = 0xAC, but the CP1252 byte for € is 0x80) — a CP1252-misread "…" decoded to "⬦" and
+// the card mis-NAMED the character; most other CP1252 sequences round-tripped dirty and lost the name entirely.
+const CP1252_BYTE = { '€': 0x80, '‚': 0x82, 'ƒ': 0x83, '„': 0x84, '…': 0x85,
+  '†': 0x86, '‡': 0x87, 'ˆ': 0x88, '‰': 0x89, 'Š': 0x8A, '‹': 0x8B,
+  'Œ': 0x8C, 'Ž': 0x8E, '‘': 0x91, '’': 0x92, '“': 0x93, '”': 0x94,
+  '•': 0x95, '–': 0x96, '—': 0x97, '˜': 0x98, '™': 0x99, 'š': 0x9A,
+  '›': 0x9B, 'œ': 0x9C, 'ž': 0x9E, 'Ÿ': 0x9F };   // literal keys: if THIS file is ever re-encoded, MOJIBAKE_RE
+  // (built from ASCII escapes) still detects the damage — only the "looks like" naming degrades. Detection never
+  // depends on this table.
+// Best-effort round-trip: map the mangled chars back to the bytes they were misread from and decode as UTF-8 to
+// recover what the character SHOULD have been — so the finding says "looks like '—'" instead of an escape blob.
+function mojibakeDecode(seq) {
+  try {
+    const out = Buffer.from([...seq].map((c) => CP1252_BYTE[c] ?? (c.codePointAt(0) & 0xff))).toString('utf8');
+    // U+FFFD -> not a clean round-trip; a C0/C1 CONTROL result (e.g. the 0xC2 0x80 pair decodes to U+0080)
+    // would put an invisible byte on the verdict card. Either way: do not guess.
+    return !out || /[\uFFFD\u0000-\u001F\u007F-\u009F]/.test(out) ? null : out;
+  } catch { return null; }
+}
+export function mojibakeFindings(diff = '') {
+  const out = [];
+  const byFile = Object.create(null); let cur = '';   // null-proto: a file literally named __proto__ made `{}`'s ||= resolve to Object.prototype and crash .push
+  for (const l of String(diff).split('\n')) {
+    const h = l.match(/^\+\+\+ b\/(.+)$/); if (h) { cur = h[1] === '/dev/null' ? '' : h[1]; continue; }
+    if (!cur || l[0] !== '+' || l.startsWith('+++')) continue;       // ADDED lines only (a repair stays silent)
+    const hits = l.slice(1).match(MOJIBAKE_RE);
+    if (hits) (byFile[cur] ||= []).push(...hits);
+  }
+  for (const [f, hits] of Object.entries(byFile)) {
+    // ABSTAIN when the whole case is ONE weak (2-byte-lead) pair: that is the residual legit-adjacency class
+    // (see the WEAK comment above). Any strong hit, or two-plus hits, reports — the real incident had 756.
+    if (hits.length < 2 && !MOJI_STRONG_LEAD.test(hits[0][0])) continue;
+    // Report the most frequent sequence — with what it decodes back to, when the round-trip is clean.
+    const freq = {}; for (const h of hits) freq[h] = (freq[h] || 0) + 1;
+    const top = Object.entries(freq).sort((a, b) => b[1] - a[1])[0][0];
+    const was = mojibakeDecode(top);
+    out.push({ cls: 'mojibake', sev: 'warn',
+      msg: `encoding corruption in ${f.split('/').pop()} — ${hits.length} mangled sequence${hits.length > 1 ? 's' : ''} added`
+         + (was ? ` (most common looks like a garbled "${was}")` : '')
+         + `: the file was read as Latin-1 and re-saved as UTF-8, so its string literals are corrupt. The code still RUNS and ships the garbage — re-decode the affected runs, do NOT re-encode the whole file (genuine UTF-8 added since would be destroyed)` });
+  }
+  return out;
+}
+
+// ── AGENT INTEGRITY — a subagent that can NEVER load, and a doc that rests on one ───────────────────
+// This is the house rule "fail-loud on silent-inertness" applied to subagents. An agent that cannot load
+// fails OPEN: no error, no log, it simply never fires — and every rule documented as "enforced by the X
+// subagent" then rests on nothing. That is the same false-confidence the INERT-rule check already surfaces
+// for a compiled rule whose regex won't compile, and the same class as a phantom import (Class 4): a
+// reference that does not resolve.
+// REAL INCIDENT (hindsight): 16 agents lived in `hindsight-vercel/.claude/agents/` — one level BELOW the
+// repo root. Claude Code resolves `.claude/agents/` by walking from the CWD *upward*; it never descends. So
+// launched from the repo root (the normal case) not one of them was ever scanned — silently, for weeks —
+// while CLAUDE.md claimed migrations were "enforced by the auto-invoked migration-reviewer subagent".
+// Every check below is a STATIC property of the files: no LLM, no runtime, no model list.
+// SCOPE (deliberate): we prove an agent CANNOT fire. We never claim one WILL — selection is the model's
+// discretion (a `description` is a nudge, not a guarantee), and asserting otherwise would be exactly the
+// overclaim the positioning guard forbids. All five real failure modes lived in "cannot fire".
+const AGENT_STOPWORD = /^(?:the|a|an|this|that|each|any|some|no|your|my|our|its|their|first|second|next|last|other|same|right|correct|relevant|appropriate|auto|sub|new|old)$/i;
+/** Parse a subagent markdown file's YAML frontmatter. Pure. */
+export function parseAgentFile(src = '') {
+  // Strip a UTF-8 BOM before matching: a BOM'd agent file still loads (YAML loaders strip it), so reporting
+  // it as "NO frontmatter — can never load" was a verified FP in the v1.3.1 adversarial review. Strip, don't judge.
+  const fm = String(src).replace(/^\uFEFF/, '').match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!fm) return { frontmatter: false };
+  const g = (k) => {
+    const m = fm[1].match(new RegExp('^' + k + ':[ \\t]*(.*)$', 'm'));
+    if (!m) return '';
+    const v = m[1].trim();
+    // YAML BLOCK SCALAR (`description: >-` + indented lines): the value is the FOLLOWING indented block, not
+    // the `>-` indicator. The draft returned the indicator itself, so two agents with different multiline
+    // block-scalar descriptions both parsed as ">-" and false-fired "byte-identical description" (verified FP,
+    // v1.3.1 review). Fold the indented lines — enough for presence + identity comparison, which is all the
+    // callers need.
+    if (/^[>|][0-9]*[+-]?$/.test(v)) {
+      const folded = [];
+      for (const l of fm[1].slice(m.index + m[0].length).split('\n').slice(1)) {
+        if (l.trim() === '') continue;
+        if (!/^[ \t]/.test(l)) break;                      // dedent ends the block
+        folded.push(l.trim());
+      }
+      return folded.join(' ');
+    }
+    // A QUOTED value keeps everything inside the quotes; a plain scalar drops a trailing YAML comment —
+    // `name: qa-bot # main QA agent` parses as `qa-bot` per YAML (` #` starts a comment in plain scalars).
+    // The draft kept the comment in the value, which broke the doc-reference cross-check for that agent
+    // (a doc's `qa-bot` no longer matched the loadable name → phantom-ref FP, verified in review).
+    const q = v.match(/^(["'])([\s\S]*?)\1/);
+    return q ? q[2] : v.replace(/\s+#.*$/, '');
+  };
+  return { frontmatter: true, name: g('name'), description: g('description'), model: g('model') };
+}
+/**
+ * Pure core. `agents` = [{ rel, src }] for every `**\/.claude/agents/*.md` (rel = repo-relative path);
+ * `docs` = [{ rel, src }] for the rule docs that may REFERENCE an agent (CLAUDE.md & friends).
+ */
+export function agentFindings(agents = [], docs = []) {
+  const out = [];
+  const loadable = new Map();          // name → rel, for agents that CAN load
+  const byBase = new Map();            // file basename → rel, for cross-referencing a doc mention
+  const seenName = new Map(), seenDesc = new Map();
+  for (const { rel, src } of agents) {
+    // Keyed lower-case: the doc cross-check resolves case-insensitively (a sentence-start "Reviewer" must
+    // still resolve to `reviewer.md`). Display always uses the original spelling.
+    byBase.set(rel.split('/').pop().replace(/\.md$/, '').toLowerCase(), rel);
+    const a = parseAgentFile(src);
+    // (1) LOCATION — the failure that hid 16 agents. `.claude/agents/` is resolved by walking from the CWD
+    // UPWARD to the repo root; a copy nested below the root is never descended into. Stated precisely: it is
+    // invisible when Claude is launched from the repo root (the normal case). It DOES load if you launch from
+    // inside that subtree — so this is a warn about the normal case, not an absolute "never".
+    const nested = !/^\.claude\/agents\//.test(rel);
+    if (nested) {
+      const sub = rel.split('/.claude/')[0];
+      out.push({ cls: 'agent', sev: 'warn', msg: `subagent ${rel.split('/').pop()} is in ${sub}/.claude/agents/ — BELOW the repo root. Claude Code resolves .claude/agents/ from the CWD upward and never descends, so it is invisible whenever you launch from the repo root (the normal case). Move it to <root>/.claude/agents/` });
+    }
+    // (2) FRONTMATTER — `name` and `description` are required; without them the file cannot load at all.
+    if (!a.frontmatter) { out.push({ cls: 'agent', sev: 'warn', msg: `subagent ${rel} has NO YAML frontmatter — \`name\` and \`description\` are required, so it can never load (it is inert, not merely unused)` }); continue; }
+    if (!a.name) out.push({ cls: 'agent', sev: 'warn', msg: `subagent ${rel} has no \`name:\` in its frontmatter — it cannot load` });
+    if (!a.description) out.push({ cls: 'agent', sev: 'warn', msg: `subagent ${rel} has no \`description:\` — it cannot load, and description is also HOW the router selects an agent` });
+    // (3) MODEL ID — a malformed id is a SILENT fallback, not a loud error. We deliberately do NOT keep an
+    // allowlist of valid models: it would go stale and false-fire on the next model shipped (an FP is fatal;
+    // this check must age well). A DOT in a BARE Claude id is the provably-wrong shape — Anthropic-API ids are
+    // hyphen-separated (`claude-opus-4-8`), never dotted — which is exactly the real bug (`claude-opus-4.8`).
+    // Gated on /^claude/: BEDROCK ids legitimately contain dots (`anthropic.claude-…`, `us.anthropic.…-v1:0`)
+    // and never start with `claude` — the ungated draft flagged a valid Bedrock id (verified FP, v1.3.1
+    // review). Vertex ids (`claude-opus-4-1@20250805`) start with `claude` but are dot-free, so the dot test
+    // itself abstains there. Anything else abstains: an unrecognised-but-well-formed id is not provably wrong.
+    if (a.model && a.model.includes('.') && /^claude/i.test(a.model))
+      out.push({ cls: 'agent', sev: 'warn', msg: `subagent ${rel} declares \`model: ${a.model}\` — a Claude model id is hyphen-separated and never contains a dot (did you mean \`${a.model.replace(/\./g, '-')}\`?). An unrecognised id falls back SILENTLY, so this never errors` });
+    // (4) ROUTER — a duplicate name collides; a byte-identical description leaves the router no way to choose
+    // between two agents (selection is on description). Collisions are judged among ROOT-LEVEL agents only:
+    // a nested copy never loads (finding (1) already says so, louder), so "the router cannot tell them apart"
+    // would be false when one side is nested — the exact mid-migration state the location fix produces
+    // (root copy added, nested original not yet deleted) must not mint a second, untrue finding.
+    if (a.name) {
+      const nkey = a.name.toLowerCase();            // lower-cased KEY (see byBase); the message shows the real spelling
+      // The KEY is folded for DOC-PROSE resolution only (a sentence-start "Reviewer" is still reviewer.md).
+      // The COLLISION test compares the real spelling: Claude Code matches `name:` as an exact string, so
+      // `QALead` and `qalead` are two DISTINCT loadable agents — folding the collision test too made a false
+      // "declared twice" on exactly that pair (verified FP, this review). Not provably a collision → abstain.
+      const kin = seenName.get(nkey) || [];
+      const prior = kin.find(p => p.name === a.name);
+      if (prior && !nested && !prior.nested) out.push({ cls: 'agent', sev: 'warn', msg: `subagent name \`${a.name}\` is declared twice (${prior.rel} and ${rel}) — a name collision` });
+      kin.push({ rel, nested, name: a.name });
+      seenName.set(nkey, kin);
+      if (!nested && a.description) loadable.set(nkey, rel);
+    }
+    if (a.description && !nested) {
+      if (seenDesc.has(a.description)) out.push({ cls: 'agent', sev: 'warn', msg: `subagent ${rel} has a description byte-identical to ${seenDesc.get(a.description)} — the router selects on description, so it cannot tell them apart` });
+      else seenDesc.set(a.description, rel);
+    }
+  }
+  // (5) PHANTOM AGENT REFERENCE — Class 4, one artifact over: a doc claiming enforcement by an agent that
+  // cannot load. Scoped to be FP-free by (a) skipping stopwords, (b) skipping a LOADABLE agent, and — the
+  // load-bearing one — (c) firing ONLY when the name RESOLVES to an agent file in this repo (by basename or
+  // declared name) that provably cannot load. (c) carries the whole guard: agents also come from plugins,
+  // from the harness built-ins (`general-purpose`, `Explore`), and from user-level `~/.claude/agents/` —
+  // none of which this scan can see — so "no file in the repo" proves NOTHING. The draft's unresolved arm
+  // fired on ordinary prose ("a well-documented subagent", "a read-only subagent") and on built-ins: all
+  // verified FPs, removed in the v1.3.1 review.
+  // The name is matched BARE (any word), not just backticked/hyphenated. The draft required a hyphen or
+  // backticks to keep the bare word "the" out — but (c) already excludes it (no `the.md` resolves), and the
+  // narrow form MISSED the real incident's second phantom: CLAUDE.md said "invoke the reviewer subagent
+  // until it returns APPROVED" — unhyphenated, unbackticked — while reviewer.md existed with NO frontmatter
+  // and so could never load. That was a 🔴 blocker in the wild and the check walked straight past it.
+  // `[*_]{0,3}` before the space: docs of this kind BOLD the name (`**reviewer** subagent`) and `\s+` alone
+  // can't cross the closing emphasis marks — the widened bare-word form still missed the incident phrasing
+  // whenever the author emphasised it (verified miss, this review). `s?` takes the plural. Opening emphasis
+  // needs nothing: `*` is a non-word char, so \b already holds after it (only `_reviewer_` stays a miss —
+  // `_` is a word char, so \b fails; accepted abstain). Neither widens the FIRE condition — resolution to an
+  // unloadable repo file still carries the guard, so these add recall, not FP surface.
+  for (const { rel, src } of docs) {
+    const seen = new Set();
+    for (const m of String(src).matchAll(/`([\w-]+)`[*_]{0,3}\s+sub-?agents?\b|\b([A-Za-z][\w-]*)[*_]{0,3}\s+sub-?agents?\b/gi)) {
+      const ref = (m[1] || m[2] || '').trim();
+      // Resolve CASE-INSENSITIVELY. A doc naturally capitalises the name at the start of a sentence
+      // ("Reviewer subagent handles the diff") while the file is `reviewer.md` — a case-sensitive lookup
+      // resolved nothing and abstained, silently missing a real phantom (verified FN). This cannot widen the
+      // FP surface: the fire condition is still RESOLUTION to a repo agent file that cannot load, and case is
+      // not what makes a word an agent name.
+      const key = ref.toLowerCase();
+      if (!ref || AGENT_STOPWORD.test(ref) || seen.has(key) || loadable.has(key)) continue;
+      const resolved = byBase.get(key) || seenName.get(key)?.[0].rel;
+      if (!resolved) continue;                       // could be a plugin/built-in/user-level agent — abstain
+      // A broken agent file's OWN body routinely names itself ("You are the reviewer subagent" — agent files
+      // are also rule docs via RULE_SRC_RE). That is the file describing itself, not a doc RESTING on it, and
+      // check (2) already reports the file once — firing here double-reported every frontmatter-less agent
+      // whose body says its own name (verified by probe, this review).
+      if (resolved === rel) continue;
+      // resolved by BASENAME to a file that loads under a DIFFERENT frontmatter name: the reference is stale
+      // but "CANNOT LOAD" would be false (the file loads). Abstain rather than over-claim.
+      if ([...loadable.values()].includes(resolved)) continue;
+      seen.add(key);
+      // "unless …" hedge: a broken repo file can share a name with a working plugin/built-in agent the doc
+      // actually means (a WIP `explore.md` draft beside docs that say "the Explore subagent") — this scan
+      // cannot see those, so state the provable part plainly and hedge the inference (verified by probe, this review).
+      out.push({ cls: 'agent', sev: 'warn', msg: `${rel} documents enforcement by the \`${ref}\` subagent, but \`${ref}\` exists (${resolved}) and CANNOT LOAD — the rule rests on nothing (a phantom reference, Class 4 over agents), unless the doc means a same-named plugin/built-in agent this scan cannot see — then the broken file is dead weight beside it` });
+    }
+  }
+  return out;
+}
+
 // VACUOUS TEST (Class 1) — an ADDED test that provably cannot fail. This is the cheap T1 slice of the
 // "passes-only-the-visible-test / asserts-nothing" class (the rest is T2, mutation testing — see ROADMAP
 // "Verification tiers"). Scoped (Fable) to be FALSE-POSITIVE-free, not broad: a JS/TS test whose body
@@ -452,6 +694,20 @@ const TEST_OPEN_RE = /\b(?:it|test|specify)\s*\(\s*(['"`])(?:\\.|(?!\1)[\s\S])*?
 // should-style asserts via a GETTER chain (`x.should.be.true`), the one mainstream JS assertion that is
 // not a call. "No call ⇒ cannot fail" only holds once both are counted as actions.
 const ACTION_RE = /\bnew\b|\bthrow\b|\bawait\b|\.\s*should\b|\.\s*[A-Za-z_$][\w$]*\s*\(|(?<![.\w$])(?!(?:if|for|while|switch|catch|return|do|else|yield|typeof|void|delete|in|of|instanceof)\b)[A-Za-z_$][\w$]*\s*\(/;
+// Everything that must be blanked out of a JS body before we brace-match or look for a call, as ONE
+// leftmost-first alternation. The ORDER OF SCANNING is the whole point: whichever construct OPENS first
+// wins and consumes the rest, exactly as a JS lexer does. Running these as separate passes is a bug —
+// blanking strings first lets an apostrophe inside prose (`// … France's longitude …`) open a phantom
+// string literal that eats real code (verified FP, see vacuousTestFindings). Alternatives:
+//   1. string literals — '…' and "…" cannot span a newline; `…` (template) can.
+//   2. block + line comments.
+//   3. a regex literal, ONLY where JS itself would lex one (after a punctuator/keyword) — so the `/` in
+//      `a / b` division is never eaten (eating a division that wraps the body's only call would be an FP).
+const MASKABLE_RE = new RegExp(
+  /'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/.source
+  + '|' + /\/\*[\s\S]*?\*\/|\/\/[^\n]*/.source
+  + '|' + /(?<=(?:[=(,:;!&|?{}[\n^%*+~<>-]|\breturn|\bcase|\btypeof)\s*)\/(?![/*])(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^[/\\\n])+\/[a-z]*/.source,
+  'g');
 export function vacuousTestFindings(claim = '', diff = '') {
   const out = [];
   if (!claimsSuccess(claim)) return out;                 // same negation/quote-aware success gate as AG-C
@@ -477,9 +733,13 @@ export function vacuousTestFindings(claim = '', diff = '') {
     // its assertion; `/\/\//` read as a line comment and blanked the assertion). A `/` counts as a regex
     // start only after a punctuator/keyword — the same positions JS itself lexes a regex, so `a / b`
     // division is never eaten (eating a division that wraps the body's only call would be an FP).
-    const mask = blankStrings(raw).replace(
-      /\/\*[\s\S]*?\*\/|\/\/[^\n]*|(?<=(?:[=(,:;!&|?{}[\n^%*+~<>-]|\breturn|\bcase|\btypeof)\s*)\/(?![/*])(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^[/\\\n])+\/[a-z]*/g,
-      s => ' '.repeat(s.length));
+    // ONE leftmost-first pass: string | comment | regex-literal must COMPETE, never run in sequence.
+    // VERIFIED FP (real hindsight session, directionCheck.test.js): blanking strings FIRST let an apostrophe
+    // in ordinary PROSE — `// … metropolitan France's longitude span …` — open a bogus string literal that ran
+    // to the next quote far below, swallowing the body's braces and its `await dc.checkRound(...)` call. The
+    // block extracted as EMPTY and the test was reported as "asserts nothing" while it plainly asserted.
+    // A comment may contain a quote and a string may contain `//` — only leftmost-wins is correct for both.
+    const mask = raw.replace(MASKABLE_RE, s => ' '.repeat(s.length));
     TEST_OPEN_RE.lastIndex = 0;
     let m;
     while ((m = TEST_OPEN_RE.exec(raw))) {
@@ -889,6 +1149,11 @@ export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], 
   findings.push(...testWeakeningFindings(claim, gDiff));
   // Vacuous test — claimed success but an ADDED JS/TS test makes no call/assertion → provably can't fail. Warn-only.
   findings.push(...vacuousTestFindings(claim, gDiff));
+  // Mojibake — encoding corruption. NOT claim-gated on purpose: corrupted bytes are corrupted whatever the
+  // agent said, and pre-commit/CI pass claim:'' — gating it would make it inert at the very gate it exists
+  // for (the real incident entered through a commit). Scans `diff` (the content-scan view, = the staged diff
+  // at pre-commit), same reality the secret scanners see.
+  findings.push(...mojibakeFindings(diff));
 
   // async_done — claimed done/clean while the work is actually unfinished. Two grounds: the claim
   // CONTRADICTS itself (says still-running/deferred), OR a background task was launched this session
@@ -1056,9 +1321,36 @@ export function scanContent(relPath, text, cwd = process.cwd()) {
 }
 
 /** Walk tracked source files and scan each — the standalone `--audit` debt inventory. */
+/**
+ * Collect the on-disk inputs for agentFindings: every `**\/.claude/agents/*.md` plus the rule docs
+ * that may reference one. Fs/git wrapper around the PURE core (which is where all the logic and tests live).
+ * `--others --exclude-standard` includes UNTRACKED files: a brand-new, not-yet-committed agent is the single
+ * most likely place for a broken one to live (the tracked-only draft was blind to exactly that — verified
+ * by sandbox probe, v1.3.1 review), while --exclude-standard keeps gitignored junk out. Submodule contents
+ * never appear in either listing, so an independent inner project can't false-fire the location check.
+ * Fail-open: any git/read error yields [] — a broken read must never break a turn.
+ */
+function collectAgents(cwd, git) {
+  let tracked = [];
+  try { tracked = git('ls-files --cached --others --exclude-standard').split('\n').filter(Boolean); } catch { return { agents: [], docs: [] }; }
+  const rd = (f) => { try { return readFileSync(join(cwd, f), 'utf8'); } catch { return null; } };
+  const agents = [];
+  for (const f of tracked.filter(f => /(^|\/)\.claude\/agents\/[^/]+\.md$/.test(f))) {
+    const src = rd(f); if (src !== null) agents.push({ rel: f, src });
+  }
+  const docs = [];
+  for (const f of tracked.filter(f => RULE_SRC_RE.test(f))) {
+    const src = rd(f); if (src !== null) docs.push({ rel: f, src });
+  }
+  return { agents, docs };
+}
+
 function auditRepo(cwd, git) {
   const files = git('ls-files').split('\n').filter(f => CODE_EXT_RE.test(f));
   const findings = [];
+  // Agent integrity is a WHOLE-REPO property, never a diff one: the 16 invisible agents were long-committed
+  // and would never appear in any diff. So it belongs here (and at SessionStart), not in analyze().
+  { const { agents, docs } = collectAgents(cwd, git); findings.push(...agentFindings(agents, docs)); }
   const tty = process.stderr.isTTY;             // progress only on a terminal; keeps piped output clean
   files.forEach((f, i) => {
     if (tty && (i % 20 === 0 || i === files.length - 1))
@@ -1154,10 +1446,30 @@ export function runCompiledRules(diff, rules) {
     // mention-context by construction (`ARCHITECTURE.md: never eval` shouldn't flag ARCHITECTURE.md). Zero
     // hand-maintenance: the source is recorded on the rule. (Seed rules name no declaring doc → no skip.)
     const declBase = (String(r.source || '').match(/extracted from ([^:]+):/) || [])[1]?.split('/').pop();
-    // A CALL-forbidding rule (line_re targets a `\(` call, e.g. `\beval\s*\(`) matching inside a COMMENT is a
-    // mention, not a use — so test such rules against the CODE portion only (a comment `// use of eval()` is
-    // documentation). Non-call rules are left whole: some legitimately target comments (`@ts-ignore`, a slur).
-    const callRule = /\\\(/.test(String(r.line_re || ''));
+    // A rule matching inside a COMMENT is a MENTION, not a use. R3 (v0.8) applied that only to CALL rules
+    // (`\beval\s*\(`), on the theory that a non-call rule might target comments — which left every
+    // IDENTIFIER/MEMBER rule scanning prose. VERIFIED FP (real hindsight session): a rule forbidding
+    // `import.meta` (no call paren → not a "call rule") fired on the very COMMENT that EXPLAINS the rule —
+    // `// never use import.meta here (CJS)` — while the code contained none. The same prose-as-code self-match
+    // R3 fixed for calls, still live for everything else.
+    // INVERT THE DEFAULT: every rule tests the CODE portion, UNLESS it plainly TARGETS comments — a lint /
+    // suppression directive (`@ts-ignore`, `eslint-disable`, `noqa`) or a TODO-class marker, the only kinds
+    // that must see comment text to work at all. Strictly fewer FPs, and no such rule goes inert: a
+    // comment-targeting rule still gets the raw line.
+    // Classified by what the rule's OWN regex MATCHES — probe strings of real directive/marker text — never
+    // by substrings of its source. The first cut classified on source substrings (/@|ignore|disable|…/),
+    // which sent every decorator rule (`@Injectable\s*\(`), npm-scope import rule (`from '@old-scope/`), and
+    // identifier rule containing ignore/todo/suppress (`\bignoreErrors\s*\(`, `\btodoList\b`,
+    // `suppressWarnings\s*\(`) down the raw-line path — re-opening for those rules the exact prose-comment FP
+    // this inversion ships to close (all five re-fired, verified by probe in the v1.3.1 review). A probe
+    // can't misfire that way: `@Injectable\(` matches no directive text. Probes are spelled as they appear
+    // IN comments (`// TODO`, `# noqa`) so a comment-anchored rule (`//\s*TODO`) classifies too, and they
+    // carry no ordinary code words a code rule could accidentally match.
+    const COMMENT_PROBES = ['// @ts-ignore', '// @ts-expect-error', '// @ts-nocheck',
+      '/* eslint-disable */', '// eslint-disable-next-line', '// eslint-disable-line', '// prettier-ignore',
+      '# noqa', '# type: ignore', '# pylint: disable', '/* istanbul ignore next */', '// NOSONAR', '//nolint',
+      '// TODO', '# TODO', '// FIXME', '# FIXME', '// XXX', '// HACK', '# HACK'];
+    const commentRule = !!lre && COMMENT_PROBES.some(p => lre.test(p));
     const skipDecl = (f) => declBase && f.split('/').pop() === declBase;
     if (r.kind === 'forbid_path') {
       const hit = files.find(f => fre.test(f) && !skipDecl(f));
@@ -1169,8 +1481,9 @@ export function runCompiledRules(diff, rules) {
       for (const f of files) {
         if (!fre.test(f) || skipDecl(f)) continue;
         const ext = extOf(f), st = { block: false, fence: false };
-        // matchable view: call-rules see code only (comments stripped, state threaded in line order); others raw
-        const view = callRule ? byFile[f].map(x => splitCodeComment(x, ext, st).code) : byFile[f];
+        // matchable view: CODE ONLY by default (comments stripped, state threaded in line order); a rule that
+        // targets comments (a lint/suppression directive, a TODO marker) sees the raw line — see commentRule.
+        const view = commentRule ? byFile[f] : byFile[f].map(x => splitCodeComment(x, ext, st).code);
         const idx = view.findIndex(x => lre.test(x));
         if (idx === -1) continue;
         const bad = byFile[f][idx];                            // report the ORIGINAL line, not the stripped view
@@ -1205,6 +1518,14 @@ function renderAudit(findings) {
       '',
       `  Security · env files exposed: ${group('ENV').length}`,
       ...group('ENV').map(f => `    ${f.sev === 'block' ? '🔴' : '🟡'} ${f.msg}`),
+    ] : []),
+    // Agent findings carry msg only (no file:line) — the generic section() would render "undefined:undefined".
+    // v1.3.1 review: the first wiring counted these in the header but never printed them — a finding the
+    // header admits to and the body hides is exactly the silent-loss this tool exists to prevent.
+    ...(group('agent').length ? [
+      '',
+      `  Agents · cannot load (silently inert): ${group('agent').length}`,
+      ...group('agent').map(f => `    🟡 ${f.msg}`),
     ] : []),
   ].join('\n');
 }
@@ -1440,6 +1761,12 @@ const REQUEST_VERB_RE = /\b(?:add|create|implement|build|write|rewrite|fix|chang
 // a blocking open-loop) — never to DROP them (an invisible false-negative is worse than an over-nag). Only when
 // no REQUEST_VERB_RE co-occurs, so "review auth.js and add a guard" still tracks auth.js hard.
 const READ_INTENT_RE = /\b(?:look(?:ing|ed)?\s+(?:at|into|through)|read|review|analyz\w*|investigat\w*|examin\w*|inspect|audit(?:ing|ed)?|compare|understand|study|explore|trace|see\s+(?:if|whether|what|how|the)|go\s+through|walk\s+through)\b/i;
+// VERIFICATION intent — asks for a VERDICT, where "nothing needed changing" is a legitimate, SUCCESSFUL
+// outcome and the correct diff is EMPTY. Distinct from READ_INTENT (observation) and from a change request.
+// The ledger's assumption that every named file must land in the diff is false for these, so a HARD task
+// minted here can never close — it nags forever and escalates to BLOCK on work that was done correctly.
+// (Live FP: "[block] open loop — game.js not in the diff", where a clean game.js WAS the deliverable.)
+const VERIFY_INTENT_RE = /\b(?:check|verif\w+|confirm|ensure|validat\w+|make\s+(?:sure|certain)|double[-\s]?check|sanity[-\s]?check)\b/i;
 // A turn read as a QUESTION (interrogative) — a distinct FP class from the dismissals above ("is report.js
 // right?"), also answered in conversation with no diff.
 const QUESTION_RE = /\?\s*$|^\s*(?:why|what|whats?|how|is|are|was|were|does|do|did|should|shall|can|could|would|will|which|when|where|who|whom|whose)\b/i;
@@ -1552,6 +1879,32 @@ export function classifyDeliverables(text) {
     // (a one-time aside that auto-expires, never a blocking open-loop), never DROP them. Closes the "look at
     // cluePrompts.js" false open-loop while keeping "review auth.js and add a guard" hard (add ∈ REQUEST_VERB).
     const readsOnly = READ_INTENT_RE.test(clause) && !REQUEST_VERB_RE.test(clause);
+    // A VERIFICATION clause asks for a VERDICT, not a change — "verify game.js does not need updating",
+    // "make sure game.js is consistent", "check that game.js still works". Its CORRECT outcome may be an
+    // EMPTY diff: nothing was wrong, so nothing changed. The ledger's core assumption — every named file must
+    // land in the diff — is simply false here, so the task can NEVER close: it nags every turn and escalates
+    // to BLOCK on work that was completed successfully. LIVE FP (real hindsight session): "[block] open loop —
+    // game.js not in the diff", where a clean game.js WAS the deliverable.
+    // This is the THIRD instance of one root defect (v1.0.5 pasted listing, v1.2.1 declarative, now this):
+    // an unclosable HARD deliverable = the block-mode wedge. READ_INTENT_RE covers OBSERVATION verbs (look,
+    // read, review, inspect, audit) but not VERIFICATION verbs, which is the gap.
+    // `make sure` must be stripped before the REQUEST_VERB test or its own "make" (a construction verb)
+    // defeats the demotion. A real change verb elsewhere in the clause still wins: "check game.js and FIX it"
+    // stays HARD. Demote to soft — surfaced once, auto-expires, never blocks — never dropped.
+    // Two restore-only guards (each can only RESTORE pre-v1.3.1 hardness, so neither can mint a new FP —
+    // same safety property as the v1.2.1 declarative gates), both live FN holes in the first cut:
+    //   1. The verify verb must survive with the clause's own TOKENS blanked: a FILENAME satisfies
+    //      VERIFY_INTENT_RE by itself (`validator.js` ⊂ validat\w+, `check.js`/`verify.js` hit \bcheck\b /
+    //      verif\w+), so "validator.js needs updating" — a problem-report COMMISSION, the exact class
+    //      PROBLEM_RE restores for declaratives — silently demoted off the verb-in-the-token. Tokens are
+    //      blanked from the VERIFY side only; blanking the REQUEST side could only widen the demotion.
+    //   2. !anaphoricReq — "Check game.js. Then update it." puts the token in the verify clause and the
+    //      change verb on a pronoun in the next; without the ask-wide anaphora gate (added for declaratives
+    //      in v1.2.1 for this exact shape) the ledger stopped tracking a genuine deliverable.
+    const toks = extractTokens(clause);
+    let deTok = clause; for (const t of toks) deTok = deTok.split(t).join(' ');
+    const deMake = clause.replace(/\bmake\s+(?:sure|certain)\b/gi, ' ');
+    const verifyOnly = VERIFY_INTENT_RE.test(deTok) && !REQUEST_VERB_RE.test(deMake) && !anaphoricReq;
     // A DECLARATIVE clause names a thing that ALREADY EXISTS ("I do have image_attributions.md on downloads
     // folder"), not one to produce — see DECLARATIVE_RE. Same demotion as read-intent: soft, never dropped.
     // NOT declarative when the clause reports a problem/lack (PROBLEM_RE — "we have a bug: cache.js…") or when
@@ -1559,8 +1912,8 @@ export function classifyDeliverables(text) {
     // it."). Both gates only restore pre-v1.2.1 hardness, so they cannot mint a new false positive.
     const declarative = DECLARATIVE_RE.test(clause) && !REQUEST_VERB_RE.test(clause)
       && !PROBLEM_RE.test(clause) && !anaphoricReq;
-    for (const tok of extractTokens(clause))
-      (req && !readsOnly && !declarative && !isRef(tok) ? hard : soft).add(tok);
+    for (const tok of toks)
+      (req && !readsOnly && !verifyOnly && !declarative && !isRef(tok) ? hard : soft).add(tok);
   }
   for (const t of hard) soft.delete(t);                                        // hard wins over soft
   return { hard: [...hard], soft: [...soft] };
@@ -2509,6 +2862,20 @@ function main() {
       const n = recompileRules(cwd);
       process.stderr.write(`[groundtruth] init: ${n} rule(s) proposed from your docs — run /groundtruth-rules to review + approve (nothing enforces until you do).\n`);
     } catch { /* non-fatal — the last compiled-rules.json stays in effect */ }
+
+    // AGENT INTEGRITY at SessionStart — the ONLY moment this warning can help: subagent definitions are read
+    // at session start, so an agent that cannot load is already inert by the time any turn runs, and it fails
+    // OPEN (no error, no log). Surfaced here, loudly, per "fail-loud on silent-inertness". Not on the Stop
+    // path: these files are long-committed and appear in no diff (16 agents were invisible for weeks).
+    try {
+      const { agents, docs } = collectAgents(cwd, (a) => git(a, cwd));
+      const af = agentFindings(agents, docs);
+      if (af.length) {
+        process.stderr.write(`[groundtruth] ⚠ ${af.length} subagent problem(s) — these agents CANNOT fire, silently:\n`);
+        for (const f of af.slice(0, 8)) process.stderr.write(`  • ${f.msg}\n`);
+        if (af.length > 8) process.stderr.write(`  … and ${af.length - 8} more (run \`--audit\` for the full list)\n`);
+      }
+    } catch { /* non-fatal — never break a session start */ }
     process.exit(0);
   }
 
