@@ -842,6 +842,78 @@ ok('B1 silent: CREATE TABLE only quoted in a -- comment inside a .sql file',
   !has(analyze({ diff: '+++ b/migrations/068_rls.sql\n+-- the old CREATE TABLE public.scores had no RLS' }), 'B1'));
 ok('B3 fires: a REAL USING(true) policy still trips even with a trailing -- comment',
   has(analyze({ diff: '+++ b/migrations/070_p.sql\n+CREATE POLICY r ON public.t FOR SELECT TO public USING (true); -- wide open' }), 'B3'));
+// ── MCP-SQL inertness fix (v1.4.0): the `<mcp-sql>` pseudo-file (apply_migration/execute_sql — leaves no
+// file) was captured FOR the SQL scanners, but `\.sql$` never matched the dotless pseudo-name — an armed
+// check silently inert on the exact channel it was built for (verified by probe: zero findings pre-fix).
+ok('B1 fires on MCP-applied SQL: CREATE TABLE without RLS via <mcp-sql> is no longer invisible',
+  has(analyze({ diff: '+++ b/<mcp-sql>\n+CREATE TABLE public.scores (id int);' }), 'B1'));
+ok('B3 fires on MCP-applied SQL: USING(true) policy via <mcp-sql>',
+  has(analyze({ diff: '+++ b/<mcp-sql>\n+CREATE POLICY r ON public.t FOR SELECT TO public USING (true);' }), 'B3'));
+// ── B4 — UPDATE/DELETE with no WHERE (WARN only; a full-table write is occasionally intended — a
+// migration backfill — so never block). Fires only on a COMPLETE statement (`;` visible) whose head is
+// UPDATE/DELETE FROM with no WHERE before the terminator; everything else abstains.
+ok('B4 fires: UPDATE with no WHERE, complete statement in a .sql file',
+  has(analyze({ diff: '+++ b/migrations/101_fix.sql\n+UPDATE public.teachers SET quota = 0;' }), 'B4'));
+ok('B4 fires: DELETE FROM with no WHERE',
+  has(analyze({ diff: '+++ b/migrations/101_fix.sql\n+DELETE FROM public.stale_rounds;' }), 'B4'));
+ok('B4 fires via <mcp-sql> (execute_sql leaves no file)',
+  has(analyze({ diff: '+++ b/<mcp-sql>\n+DELETE FROM rounds;' }), 'B4'));
+ok('B4 is WARN, never block',
+  analyze({ diff: '+++ b/<mcp-sql>\n+DELETE FROM rounds;' }).filter(f => f.cls === 'B4').every(f => f.sev === 'warn'));
+ok('B4 silent: WHERE present (same line)',
+  !has(analyze({ diff: '+++ b/m.sql\n+UPDATE t SET x = 1 WHERE id = 3;' }), 'B4'));
+ok('B4 silent: WHERE on a later ADDED line of the same statement',
+  !has(analyze({ diff: '+++ b/m.sql\n+UPDATE t SET x = 1\n+WHERE id = 3;' }), 'B4'));
+ok('B4 ABSTAINS: no terminating `;` in the added text (the WHERE may live on an unchanged next line)',
+  !has(analyze({ diff: '+++ b/m.sql\n+UPDATE t SET x = 1' }), 'B4'));
+ok('B4 silent: UPDATE quoted in a -- comment',
+  !has(analyze({ diff: '+++ b/m.sql\n+-- the old job ran UPDATE t SET x = 1; nightly' }), 'B4'));
+ok('B4 silent: UPDATE inside a /* block comment */',
+  !has(analyze({ diff: '+++ b/m.sql\n+/* legacy: UPDATE t SET x = 1; */\n+SELECT 1;' }), 'B4'));
+ok('B4 silent: CREATE POLICY … FOR DELETE is not a DELETE statement',
+  !has(analyze({ diff: '+++ b/m.sql\n+CREATE POLICY d ON t FOR DELETE TO authenticated USING (auth.uid() = user_id);' }), 'B4'));
+ok('B4 silent: a non-sql file mentioning "update t set x=1;" in prose never anchors',
+  !has(analyze({ diff: '+++ b/docs/ops.md\n+run `UPDATE t SET x = 1;` in the console' }), 'B4'));
+ok('B4 fires: second statement of a multi-statement added hunk',
+  has(analyze({ diff: '+++ b/m.sql\n+INSERT INTO t VALUES (1);\n+DELETE FROM t;' }), 'B4'));
+// ── Fable review: string literals are DATA, not statements — blanked before every SQL check. Without it,
+// opening the MCP-SQL channel handed the BLOCK tier a false 🔴 from a read-only SELECT, and B4 both
+// false-fired (literal `;`) and went silently dark (literal "where").
+ok('B1 silent: a read-only SELECT whose string literal quotes DDL does not fire (the block-tier FP)',
+  !has(analyze({ diff: "+++ b/<mcp-sql>\n+SELECT * FROM migrations WHERE body LIKE '%CREATE TABLE users%'" }), 'B1'));
+ok('B3 silent: `USING (true)` inside a string literal of a SELECT does not fire',
+  !has(analyze({ diff: "+++ b/<mcp-sql>\n+SELECT * FROM audit WHERE note = 'USING (true)'" }), 'B3'));
+ok('B3 still fires: a real quoted-literal tautology (USING (\'x\'=\'x\') blanks to \'\'=\'\' and still matches)',
+  has(analyze({ diff: "+++ b/m.sql\n+CREATE POLICY p ON t USING ('x' = 'x');" }), 'B3'));
+ok('B4 silent: a literal `;` no longer splits the statement before its WHERE (SET css = \'a{x:1;}\' WHERE …)',
+  !has(analyze({ diff: "+++ b/m.sql\n+UPDATE settings SET css = 'a{x:1;}' WHERE k = 'theme';" }), 'B4'));
+ok('B4 fires: a literal containing the word "where" cannot suppress a real full-table write',
+  has(analyze({ diff: "+++ b/m.sql\n+UPDATE t SET note = 'where needed';" }), 'B4'));
+// ── Tautology WHERE (user request): `WHERE 1=1`-class predicates filter NOTHING — a full-table write in
+// disguise. Same predicate class B3 catches on policies: only literals/operators/boolean keywords, no
+// identifier doing row scoping.
+ok('B4 fires: WHERE 1=1 is a tautology, not a scope',
+  has(analyze({ diff: '+++ b/m.sql\n+UPDATE t SET x = 1 WHERE 1 = 1;' }), 'B4'));
+ok('B4 fires: WHERE 0=0 OR 1=1 (compound tautology)',
+  has(analyze({ diff: '+++ b/m.sql\n+DELETE FROM t WHERE 0=0 OR 1=1;' }), 'B4'));
+ok('B4 fires: WHERE true',
+  has(analyze({ diff: '+++ b/m.sql\n+DELETE FROM t WHERE true;' }), 'B4'));
+ok('B4 fires: WHERE \'x\'=\'x\' (quoted tautology — literal blanking + predicate class compose)',
+  has(analyze({ diff: "+++ b/m.sql\n+UPDATE t SET x = 1 WHERE 'x' = 'x';" }), 'B4'));
+ok('B4 fires: a tautology WHERE followed by RETURNING (the RETURNING identifiers are not the predicate)',
+  has(analyze({ diff: '+++ b/m.sql\n+DELETE FROM t WHERE true RETURNING id;' }), 'B4'));
+ok('B4 silent: 1=1 ANDed with a real column scopes (WHERE 1=1 AND id = 3)',
+  !has(analyze({ diff: '+++ b/m.sql\n+UPDATE t SET x = 1 WHERE 1=1 AND id = 3;' }), 'B4'));
+ok('B4 silent: a subquery predicate scopes (WHERE EXISTS (SELECT …))',
+  !has(analyze({ diff: '+++ b/m.sql\n+DELETE FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.t_id = t.id);' }), 'B4'));
+ok('B4 message names the tautology case',
+  analyze({ diff: '+++ b/m.sql\n+UPDATE t SET x = 1 WHERE 1=1;' }).find(f => f.cls === 'B4').msg.includes('tautology'));
+// Fable review: identifiers are \p{L}, not A-Za-z — Postgres/MySQL accept unquoted non-ASCII identifiers,
+// and an ASCII-only test read a correctly scoped non-English predicate as "filters nothing".
+ok('B4 silent: a non-ASCII identifier scopes (WHERE имя = \'x\')',
+  !has(analyze({ diff: "+++ b/m.sql\n+DELETE FROM users WHERE имя = 'x';" }), 'B4'));
+ok('B4 silent: a bound parameter scopes (WHERE $1)',
+  !has(analyze({ diff: '+++ b/m.sql\n+DELETE FROM t WHERE $1;' }), 'B4'));
 const awsKey = 'AKIA' + 'ABCDEFGHIJKLMNOP';                 // AKIA + 16 → matches at runtime, not in source
 ok('C1 fires: AWS key hardcoded in added code',
   has(analyze({ diff: '+++ b/config.js\n+const k = "' + awsKey + '";' }), 'C1'));
@@ -1628,6 +1700,31 @@ ok('no-git: no Edit/Write calls → empty toolDiff (nothing to check)',
     updateTaskLedger([], ['write these entries to schema.md'], '+++ b/hindsight-vercel/SCHEMA.md\n+- x')[0].status === 'done');
   ok('Class 3: a claim about `schema.md` is NOT a no-op when `SCHEMA.md` is in the diff',
     !analyze({ claim: 'updated schema.md with the new table', diff: '+++ b/hindsight-vercel/SCHEMA.md\n+- x' }).some(f => f.cls === 3));
+  // ── Content-line grounding (LIVE FP, real hindsight session f7df5ae9): the agent edited CLAUDE.md's
+  // MENTION of admin.html and said so — "added the … parentheticals … on the bulk-backfill and admin.html
+  // [rules]" — and the path-only grounding read that as a phantom change to admin.html itself. A file named
+  // in the claim is grounded when it appears in the diff's ± content lines too (the ledger's grounds() has
+  // done this since Phase 6).
+  ok('Class 3 FP GONE: a claim naming a file whose MENTION was edited (name present in ± content lines) is grounded',
+    !analyze({ claim: 'added the same "(Enforced: …)" parentheticals the RLS rule already uses, on the bulk-backfill and admin.html',
+      diff: '+++ b/CLAUDE.md\n+- never commit public/admin.html (Enforced: compiled rule)' }).some(f => f.cls === 3));
+  ok('Class 3 still CAUGHT: a claimed file absent from paths AND content lines is a no-op',
+    analyze({ claim: 'fixed admin.html and the quota logic', diff: '+++ b/CLAUDE.md\n+- unrelated doc line' }).some(f => f.cls === 3));
+  ok('Class 3 boundary: `myadmin.html`/`site-admin.html` in content cannot ground a claim about `admin.html`',
+    analyze({ claim: 'fixed admin.html', diff: '+++ b/CLAUDE.md\n+see myadmin.html and site-admin.html' }).some(f => f.cls === 3));
+  ok('Class 3 boundary: a path-qualified content mention (`public/admin.html`) IS the same file and grounds',
+    !analyze({ claim: 'updated admin.html docs', diff: '+++ b/CLAUDE.md\n+see public/admin.html for the flow' }).some(f => f.cls === 3));
+  ok('Class 3 boundary: content grounding is case-insensitive (`ADMIN.HTML` grounds a claim about admin.html)',
+    !analyze({ claim: 'updated admin.html notes', diff: '+++ b/CLAUDE.md\n+per ADMIN.HTML rules' }).some(f => f.cls === 3));
+  ok('Class 3: a REMOVED line mentioning the file also grounds (deleting the mention is the claimed change)',
+    !analyze({ claim: 'removed the stale admin.html instructions', diff: '+++ b/CLAUDE.md\n-- old: edit admin.html by hand' }).some(f => f.cls === 3));
+  // Fable review: the diff marker was kept in c3Body, so a filename at COLUMN 0 of a deletion line had `-`
+  // as its preceding char — inside the lookbehind's exclusion class — and "removed X from the list" failed
+  // to ground while its `+` twin grounded. Markers are stripped now; both column-0 shapes ground.
+  ok('Class 3: a column-0 DELETION line grounds ("removed admin.html from the ignore list" ← `-admin.html`)',
+    !analyze({ claim: 'removed admin.html from the ignore list', diff: '+++ b/.gitignore\n-admin.html' }).some(f => f.cls === 3));
+  ok('Class 3: a column-0 ADDITION line still grounds (`+admin.html`)',
+    !analyze({ claim: 'added admin.html to the ignore list', diff: '+++ b/.gitignore\n+admin.html' }).some(f => f.cls === 3));
   // Precision guard: case-insensitivity is for FILENAMES only — a camelCase symbol stays case-sensitive.
   ok('openLoops: a camelCase symbol stays case-sensitive (fooBar ≠ foobar)',
     openLoops(['wire up fooBar'], '+++ b/a.js\n+const foobar = 1').length === 1);

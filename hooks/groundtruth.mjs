@@ -38,13 +38,14 @@ import { checkDroppedSymbols } from './symbol-integrity.mjs';
 
 const CLASS_NAME = { 1: 'false test/build claim', 2: 'stub/placeholder', 3: 'silent no-op', 4: 'phantom ref',
   6: 'dropped symbol (dangling ref)', 9: 'special-casing / overfit', async_done: 'false completion (async)',
-  B1: 'RLS off on new table', B3: 'permissive policy (anon-readable)', C1: 'hardcoded secret', C2: 'private key',
+  B1: 'RLS off on new table', B3: 'permissive policy (anon-readable)', B4: 'unscoped UPDATE/DELETE (no WHERE)',
+  C1: 'hardcoded secret', C2: 'private key',
   R: 'compiled rule (from your docs)', openloop: 'open loop (asked, not delivered)', P: 'procedure (step skipped / out of order)',
   ENV: 'env file not gitignored (secret-leak risk)', test_exclusion: 'test excluded/skipped to pass',
   test_weakened: 'test weakened/disabled to pass', mojibake: 'encoding corruption (mojibake)',
   agent: 'subagent cannot load (silently inert)' };
 const CLASS_BUCKET = { 1: 'Ignored', 2: 'Missed→Ignored', 3: 'Ignored', 4: 'Missed', 6: 'Missed→Ignored', async_done: 'Ignored',
-  B1: 'Ignored', B3: 'Ignored', C1: 'Ignored', C2: 'Ignored', R: 'Ignored' };
+  B1: 'Ignored', B3: 'Ignored', B4: 'Ignored', C1: 'Ignored', C2: 'Ignored', R: 'Ignored' };
 
 // Phase-1 false-completion (async): the claim asserts done/clean AND simultaneously says the work is
 // still running/deferred — a self-contradiction. Conservative: fires only when BOTH are present, so a
@@ -1185,6 +1186,7 @@ export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], 
   // the diff. Past-tense-verb gating (not every filename) is the precision fix — a file merely
   // *read* for context is mentioned in prose and must NOT flag.
   const seen = new Set();
+  let c3Body = null;   // ± content lines, built lazily once — only a path-miss needs it
   // The `(?![\w])` after the extension group is load-bearing: JS alternation is leftmost-wins (not
   // longest-match) and a shorter ext can prefix a longer one (`js`<`json`/`jsx`, `ts`<`tsx`, `c`<`cpp`),
   // so without a trailing boundary a claim about `config.json` would capture `config.js` (truncated) and
@@ -1204,7 +1206,23 @@ export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], 
     // claim about `config.js` (suffix-substring with no path boundary) and SUPPRESS a real no-op.
     // Case-insensitive: a claim about `schema.md` must match the repo's `SCHEMA.md` (else a false no-op).
     const nl = named.toLowerCase();
-    if (!files.some(f => { const fl = f.toLowerCase(); return fl === nl || fl.endsWith('/' + nl); }))
+    const pathHit = files.some(f => { const fl = f.toLowerCase(); return fl === nl || fl.endsWith('/' + nl); });
+    // A named file is ALSO grounded when it appears in the diff's ± CONTENT lines (LIVE FP, real hindsight
+    // session f7df5ae9): "added the … parentheticals … on the bulk-backfill and admin.html [rules]" — the
+    // change was to CLAUDE.md's MENTION of admin.html, so the changed lines literally contain `admin.html`,
+    // but the path-only grounding read the claim as a phantom change to admin.html itself. The task ledger's
+    // grounds() has accepted diff CONTENT since Phase 6 for the same reason — Class 3 never got that fix.
+    // Boundaries: `(?<![\w.-])` so `myadmin.html`/`site-admin.html` can't ground a claim about `admin.html`
+    // (a `/` prefix still grounds — `public/admin.html` IS the same file, path-qualified); the trailing
+    // guard mirrors C3_RE's own anti-truncation lookahead. Accepted warn-tier FN (documented): a claim
+    // "fixed X" whose only trace is a changed line in ANOTHER file mentioning X is now suppressed — the
+    // trace requirement stays evidence-anchored, and a false "you did nothing" is the fatal direction here.
+    const contentHit = !pathHit && new RegExp('(?<![\\w.-])' + nl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![\\w])', 'i')
+      // `.slice(1)` strips the diff marker: a filename at COLUMN 0 of a deletion line (`-admin.html` in a
+      // .gitignore) had `-` as its preceding char — inside the lookbehind's exclusion class — so "removed X
+      // from the list" failed to ground while the `+` twin grounded (asymmetric FP, Fable review).
+      .test(c3Body ??= diff.split('\n').filter(l => (l[0] === '+' || l[0] === '-') && !l.startsWith('+++') && !l.startsWith('---')).map(l => l.slice(1)).join('\n'));
+    if (!pathHit && !contentHit)
       findings.push({ cls: 3, sev: 'warn', msg: `claimed a change to ${named}, but it is absent from the diff` });
   }
 
@@ -1267,9 +1285,24 @@ export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], 
     const h = l.match(/^\+\+\+ b\/(.+)$/);
     if (h) { cur = h[1]; continue; }
     // NOTE: strip line comments only; a `--` inside a string literal is a rare edge we under-flag on.
-    if (l[0] === '+' && !l.startsWith('+++') && /\.sql$/i.test(cur)) sqlAdded += l.slice(1).replace(/--.*$/, '') + '\n';
+    // `<mcp-sql>` is the pseudo-file the Stop path mints for SQL run through an MCP DB tool
+    // (apply_migration/execute_sql — leaves no file at all). It was captured for EXACTLY these scanners
+    // ("an RLS hole or a secret in SQL is otherwise invisible") but `\.sql$` never matched the dotless
+    // pseudo-name — so an MCP-applied CREATE TABLE with no RLS produced ZERO findings: an armed check
+    // silently inert on the channel it was built for (verified by probe, v1.4.0).
+    if (l[0] === '+' && !l.startsWith('+++') && (/\.sql$/i.test(cur) || cur === '<mcp-sql>')) sqlAdded += l.slice(1).replace(/--.*$/, '') + '\n';
   }
 
+  // Blank single-quoted string literals ONCE before every SQL check (B1/B3/B4): quoted text is DATA, not
+  // statements. Without this, opening the MCP-SQL channel handed the block tier a false 🔴 — a read-only
+  // `execute_sql` SELECT like `WHERE body LIKE '%CREATE TABLE users%'` (querying a migrations/audit table,
+  // routine for a Supabase-MCP agent) fired B1, and `note = 'USING (true)'` fired B3 (both reproduced e2e,
+  // Fable review). The same root cause gave B4 a literal-`;` FP (`SET css = 'a{x:1;}' WHERE …` split before
+  // its WHERE) and a literal-"where" FN (`SET note = 'where needed'` suppressed a real full-table write).
+  // `''` escapes are consumed by the alternation; a tautology `USING ('x'='x')` blanks to `USING (''='')`,
+  // which B3's LIT class still matches. Residue on an unpaired quote over-consumes → fewer findings, never
+  // more (charter-safe).
+  sqlAdded = sqlAdded.replace(/'(?:[^']|'')*'/g, "''");
   // B1 — new table created without RLS enabled in the SAME change (doc headline + repo's own rule).
   for (const m of sqlAdded.matchAll(/\bCREATE TABLE(?:\s+IF NOT EXISTS)?\s+(?:"?public"?\.)?"?([A-Za-z_]\w*)"?/gi)) {
     const tbl = m[1];
@@ -1295,6 +1328,40 @@ export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], 
   // body could be a wrapped/compound constant the regex above will always miss.
   else if (/\bCREATE\s+POLICY\b[\s\S]{0,400}?\bTO\s+(?:anon|public)\b/i.test(sqlAdded))
     findings.push({ cls: 'B3', sev: 'warn', msg: 'policy granted TO anon/public — confirm it ROW-SCOPES (USING auth.uid()/tenant_id, not a constant or compound tautology) and the table holds no PII; the predicate cannot be verified by pattern' });
+
+  // B4 — UPDATE/DELETE with no WHERE (WARN only, by request and by nature: a full-table write is
+  // occasionally intentional — a migration backfilling a column — but far more often a scope bug that
+  // rewrites or empties the whole table). Precision scope, per the FP-fatal invariant:
+  //   • only a COMPLETE statement fires — its terminating `;` must be visible in the added text. An added
+  //     `UPDATE t SET x = 1` whose WHERE lives on the next, UNCHANGED line has no `;` in view → the tail
+  //     fragment after the last `;` is dropped and the check ABSTAINS rather than guessing.
+  //   • the statement HEAD must be UPDATE / DELETE FROM — a `-- comment`, a `/* block */` (stripped
+  //     below), a CREATE POLICY … FOR DELETE, or SQL quoted inside another statement never anchors.
+  //   • any \bWHERE\b before the terminator suppresses (a subquery-only WHERE also suppresses — an FN we
+  //     accept over parsing SQL; warn-tier).
+  // Documented ceilings: a CTE head (`WITH … UPDATE`) abstains; in a $$ function body the FIRST statement's
+  // fragment starts with CREATE and abstains, but SUBSEQUENT ones are graded (defensible — a full-table
+  // write when the function runs is exactly warn's question); statements split across added hunks with the
+  // `;` out of view abstain.
+  for (const stmt of sqlAdded.replace(/\/\*[\s\S]*?\*\//g, ' ').split(';').slice(0, -1)) {
+    const head = stmt.trimStart();
+    if (!/^(?:update|delete\s+from)\b/i.test(head)) continue;
+    // A WHERE suppresses only if it actually SCOPES rows. A TAUTOLOGY predicate — `WHERE 1=1`, `WHERE
+    // 0=0 OR 1=1`, `WHERE true`, `WHERE 'x'='x'` (already blanked to ''='') — filters nothing and is a
+    // full-table write in disguise; same predicate class B3 catches on policies: only literals +
+    // operators + boolean keywords, NO identifier doing row scoping. Any real identifier (`id = 3`,
+    // `auth.uid()`, `EXISTS (SELECT …)`) → scoped → suppressed; the trailing RETURNING clause is not
+    // part of the predicate and is stripped before the test. The identifier class is `\p{L}` (ANY
+    // letter), not A-Za-z — Postgres/MySQL accept unquoted non-ASCII identifiers, and an ASCII-only
+    // test read `WHERE имя = 'x'` / `WHERE 名前 = 'x'` as "filters nothing" on a correctly scoped
+    // DELETE (reproduced FP, Fable review). `\$\d` counts too: a bound parameter (`WHERE $1`) scopes.
+    const wm = /\bwhere\b([\s\S]*)$/i.exec(stmt);
+    const scopes = wm && /[\p{L}_]|\$\d/u.test(
+      wm[1].replace(/\breturning\b[\s\S]*$/i, ' ').replace(/\b(?:true|false|null|and|or|not)\b/gi, ' '));
+    if (scopes) continue;
+    findings.push({ cls: 'B4', sev: 'warn',
+      msg: `UPDATE/DELETE ${wm ? 'whose WHERE is a tautology (filters nothing)' : 'with no WHERE'} — this touches EVERY row (${head.replace(/\s+/g, ' ').slice(0, 60)}…); confirm a full-table write is intended` });
+  }
 
   return findings;
 }
