@@ -184,3 +184,112 @@ export function analyze(message) {
 
   return { ok: true, code: null, reason: null, contract: v.contract, errors: [], count: parsed.count };
 }
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────────────
+ * WEEK 2 — the VERIFY passes. Two directions form the pincer that closes the extraction-error loop:
+ *   CA (claimed-but-absent) — a claim the diff/transcript don't support. Omission-proof against invention.
+ *   UC (undeclared-change)  — a changed file no claim covers. The capability v1 never had: it audits the
+ *                             WHOLE diff by construction, not just what it managed to extract from prose.
+ *
+ * This stays PURE: no fs, no git, no transcript parsing. It takes a normalized `reality` the Stop hook
+ * (Week 3) will assemble from the engine's own `git diff --name-status`, `collectDefs`, and bash evidence:
+ *
+ *   reality = {
+ *     files:  [ { status: 'A'|'M'|'D'|'R', path, from? } ],  // A/M/D: path is the file. R: from→path (to).
+ *     commands:     [ { cmd, ok } ] | undefined,             // ran commands + green/red. undefined ⇒ ABSTAIN
+ *                                                            //   on tests_pass/build_pass (no transcript).
+ *     symbolsByFile: { [path]: string[] } | undefined,       // symbols ADDED per file. undefined ⇒ ABSTAIN
+ *                                                            //   on symbol claims. A file absent from the
+ *                                                            //   map (couldn't be lexed) also abstains.
+ *     excluded: (path) => boolean,                           // dropExcludedFiles predicate. default: none.
+ *   }
+ *
+ * Abstain-over-guess is deliberate and matches the house rule (a false positive is fatal): every check
+ * that can't be decided from the reality it was given emits NOTHING rather than a wrong finding.
+ * ──────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+// CA is a false claim (the core sin) → block. UC is an undeclared change that may be incidental → warn.
+// Severities are the defaults; Week-3 config/enforcement decides what actually halts a stop.
+const SEV_CA = 'block';
+const SEV_UC = 'warn';
+const SEV_SOFT = 'warn';   // a claim that IS supported but mislabeled (right file, wrong verb) — softer.
+
+const norm = (p) => String(p == null ? '' : p).trim();
+
+// Does a tests_pass/build_pass claim's cmd correspond to a command that actually ran? Match on exact cmd
+// or an executed command that CONTAINS it (tolerates wrapper flags: `npm test` vs `npm test -- --ci`).
+function commandRun(commands, cmd) {
+  const want = norm(cmd);
+  return (commands || []).filter(e => { const c = norm(e.cmd); return c === want || c.includes(want); });
+}
+
+/**
+ * Verify a validated contract against reality. Returns { ok, findings } where each finding is
+ *   { cls: 'CA'|'UC', sev, msg, file?, cmd?, symbol?, from?, to?, status? }.
+ * Call only on a contract that passed validateContract().
+ */
+export function verify(contract, reality = {}) {
+  const findings = [];
+  const files = Array.isArray(reality.files) ? reality.files : [];
+  const excluded = typeof reality.excluded === 'function' ? reality.excluded : () => false;
+  const byPath = new Map();                       // path → status (last wins; A/M/D)
+  const renamePairs = [];                         // {from,to} from R entries
+  for (const f of files) {
+    if (f.status === 'R') { renamePairs.push({ from: norm(f.from), to: norm(f.path) }); byPath.set(norm(f.path), 'R'); }
+    else byPath.set(norm(f.path), f.status);
+  }
+  const claims = Array.isArray(contract.claims) ? contract.claims : [];
+
+  // ── PASS 1 — claim → reality (CA) ──
+  const claimedPaths = new Set();
+  for (const c of claims) {
+    const file = norm(c.file);
+    if (c.t === 'created' || c.t === 'modified' || c.t === 'deleted') {
+      claimedPaths.add(file);
+      const st = byPath.get(file);
+      if (st === undefined) {
+        findings.push({ cls: 'CA', sev: SEV_CA, file, msg: `claimed ${c.t} ${file}, but it is absent from the diff` });
+        continue;
+      }
+      // File changed, but the verb disagrees with git's status → softer mislabel signal (modified is the
+      // lenient catch-all: any change status satisfies it, so it never mislabels).
+      if (c.t === 'created' && st !== 'A') findings.push({ cls: 'CA', sev: SEV_SOFT, file, status: st, msg: `claimed created ${file}, but the diff shows it ${st === 'M' ? 'modified' : st === 'D' ? 'deleted' : st}` });
+      if (c.t === 'deleted' && st !== 'D') findings.push({ cls: 'CA', sev: SEV_SOFT, file, status: st, msg: `claimed deleted ${file}, but the diff shows it ${st === 'A' ? 'added' : st === 'M' ? 'modified' : st}` });
+      // Symbols (created/modified only) — abstain unless we were handed a lexed map for this file.
+      if ((c.t === 'created' || c.t === 'modified') && Array.isArray(c.symbols) && reality.symbolsByFile) {
+        const defined = reality.symbolsByFile[file];
+        if (Array.isArray(defined)) {
+          for (const s of c.symbols) if (!defined.includes(s)) {
+            findings.push({ cls: 'CA', sev: SEV_SOFT, file, symbol: s, msg: `claimed symbol ${s} in ${file}, but it is not defined in the added code` });
+          }
+        }
+      }
+    } else if (c.t === 'renamed') {
+      const from = norm(c.from), to = norm(c.to);
+      claimedPaths.add(from); claimedPaths.add(to);
+      // git renders a rename either as an R pair OR (below its similarity threshold) as D-from + A-to.
+      const asR = renamePairs.some(p => p.from === from && p.to === to);
+      const asSplit = byPath.get(from) === 'D' && byPath.get(to) === 'A';
+      if (!asR && !asSplit) findings.push({ cls: 'CA', sev: SEV_CA, from, to, msg: `claimed renamed ${from} → ${to}, but the diff does not support it` });
+    } else if (c.t === 'tests_pass' || c.t === 'build_pass') {
+      if (reality.commands === undefined) continue;          // no transcript → abstain
+      const runs = commandRun(reality.commands, c.cmd);
+      if (runs.length === 0) findings.push({ cls: 'CA', sev: SEV_CA, cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but no such command ran this session` });
+      else if (!runs.some(r => r.ok)) findings.push({ cls: 'CA', sev: SEV_CA, cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but it exited non-zero` });
+    }
+    // deferred: recorded, never verified against the diff (feeds the Week-3 ledger).
+    // no_change: contributes no claimed path; a non-empty diff surfaces precisely as UC below.
+  }
+
+  // ── PASS 2 — reality → claims (UC) ──
+  for (const f of files) {
+    const path = norm(f.path);
+    if (excluded(path)) continue;
+    // A rename's old side (from) is covered by its rename claim even though it appears as its own D entry.
+    if (claimedPaths.has(path)) continue;
+    if (f.status === 'R' && claimedPaths.has(norm(f.from))) continue;
+    findings.push({ cls: 'UC', sev: SEV_UC, file: path, status: f.status, msg: `undeclared change: ${path} (${f.status}) is in the diff but no claim covers it` });
+  }
+
+  return { ok: findings.length === 0, findings };
+}
