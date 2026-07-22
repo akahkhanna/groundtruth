@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { analyze, stripQuotedForClaim, claimsSuccess, testExclusionFindings, testWeakeningFindings, vacuousTestFindings, mojibakeFindings, agentFindings, parseAgentFile, untrackedAdded, parseTranscript, scanContent, attributeDebt, runCompiledRules, compileRuleRe, intentConfidence, renderCard, shouldAskStar, projectFindings, advanceSnapshot, freshRatifiers, remediationDecision, renderCorrective, blockOutcomeNote, liveNoticeCmds, editorCli, runProcedures, envFindings, loadGtConfig, pendingApprovals, refereeTamper, compareSnapshot, integrityScope, GAMED_FILE_RE, priorFindingsContext, sessionHasCommit, proposedStale, isSecret, excludedScanPath, dropExcludedFiles, preCommitHookScript, parseDiffRange } from './groundtruth.mjs';
+import { analyze, stripQuotedForClaim, claimsSuccess, testExclusionFindings, testWeakeningFindings, vacuousTestFindings, mojibakeFindings, agentFindings, parseAgentFile, untrackedAdded, parseTranscript, scanContent, attributeDebt, runCompiledRules, compileRuleRe, intentConfidence, renderCard, shouldAskStar, projectFindings, advanceSnapshot, freshRatifiers, remediationDecision, renderCorrective, blockOutcomeNote, liveNoticeCmds, editorCli, runProcedures, envFindings, loadGtConfig, pendingApprovals, refereeTamper, compareSnapshot, integrityScope, GAMED_FILE_RE, priorFindingsContext, sessionHasCommit, proposedStale, isSecret, excludedScanPath, dropExcludedFiles, preCommitHookScript, parseDiffRange, lastCodeEditSeq } from './groundtruth.mjs';
 import { parseCorrectivePairs, parseForbidTokens, isArmableToken, extractCandidates, compile, repoSourceExts } from './compile-rules.mjs';
 import { checkDroppedSymbols, collectDefs } from './symbol-integrity.mjs';
 
@@ -161,6 +161,21 @@ ok('VACUOUS SILENT: bare `await promise` (no call) can REJECT → can fail — a
   !vtf('tests pass', '+++ b/x.test.js\n+it("boots", async () => {\n+  await ready;\n+});'));
 ok('VACUOUS: regex-blanking does not eat DIVISION — a no-call body containing `a / b` still fires',
   vtf('tests pass', '+++ b/x.test.js\n+it("x", () => {\n+  const y = a / b;\n+});'));
+// ── lastCodeEditSeq: the stale-green anchor for the v2 contract (the 4 gates ported from v1 class-1) ──
+ok('lastCodeEditSeq: a real code edit returns its seq', lastCodeEditSeq([{ path: 'src/a.js', seq: 4, added: 'const x = 1;', removed: '' }], '') === 4);
+ok('lastCodeEditSeq: a COMMENT-only edit does not count (normalized-code gate) → 0', lastCodeEditSeq([{ path: 'src/a.js', seq: 4, added: 'total++; // the count', removed: 'total++; // count' }], '') === 0);
+ok('lastCodeEditSeq: a pure WHITESPACE reformat does not count → 0', lastCodeEditSeq([{ path: 'src/a.js', seq: 4, added: 'if (n < 0) { fail() }', removed: 'if(n<0){fail()}' }], '') === 0);
+ok('lastCodeEditSeq: a non-code / doc path does not count (CODE_EXT_RE gate) → 0', lastCodeEditSeq([{ path: 'README.md', seq: 4, added: 'new prose', removed: '' }], '') === 0);
+ok('lastCodeEditSeq: a real code change DOES count', lastCodeEditSeq([{ path: 'src/a.js', seq: 4, added: 'if (n <= 0)', removed: 'if (n < 0)' }], '') === 4);
+ok('lastCodeEditSeq: a pure DELETION of code counts', lastCodeEditSeq([{ path: 'src/a.js', seq: 4, added: '', removed: 'const guard = checkAuth();' }], '') === 4);
+// THE CARDINAL-SIN REGRESSION: real transcripts record ABSOLUTE file_path; without relativizing, the path
+// reads as out-of-tree (excludedScanPath) and the sensor ships silently INERT in production. Pin it.
+ok('lastCodeEditSeq: an ABSOLUTE path is relativized against cwd and counted (production-inertness pin)', lastCodeEditSeq([{ path: '/home/u/repo/src/a.js', seq: 7, added: 'const y = 2;', removed: '' }], '/home/u/repo') === 7);
+ok('lastCodeEditSeq: an out-of-repo absolute path (scratchpad) stays excluded → 0', lastCodeEditSeq([{ path: '/tmp/scratch/x.js', seq: 7, added: 'const y = 2;', removed: '' }], '/home/u/repo') === 0);
+// ── the re-gated "only files changed are tests" anti-gaming finding (moved off class-1, gated on claimsSuccess) ──
+ok('only-tests anti-gaming FIRES: success claim + the only changed file is a test', has(analyze({ claim: 'Fixed it, tests pass.', diff: '+++ b/pkg/foo.test.js\n+x' }), 1));
+ok('only-tests anti-gaming ABSTAINS: no success claim → does not fire', !has(analyze({ claim: 'Refactoring the tests, still WIP.', diff: '+++ b/pkg/foo.test.js\n+x' }), 1));
+ok('only-tests anti-gaming ABSTAINS: a mixed diff (test + real code) → does not fire', !has(analyze({ claim: 'Fixed it, tests pass.', diff: '+++ b/pkg/foo.test.js\n+x\n+++ b/src/foo.js\n+y' }), 1));
 ok('claimsSuccess: plain claim true; hedged/negated false; quoted false',
   claimsSuccess('Done, tests pass.') === true && claimsSuccess('Not done yet, still WIP.') === false
   && claimsSuccess('the finding said `tests pass` — I was quoting') === false);

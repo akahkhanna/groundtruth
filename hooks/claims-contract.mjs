@@ -324,18 +324,26 @@ export function verify(contract, reality = {}) {
       // Order-aware: the LAST completed matching run is the verdict — a green re-run after edits counts,
       // and a red run after an earlier green is NOT laundered into a pass (Fable finding 5, stale-green).
       const last = completed.reduce((a, b) => (b.seq >= a.seq ? b : a), completed[0]);
-      if (last.ok !== true) { findings.push({ cls: 'CA', sev: SEV_CA, cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but the last matching run exited non-zero` }); continue; }
+      // A LATER matched run than `last` that is unpaired/background means the FINAL outcome is unknown — don't
+      // condemn `last`'s red on missing data (v1's unpairedFg gate). (Fable final review, mixed-pairing.)
+      const laterUnknown = runs.some(r => r.seq > last.seq && (r.ok === null || r.background));
+      if (last.ok !== true) { if (!laterUnknown) findings.push({ cls: 'CA', sev: SEV_CA, cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but the last matching run exited non-zero` }); continue; }
       // GREEN — the Stage-3 sensors (ported from v1 class-1): at most one fires, highest-priority first, all
       // warn/info (a false "you lied about a green run" is worse than a miss). Each ABSTAINS when its input is
       // absent, per the charter.
       const green = completed.filter(r => r.ok === true);
+      // stale-green and filtered abstain when ANY matched run is BACKGROUND or UNPAIRED: a background run's
+      // completion may postdate the edit (so the green may not actually be stale), and an unpaired run hides a
+      // possible later full/fresh run. v1 gated the SESSION this way; `!last.background` alone was dead code
+      // (buildReality maps background → ok:null, so `last` is never background). (Fable final review, Issue 1.)
+      const ambiguousRun = runs.some(r => r.background || r.ok === null);
       if (c.t === 'tests_pass' && weakOnly(c.cmd))
         findings.push({ cls: 'CA', sev: 'warn', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but that is a syntax/type check, not a test run — verify in the runtime that ships` });
       else if (last.text && TEST_FAIL_RE.test(last.text))
         findings.push({ cls: 'CA', sev: 'warn', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but its output reports failures despite a zero exit — a runner that prints failures and still exits 0 is not a pass` });
-      else if (reality.lastEditSeq != null && !last.background && last.seq > 0 && last.seq < reality.lastEditSeq)
+      else if (reality.lastEditSeq != null && !ambiguousRun && last.seq > 0 && last.seq < reality.lastEditSeq)
         findings.push({ cls: 'CA', sev: 'warn', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but the green run predates the last source edit — the green is STALE; re-run after the edit to confirm` });
-      else if (!segFiltered(c.cmd) && green.length > 0 && green.every(r => segFiltered(r.cmd)))
+      else if (!ambiguousRun && !segFiltered(c.cmd) && green.length > 0 && green.every(r => segFiltered(r.cmd)))
         findings.push({ cls: 'CA', sev: 'info', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but every matching run was FILTERED to a subset — a filtered run cannot back the full \`${c.cmd}\` claim` });
     }
     // deferred: recorded, never verified against the diff (feeds the Week-3 ledger).

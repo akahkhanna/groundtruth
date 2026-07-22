@@ -464,3 +464,9 @@ The v2 contract (declare-then-verify: `NC`/`CA`/`UC`) was reviewed by three adve
 - **A standing card false-green** ("every ask … delivered", printed unconditionally after the open-loop subsystem was deleted) → the Tasks line now surfaces only declared deferrals, neutral otherwise.
 
 Contract self-check **88 → 118**; red-team **20 → 22**; engine `analyze()` shed the retired prose layer (3331 → ~2900 lines).
+
+### C-5 · Stage-3 sensor port: two final-review fixes
+- **stale-green / filtered FP on a background re-run (new in 3a):** `!last.background` was dead code — `buildReality` maps a background run to `ok:null`, so it never survives the `completed` filter and `last` is never background. A foreground green → code edit → **background** green re-run therefore fired a false "the green is STALE" (the paired post-edit green was invisible). Fixed: stale-green AND filtered abstain when ANY matched run is background OR unpaired (v1's session-level gate); the exit-CA likewise abstains when a later matched run is unpaired/background (v1's `unpairedFg`). Regression tests added.
+- **Silent coverage loss (new in 3b prune):** `lastCodeEditSeq` (the stale anchor, with the four v1 mutation gates) and the re-gated "only files changed are tests" finding had ZERO tests after the prune — including the absolute-path case that pins the "stale-green silently inert in production" cardinal-sin bug. Direct tests added for all four gates + the absolute-path relativization, and a fire/abstain pair for the re-gated finding.
+
+Engine self-check **440**; contract **132**; red-team **22/22**.
