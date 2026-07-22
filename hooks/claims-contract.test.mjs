@@ -203,6 +203,14 @@ ok('filesFromDiff: a content line starting with dashes inside a hunk is NOT a fi
 ok('filesFromDiff: empty new file (no hunk headers) → A', filesFromDiff('diff --git a/pkg/__init__.py b/pkg/__init__.py\nnew file mode 100644\nindex 0000000..e69de29').find(f => f.path === 'pkg/__init__.py')?.status === 'A');
 ok('filesFromDiff: binary modify (no ---/+++ ) → M', filesFromDiff('diff --git a/logo.png b/logo.png\nindex a1..b2 100644\nBinary files a/logo.png and b/logo.png differ').find(f => f.path === 'logo.png')?.status === 'M');
 ok('filesFromDiff: quoted non-ASCII path is decoded', filesFromDiff('diff --git "a/caf\\303\\251.js" "b/caf\\303\\251.js"\nnew file mode 100644\n--- /dev/null\n+++ "b/caf\\303\\251.js"\n+x').some(f => f.path === 'café.js'));
+// Fable re-review: a tool-ledger fragment appended AFTER a git block (the untracked-create seam) must still
+// be seen — this is the mixed-session shape that re-created the honest-`created` CA block.
+{
+  const mixed = 'diff --git a/app.js b/app.js\n--- a/app.js\n+++ b/app.js\n@@ -1 +1 @@\n-a\n+b\n+++ b//abs/repo/helper.js\n+export function h(){}';
+  const files = filesFromDiff(mixed);
+  ok('filesFromDiff: tool-ledger fragment after a git block is NOT dropped (mixed session)', files.some(f => f.path === '/abs/repo/helper.js' && f.status === 'A') && files.some(f => f.path === 'app.js' && f.status === 'M'));
+}
+ok('filesFromDiff: unquoted path with spaces (empty new file) parses whole path', filesFromDiff('diff --git a/my file.js b/my file.js\nnew file mode 100644\nindex 0..e').some(f => f.path === 'my file.js'));
 
 // ── buildReality: bashEvents → commands, files from diff, passthrough ──
 {
@@ -236,6 +244,8 @@ ok('verify: tests_pass matched only by an unpaired run → abstain (not a false 
 ok('verify: stale green — green(seq1) then red re-run(seq2) → CA (last run wins, no laundering)', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, seq: 1 }, { cmd: 'npm test', ok: false, seq: 2 }] }), 'CA', 'last matching run'));
 ok('verify: green re-run after edits (seq2 green) → clean', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: false, seq: 1 }, { cmd: 'npm test', ok: true, seq: 2 }] }).ok);
 ok('verify: a lookalike (echo "npm test") does NOT bless tests_pass → CA no-run', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'echo "npm test would pass"', ok: true }] }), 'CA', 'no such command ran'));
+ok('verify: a REAL invocation inside a compound run (echo x && npm test) still matches (finding 5 residual)', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'echo start && npm test', ok: true }] }).ok);
+ok('verify: a background launch-ack (is_error:false) does NOT bless tests_pass → abstain (finding 3 residual)', buildReality({ diff: '', bashEvents: [{ cmd: 'npm test', is_error: false, background: true }] }).commands[0].ok === null);
 ok('verify: UC scoped to agent-authored files — an undeclared HUMAN/dirty change is NOT flagged (finding 7)', verify(contract([{ t: 'modified', file: 'a.mjs' }]), { files: [{ status: 'M', path: 'a.mjs' }, { status: 'M', path: 'human.mjs' }], authored: new Set(['a.mjs']) }).ok);
 ok('verify: UC still fires on an undeclared AGENT-authored change', has(verify(contract([{ t: 'modified', file: 'a.mjs' }]), { files: [{ status: 'M', path: 'a.mjs' }, { status: 'M', path: 'sneaky.mjs' }], authored: new Set(['a.mjs', 'sneaky.mjs']) }), 'UC', 'sneaky.mjs'));
 ok('verify: a claim written ./src/x.mjs matches the git-relative src/x.mjs (finding 8, path literalism)', verify(contract([{ t: 'created', file: './src/x.mjs' }]), { files: [{ status: 'A', path: 'src/x.mjs' }], commands: [] }).ok);

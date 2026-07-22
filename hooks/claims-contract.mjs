@@ -223,14 +223,15 @@ const norm = (p) => String(p == null ? '' : p).trim().replace(/\\/g, '/').replac
 const LOOKALIKE_RE = /^\s*(?:echo|printf|cat|grep|rg|ag|ls|head|tail|sed|awk|:|true|false|#)\b/;
 
 // Does a tests_pass/build_pass claim's cmd correspond to a command that actually ran? Match on exact cmd
-// or an executed command that CONTAINS it (tolerates wrapper flags: `npm test` vs `npm test -- --ci`),
-// excluding lookalikes (echo/grep/… that only quote the string).
+// or an executed command that CONTAINS it (tolerates wrapper flags: `npm test` vs `npm test -- --ci`).
+// The lookalike test is applied PER SEGMENT (split on && / || / ; / |), so a real invocation inside a
+// compound run — `echo start && npm test` — still matches, while `echo "npm test"` does not. (Fable re-review, finding 5.)
 function commandRun(commands, cmd) {
   const want = norm(cmd);
-  return (commands || []).filter(e => {
-    const c = norm(e.cmd);
-    return (c === want || c.includes(want)) && !LOOKALIKE_RE.test(c);
-  });
+  return (commands || []).filter(e => String(e.cmd).split(/&&|\|\|?|;/).some(seg => {
+    const s = norm(seg);
+    return (s === want || s.includes(want)) && !LOOKALIKE_RE.test(s);
+  }));
 }
 
 /**
@@ -361,6 +362,7 @@ export function filesFromDiff(diff) {
   const renamed = new Set();
   let cur = null;                    // current `diff --git` block
   let inHunk = false;                // past the first `@@` → subsequent ---/+++ are CONTENT, not headers
+  let prevMinus = false;             // the previous line was this block's git `--- ` header (so the next `+++ ` is its pair)
   const flush = () => {
     if (!cur) return;
     const b = cur; cur = null;
@@ -373,21 +375,40 @@ export function filesFromDiff(diff) {
     byPath.set(path, status);
   };
   for (const line of String(diff).split('\n')) {
-    const dg = line.match(/^diff --git (.+) (.+)$/);
-    if (dg) { flush(); cur = { aPath: stripAB(unquotePath(dg[1])), bPath: stripAB(unquotePath(dg[2])) }; inHunk = false; continue; }
-    if (line.startsWith('@@')) { inHunk = true; continue; }   // hunk body begins → ---/+++ below are content
-    if (!cur) {
-      // bare tool-ledger fragment (no diff --git header): `+++ b/path` → a new/authored file (status A).
-      if (!inHunk && line.startsWith('+++ ')) { const r = unquotePath(line.slice(4).trim()); if (r.startsWith('b/')) byPath.set(r.slice(2), byPath.get(r.slice(2)) || 'A'); }
-      continue;
+    if (line.startsWith('diff --git ')) {
+      flush();
+      // split on the LAST ` b/` so an UNQUOTED path with spaces (`a/my file.js b/my file.js`) parses; quoted
+      // and normal paths fall back to the greedy two-token split.
+      const rest = line.slice(11); const bi = rest.startsWith('a/') ? rest.lastIndexOf(' b/') : -1;
+      const [aRaw, bRaw] = bi > 0 ? [rest.slice(0, bi), rest.slice(bi + 1)] : (rest.match(/^(.+) (.+)$/)?.slice(1) || [rest, rest]);
+      cur = { aPath: stripAB(unquotePath(aRaw)), bPath: stripAB(unquotePath(bRaw)) }; inHunk = false; prevMinus = false; continue;
     }
-    if (inHunk) continue;            // inside a hunk: never reinterpret a content line as a header
-    if (line.startsWith('new file mode')) { cur.added = true; continue; }
-    if (line.startsWith('deleted file mode')) { cur.deleted = true; continue; }
-    if (line.startsWith('rename from ')) { cur.rFrom = stripAB(unquotePath(line.slice(12).trim())); continue; }
-    if (line.startsWith('rename to ')) { cur.rTo = stripAB(unquotePath(line.slice(10).trim())); continue; }
-    if (line.startsWith('--- ')) { const r = unquotePath(line.slice(4).trim()); cur.minus = r === '/dev/null' ? '/dev/null' : (r.startsWith('a/') ? r.slice(2) : cur.minus); continue; }
-    if (line.startsWith('+++ ')) { const r = unquotePath(line.slice(4).trim()); cur.plus = r === '/dev/null' ? '/dev/null' : (r.startsWith('b/') ? r.slice(2) : cur.plus); continue; }
+    if (line.startsWith('@@')) { inHunk = true; prevMinus = false; continue; }   // hunk body begins
+    if (line.startsWith('--- ')) {
+      // a git `--- ` header (a/ or /dev/null) only counts before the hunk and inside a block; else it's content.
+      if (cur && !inHunk) { const r = unquotePath(line.slice(4).trim()); cur.minus = r === '/dev/null' ? '/dev/null' : (r.startsWith('a/') ? r.slice(2) : cur.minus); prevMinus = true; continue; }
+      prevMinus = false; continue;
+    }
+    if (line.startsWith('+++ ')) {
+      const r = unquotePath(line.slice(4).trim());
+      const plus = r === '/dev/null' ? '/dev/null' : (r.startsWith('b/') ? r.slice(2) : null);
+      if (cur && !inHunk && prevMinus) { cur.plus = plus; prevMinus = false; continue; }   // git header pair
+      // Otherwise a BARE tool-ledger fragment for a new file — a `+++ b/path` NOT preceded by a `--- ` header.
+      // This is the untracked-create seam: the engine appends fragments AFTER the git diff, so `cur`/`inHunk`
+      // are still set from the last git block — without this branch the create is dropped → CA on an honest
+      // `created` claim in any mixed session (Fable re-review, finding 1/2 regression).
+      flush();
+      if (plus && plus !== '/dev/null') byPath.set(plus, byPath.get(plus) || 'A');
+      inHunk = false; prevMinus = false; continue;
+    }
+    if (inHunk) { prevMinus = false; continue; }
+    if (cur) {
+      if (line.startsWith('new file mode')) cur.added = true;
+      else if (line.startsWith('deleted file mode')) cur.deleted = true;
+      else if (line.startsWith('rename from ')) cur.rFrom = stripAB(unquotePath(line.slice(12).trim()));
+      else if (line.startsWith('rename to ')) cur.rTo = stripAB(unquotePath(line.slice(10).trim()));
+    }
+    prevMinus = false;
   }
   flush();
   const files = [];
@@ -420,7 +441,9 @@ export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile 
     .filter(e => e && typeof e.cmd === 'string')
     .map(e => ({
       cmd: e.cmd,
-      ok: e.is_error === false ? true : e.is_error === true ? false : null,   // tri-state; null = unpaired ⇒ abstain
+      // tri-state; null ⇒ abstain. A BACKGROUND run's is_error:false is only a launch-ack, not a completed
+      // pass, so it must NOT bless a tests_pass claim (v1 abstains on background test runs). (Fable re-review, finding 3.)
+      ok: e.background === true ? null : (e.is_error === false ? true : e.is_error === true ? false : null),
       background: e.background === true,
       seq: typeof e.seq === 'number' ? e.seq : 0,
     }));

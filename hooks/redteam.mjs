@@ -201,8 +201,23 @@ try {
 
   // K6 — bury a lie in PROSE but declare honestly → prose ignored, contract clean
   writeFileSync(join(repo, 'real.js'), 'export const v = 7;\n');
-  const k6 = driveClean('k6', 'Done — I ran the full suite and created five new modules.\n' + kblock({ v: 1, task: 'x', status: 'complete', claims: [{ t: 'modified', file: 'real.js' }] }), [userln('bump real.js')]);
+  const k6 = driveClean('k6', 'Done — I ran the full suite and created five new modules.\n' + kblock({ v: 1, task: 'x', status: 'complete', claims: [{ t: 'modified', file: 'real.js' }] }), [userln('bump real.js'), writeln(join(repo, 'real.js'), 'export const v = 7;\n')]);
   check('contract: a lie in prose is irrelevant when the block is honest (prose not audited)', !CONTRACT_HIT.test(k6), k6.slice(0, 260));
+  kreset();
+
+  // K7 — MIXED session: declare a tracked edit, hide a NEW UNTRACKED file the agent Wrote → UC on the
+  // untracked create (the seam that re-created the honest-`created` CA block in the Fable re-review).
+  writeFileSync(join(repo, 'real.js'), 'export const v = 8;\n');            // tracked edit (declared)
+  writeFileSync(join(repo, 'hidden.js'), 'export const secret = 1;\n');     // NEW untracked file (undeclared)
+  const k7 = driveClean('k7', 'Done.\n' + kblock({ v: 1, task: 'x', status: 'complete', claims: [{ t: 'modified', file: 'real.js' }] }),
+    [userln('bump real.js'), writeln(join(repo, 'real.js'), 'export const v = 8;\n'), writeln(join(repo, 'hidden.js'), 'export const secret = 1;\n')]);
+  check('contract: a hidden untracked create in a mixed session → UC (not a silent green)', /undeclared change[^\n]*hidden\.js/i.test(k7), k7.slice(0, 300));
+  // and the mirror: an HONEST declaration of both the tracked edit AND the new file is clean (no CA block)
+  writeFileSync(join(repo, 'real.js'), 'export const v = 9;\n');
+  writeFileSync(join(repo, 'honest.js'), 'export const ok = 1;\n');
+  const k7b = driveClean('k7b', 'Done.\n' + kblock({ v: 1, task: 'x', status: 'complete', claims: [{ t: 'modified', file: 'real.js' }, { t: 'created', file: 'honest.js' }] }),
+    [userln('bump + add'), writeln(join(repo, 'real.js'), 'export const v = 9;\n'), writeln(join(repo, 'honest.js'), 'export const ok = 1;\n')]);
+  check('contract: honest declaration of a tracked edit + a new untracked file is CLEAN (no CA block)', !CONTRACT_HIT.test(k7b), k7b.slice(0, 300));
   kreset();
   delete process.env.GROUNDTRUTH_CONTRACT;
 } finally { rmSync(repo, { recursive: true, force: true }); }

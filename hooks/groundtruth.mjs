@@ -2105,7 +2105,7 @@ export function renderCard(findings, { session = 'unknown', intent = '', blockEn
   const hon = findings.filter(isHonesty);
   const deferred = findings.filter(f => f.cls === 'deferred');              // declared deferral: surfaced, never silent
   const tamper = findings.filter(f => f.cls === 'tamper');                  // agent rewrote the referee's own state
-  const rule = findings.filter(f => !isHonesty(f) && !['openloop', 'deferred', 'tamper'].includes(f.cls));  // security B/C + compiled rules R
+  const rule = findings.filter(f => !isHonesty(f) && !['deferred', 'tamper'].includes(f.cls));  // security B/C + compiled rules R
 
   const verdict = (hasBlock ? 'ISSUES — blocked'
     : hasAsync ? 'IN PROGRESS — not done (deliverable not produced yet)'
@@ -2256,7 +2256,6 @@ const FIX = {
   C1: 'Remove the hardcoded secret; move it to an env var / secret store and rotate it.',
   C2: 'Remove the committed private key; rotate it.',
   ENV: 'Add the env file to .gitignore (and `git rm --cached` it if already tracked); rotate any secret it held.',
-  openloop: 'You claimed done, but this task is still pending. DELIVER the file/symbol it named — acknowledging it does NOT close it, and you cannot defer it yourself (an agent-written "deferred", in any file, is re-opened). Only the USER can set it aside, by typing `defer <id>`; do not type that for them.',
 };
 export function renderCorrective(blockFindings, attempts, cap = 2) {
   return `Groundtruth blocked this stop (attempt ${attempts}/${cap} before it escalates to a human). Resolve, then finish:\n`
@@ -2793,8 +2792,13 @@ function main() {
         bashEvents: parsed.bashEvents,
         symbolsByFile: addedSymbolsByFile(scanDiff),
         excluded: (p) => excludedScanPath(p),
-        // UC is scoped to files the agent's Write/Edit tools actually authored (relativized in buildReality),
-        // so a dirty tree / manual edit / lockfile churn the agent can't declare is never a false UC.
+        // UC/NC are scoped to files the agent's Write/Edit tools actually authored (relativized in
+        // buildReality), so a dirty tree / manual edit / lockfile churn the agent can't declare is never a
+        // false UC. ACCEPTED BOUND (Fable re-review): a file the agent edits through the BASH channel
+        // (`sed -i`, `> f`, heredoc) is not in the Write/Edit ledger, so an undeclared Bash-channel change
+        // escapes UC/NC — the same tool-ledger blind spot the security scanners already accept (see the
+        // scanDiff note above); the CI/pre-merge `--diff-range` gate, which has the full diff and no ledger
+        // dependency, is the backstop. Chosen precision-first over the whole-diff scope's dirty-tree FPs.
         authored: (parsed.mutations || []).map(m => m.path),
       });
       findings.push(...contractFindings(payload.last_assistant_message || '', reality));
