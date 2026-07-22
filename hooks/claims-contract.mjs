@@ -616,20 +616,23 @@ export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile 
   return { files, commands, symbolsByFile, excluded, authored: authoredSet, lastEditSeq, sidechainCmds, contractInstruction };
 }
 
-// Contract-finding severities. NC is WARN unless the session is CONTRACT-AWARE — i.e. the repo's CLAUDE.md
-// carries the `groundtruth-claims` instruction (the Stop hook passes `reality.contractInstruction`). Then NC
-// is BLOCK-eligible: omitting the manifest on a code turn is the cheapest evasion (a lie CAs and can block,
-// but silence only warned — an asymmetry that made "just don't declare" the safe dodge). Gating the escalation
-// on the instruction preserves the conservative default for a teammate's plain session that never saw it; and
-// because the instruction lives inside Rule Zero's tamper perimeter, an agent can't quietly delete it to dodge
-// the block without tripping the referee-tamper check. CA/UC keep verify()'s severities.
+// Contract-finding severities. NC is WARN unless the session is CONTRACT-AWARE — i.e. an instruction doc
+// (CLAUDE.md/AGENTS.md/…) carries the `groundtruth-claims` instruction (the Stop hook passes
+// `reality.contractInstruction`). Then NC is BLOCK-eligible: omitting the manifest on a code turn is the
+// cheapest evasion (a lie CAs and can block, but silence only warned — an asymmetry that made "just don't
+// declare" the safe dodge). Gating on the instruction preserves the conservative default for a teammate's
+// plain session that never saw it. The Stop hook anchors awareness on the SESSION BASELINE (not just the
+// worktree), so an agent that strips the instruction THIS turn can't downgrade the block — and the strip is
+// itself surfaced. (NOTE: the instruction doc is NOT in Rule Zero's tamper snapshot — that covers only
+// `.claude/groundtruth/*` + hook code — so baseline-anchoring, not a tamper claim, is the real protection.)
+// CA/UC keep verify()'s severities. (Fable PR #2 review, Defect A.)
 const SEV_NC = 'warn';
 const SEV_NC_AWARE = 'block';
 
 /**
  * The single entry the Stop hook calls (runs by default; disabled only by GROUNDTRUTH_CONTRACT=0). Returns findings in the engine's
  * `{ cls, sev, msg }` shape so they flow through the existing card / block-loop / history unchanged:
- *   NC — no valid contract (missing / malformed / schema-invalid)   [warn]
+ *   NC — no valid contract (missing / malformed / schema-invalid)   [warn; block-eligible if reality.contractInstruction]
  *   CA — a claim the diff/transcript don't support                   [block, soft mislabels warn]
  *   UC — a changed file no claim covers                              [warn]
  * Fail-open by construction: any unexpected shape yields an empty array upstream (the hook wraps in try).

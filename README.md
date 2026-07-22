@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/deterministic-no%20LLM%20%C2%B7%20no%20network%20%C2%B7%20no%20API%20key-111111?style=flat-square" alt="Deterministic: no LLM, no network, no API key">
   <img src="https://img.shields.io/badge/runs%20on-Claude%20Code-111111?style=flat-square" alt="Runs on Claude Code">
   <img src="https://img.shields.io/github/v/release/akahkhanna/groundtruth?style=flat-square&color=111111&label=release" alt="Release">
-  <img src="https://img.shields.io/badge/self--checks-445%20%2B%20177%20%C2%B7%20red--team%2025%2F25-111111?style=flat-square" alt="622 self-checks (445 engine + 177 contract), red-team 25/25">
+  <img src="https://img.shields.io/badge/self--checks-453%20%2B%20180%20%C2%B7%20red--team%2027%2F27-111111?style=flat-square" alt="633 self-checks (453 engine + 180 contract), red-team 27/27">
   <img src="https://img.shields.io/badge/license-MIT-111111?style=flat-square" alt="MIT license">
 </p>
 
@@ -57,7 +57,7 @@ One fenced block, JSON — so `JSON.parse` is the whole parser:
 
 A **closed set of eight claim types**: `created` · `modified` · `deleted` · `renamed` · `tests_pass` · `build_pass` · `deferred` · `no_change`. `status` is `complete | partial | blocked` — and `partial`/`blocked` must name what's outstanding with a `deferred` entry, so &ldquo;mostly done&rdquo; can't be left conveniently vague.
 
-`/groundtruth-setup` writes the one-line instruction that teaches your agent this form into your `CLAUDE.md` — inside Rule Zero's tamper perimeter, so the agent can't quietly edit the requirement away.
+`/groundtruth-setup` writes the one-line instruction that teaches your agent this form into your `CLAUDE.md`. Once it's there, the session is *contract-aware* and an omitted manifest becomes block-eligible — and because awareness is anchored on the **session baseline**, an agent can't strip the instruction mid-turn to dodge the block (the strip is surfaced instead).
 
 ## The three findings
 
@@ -65,7 +65,7 @@ Groundtruth reads the manifest, then reality (the `git diff`, the transcript's c
 
 | Finding | Means | Severity | The evasion it closes |
 |---|---|---|---|
-| **NC** — no contract | the block is missing, malformed, or schema-invalid on a turn that changed code | warn | dodging the form entirely |
+| **NC** — no contract | the block is missing, malformed, or schema-invalid on a turn that changed code | warn — **block-eligible once `/groundtruth-setup` has run** (see below) | dodging the form entirely |
 | **CA** — claimed but absent | a claim reality doesn't support: a file not in the diff, a `tests_pass` that never ran or ran red, a symbol not defined in the added code | **block-tier** | inventing work to look productive |
 | **UC** — undeclared change | a changed file no claim covers | warn | hiding sloppy work by omission |
 
@@ -138,7 +138,7 @@ From inside Claude Code:
 /plugin install groundtruth@groundtruth
 ```
 
-Restart Claude Code so the hooks register, then run `/groundtruth-setup` — it writes the one-line contract instruction into your `CLAUDE.md`, inside Rule Zero's tamper perimeter. **Requires:** Claude Code, `node` ≥ 18, and a git repo (reality = the git-computed diff).
+Restart Claude Code so the hooks register, then run `/groundtruth-setup` — it writes the one-line contract instruction into your `CLAUDE.md`. **Requires:** Claude Code, `node` ≥ 18, and a git repo (reality = the git-computed diff).
 
 Want the contract off? `GROUNDTRUTH_CONTRACT=0` disables it — the diff-facing checks (secrets, RLS, stubs, dropped symbols, compiled rules) keep running; only the claims-contract layer (`NC`/`CA`/`UC`) goes quiet. (The v1 prose honesty layer is retired, not a fallback.)
 
@@ -147,7 +147,7 @@ The full walkthrough — arming rules, the status badge, warn → block, updatin
 ## Warn vs block
 
 - **Default: WARN.** Every verdict is recorded; the turn is never disrupted. Build trust first.
-- **Opt-in: BLOCK** — `/groundtruth-block on` (or `GROUNDTRUTH_BLOCK=1`). A `CA` then refuses the stop and hands the gap back to the agent, re-checks on the next stop — **capped at 2 attempts**, then escalates to a human. Editing the tests, this checker, or the ledger to satisfy a catch is flagged as gaming, and the block *holds* rather than releasing.
+- **Opt-in: BLOCK** — `/groundtruth-block on` (or `GROUNDTRUTH_BLOCK=1`). A `CA` (and, in a **contract-aware** repo — one where `/groundtruth-setup` has written the instruction — an `NC`) then refuses the stop and hands the gap back to the agent, re-checks on the next stop — **capped at 2 attempts**, then escalates to a human. `UC` stays warn. Editing the tests, this checker, or the ledger to satisfy a catch is flagged as gaming, and the block *holds* rather than releasing.
 
 Run in warn until precision is proven on your real sessions, *then* flip. Every finding carries its evidence, so a wrong call is auditable, not mysterious.
 
@@ -178,7 +178,7 @@ A verifier is only worth trusting if it documents its own misses. The contract e
 - `echo "npm test"` blessing a `tests_pass` that never ran; a red re-run laundered by an earlier green. *(C-3)*
 - A gitconfig with nonstandard diff prefixes silently poisoning every path on every turn. *(C-8)*
 
-Current standing: **445 engine checks + 177 contract checks** (622 self-checks total), and a live sandboxed adversarial harness at **red-team 25/25** — a throwaway repo, a genuinely hostile scripted agent, the real hook.
+Current standing: **453 engine checks + 180 contract checks** (633 self-checks total), and a live sandboxed adversarial harness at **red-team 27/27** — a throwaway repo, a genuinely hostile scripted agent, the real hook.
 
 The through-line: *abstain or degrade to a bounded warn outside the domain a check is provably correct in — never a clean green — and never let the audited agent shape its own verdict.*
 

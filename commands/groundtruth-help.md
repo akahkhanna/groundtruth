@@ -11,7 +11,7 @@ It runs automatically every turn (the Stop hook) and checks:
 - **Rules** — hardcoded secrets, new tables without RLS, permissive `USING(true)` policies, and project rules compiled from your docs (CLAUDE.md / skills) that were in context but broken anyway.
 - **Code debt** — stub/placeholder markers, phantom imports, dropped-symbol dangling refs (a "refactor, everything preserved" that left a caller pointing at nothing); `/groundtruth-audit` inventories it repo-wide.
 
-A verdict card is written to `.claude/groundtruth/<session>.md` each turn. With `GROUNDTRUTH_BLOCK=1` a *fixable* block-severity catch (a contract **CA**, or a built-in secret/RLS/`.env`) halts the stop, hands back a corrective, and re-checks (retry cap 2, then escalates — never wedges); otherwise it's warn-only.
+A verdict card is written to `.claude/groundtruth/<session>.md` each turn. With `GROUNDTRUTH_BLOCK=1` a *fixable* block-severity catch (a contract **CA**; a built-in secret/RLS/`.env`; or an **NC** — no manifest — once the repo is contract-aware, i.e. `/groundtruth-setup` has written the instruction) halts the stop, hands back a corrective (for NC, the schema itself), and re-checks (retry cap 2, then escalates — never wedges); otherwise it's warn-only.
 
 **Commands:**
 - `/groundtruth` — show the latest verdict card

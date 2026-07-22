@@ -60,7 +60,7 @@ Then check each item and report `✓`/`✗`:
      ```
      Every claim must be true against the diff; declare every file you changed; status partial/blocked needs a `deferred` claim.
      ````
-     `CLAUDE.md` is inside **Rule Zero's** tamper perimeter (`RULE_SRC_RE`), so an agent that later edits this instruction away trips the existing referee-tamper check — no new machinery. The contract is the **default engine** as of v2.0.0 (opt out with `GROUNDTRUTH_CONTRACT=0`); it runs in **warn** until you turn block on, so keep block off while you watch its precision on your real turns.
+     Once the instruction is in `CLAUDE.md` the session is **contract-aware**: an omitted manifest on a code turn becomes block-eligible. Awareness is anchored on the **session baseline** (not the live worktree), so an agent can't strip the instruction mid-turn to downgrade the block — the strip is surfaced as its own finding. The contract is the **default engine** as of v2.0.0 (opt out with `GROUNDTRUTH_CONTRACT=0`); it runs in **warn** until you turn block on, so keep block off while you watch its precision on your real turns.
 
 End with one summary line, e.g.: `Setup → rules: N clean unarmed (arm in warn?) · badge: ✗ · block: warn (on = enforce) · key: off (CI = real enforcement) · pre-commit: ✗ install · contract: on (default; instruction written).` (after arming: `rules: armed N (warn)`).
 
