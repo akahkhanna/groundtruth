@@ -59,7 +59,28 @@ The v2 replacement coverage already exists: `claims-contract.test.mjs` (87 check
 5. **Demote to advisory** — `async_done`, `claimsSuccess`, completion/deferral stamps become an info-only footer (spec §7), not deleted.
 6. **Swap the README** — `docs/README.v2-draft.md` → `README.md`; bump to `2.0.0`.
 
-**Progress: stages 1–2 done and green. Stage 3 paused for the capability decision; stage 4 (the subsystem-B function bodies) is a clean follow-up once 3 is settled.**
+**Progress: stages 1, 2, 4 DONE and green (engine 3331 → 2950). Stage 3 is the last piece — designed below.**
+
+## Stage 3 — the design (decided: PORT the 3 sensors)
+
+Couples the sensor-port with removing class-1/3 prose (they'd double-fire otherwise). Do it as one commit.
+
+**3a — port the sensors into the contract `tests_pass` check (`claims-contract.mjs`).** Enrich `reality`:
+- `commands: [{ cmd, ok, seq }]` — add `seq` from `bashEvents.seq`.
+- `lastEditSeq` — max `seq` of code mutations, from `parsed.mutations` (thread it through `buildReality`).
+
+Then in `verify()`'s `tests_pass`/`build_pass` branch, after the matched-green-run check, add three warn-tier findings (patterns lifted verbatim from the current engine so there's no drift):
+- **only-weak** — `WEAK_CHECK_RE` (engine l.886: `node --check|tsc|deno check|cargo check|go vet|py_compile|ruby -c`) tests the DECLARED `cmd` → "that's a type/syntax check, not a test run."
+- **filtered** — every matched green run's cmd is filtered (`GENERIC_FILTER_RE` l.1095 `--grep|--test-name-pattern` + `RUNNER_FILTERS` l.1096 `pytest -k`, `dotnet --filter`, …) → "a filtered run can't back the claim."
+- **stale-green** — the matched green run's `seq < reality.lastEditSeq` → "the green predates the last source edit."
+
+Abstain when `seq`/`lastEditSeq` absent (pre-commit / no transcript), same contract as everywhere.
+
+**3b — remove the class-1 prose scan** (`analyze()` `_passClaim` block, ~l.863–1155) — the "tests pass" prose detection. KEEP `claimsSuccess` + `stripQuotedForClaim` (they gate the test-exclusion/weakening/vacuous checks that stay). KEEP the `testFiles`-only class-1 (l.1152, "only tests changed") if it doesn't depend on `_passClaim`.
+
+**3c — remove the class-3 prose block** (`analyze()`, ~l.1196–1237). Then `NONREPO_OR_TOOL` (restored in stage 4) becomes unused → delete it too.
+
+**3d — prune tests**: the Class-1 section (`groundtruth.test.mjs` l.67–427) + the class-3 no-op tests. Add contract sensor tests (weak/filtered/stale) to `claims-contract.test.mjs`. Coverage moves to the contract suite + red-team Scenario K.
 
 ## Do NOT flip until
 
