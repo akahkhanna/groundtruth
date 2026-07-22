@@ -459,7 +459,7 @@ export function verify(contract, reality = {}) {
 
 /* ────────────────────────────────────────────────────────────────────────────────────────────────────
  * WEEK 3 — the reality builder + the engine-facing orchestrator (still pure; the Stop hook supplies the
- * raw diff / bashEvents / symbol map and flips GROUNDTRUTH_CONTRACT=1).
+ * raw diff / bashEvents / symbol map; the contract runs by default unless GROUNDTRUTH_CONTRACT=0).
  * ──────────────────────────────────────────────────────────────────────────────────────────────────── */
 
 // git quotes a path with special/non-ASCII bytes as "b/caf\303\251.js" (C-style octal escapes of the UTF-8
@@ -622,7 +622,7 @@ export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile 
 const SEV_NC = 'warn';
 
 /**
- * The single entry the Stop hook calls (behind GROUNDTRUTH_CONTRACT=1). Returns findings in the engine's
+ * The single entry the Stop hook calls (runs by default; disabled only by GROUNDTRUTH_CONTRACT=0). Returns findings in the engine's
  * `{ cls, sev, msg }` shape so they flow through the existing card / block-loop / history unchanged:
  *   NC — no valid contract (missing / malformed / schema-invalid)   [warn]
  *   CA — a claim the diff/transcript don't support                   [block, soft mislabels warn]

@@ -6,18 +6,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Groundtruth is a **Claude Code plugin** (distributed via the plugin marketplace, not npm) that catches the false "Done." It's a **deterministic local hook** — no LLM calls, no network, no API key. It reads an agent turn from the outside (the request, the claim, the real `git diff`, the project rules) and renders a one-screen verdict before the turn ends.
 
+As of **v2.0.0 the default honesty/completeness engine is the "claims contract" (declare-then-verify)** in `hooks/claims-contract.mjs`: the agent ends a code-changing turn with one fenced `groundtruth-claims` block, and the engine verifies every claim against the diff/transcript (`CA` — claimed-but-absent), every agent-authored change against the claims (`UC` — undeclared), and a missing/invalid block on authored work (`NC`). This replaced the old prose-parsing layer (v1 class-1/class-3, retired). Opt back out with `GROUNDTRUTH_CONTRACT=0`. The diff-facing checks (secrets, RLS, stubs, dropped symbols, compiled rules, Rule Zero) are unchanged.
+
 Design invariant, enforced in review: **a false positive is treated as fatal.** A check earns its place only if it's provably correct in a defined scope. Outside that scope a check must **abstain or degrade to a bounded warn — never a clean green.** When adding or changing a check, this is the bar. See `CONTRIBUTING.md`.
 
 ## Commands
 
 ```bash
-node hooks/groundtruth.test.mjs   # 702 assert-based unit checks, no deps, no framework
-node hooks/redteam.mjs            # live adversarial harness (10 scenarios, sandboxed throwaway repos)
-npm test                          # alias for the unit checks
-npm run check-self                # same, but echoes the exit code as a GREEN/RED done-verdict
+node hooks/groundtruth.test.mjs      # 445 engine unit checks, no deps, no framework
+node hooks/claims-contract.test.mjs  # 177 v2 claims-contract checks (same assert style)
+node hooks/redteam.mjs               # live adversarial harness (25 checks across sandboxed throwaway repos)
+npm test                             # runs BOTH unit files (445 engine + 177 contract = 622)
+npm run check-self                   # engine checks, but echoes the exit code as a GREEN/RED done-verdict
 ```
 
-The test file is a flat sequence of `ok(label, cond)` asserts — there is **no single-test runner**; you run the whole file (it's fast). It imports the pure exports of `groundtruth.mjs`/`compile-rules.mjs`/`symbol-integrity.mjs` directly, so **a new check is only testable if it's exported and pure.** Add a regression test in the same style next to the code it covers, and log the fix in `FIXES.md` (symptom → root cause → fix → regression test).
+The test files are a flat sequence of `ok(label, cond)` asserts — there is **no single-test runner**; you run the whole file (it's fast). They import the pure exports of `groundtruth.mjs`/`claims-contract.mjs`/`compile-rules.mjs`/`symbol-integrity.mjs` directly, so **a new check is only testable if it's exported and pure.** Add a regression test in the same style next to the code it covers, and log the fix in `FIXES.md` (symptom → root cause → fix → regression test).
 
 CLI entry points (all on `hooks/groundtruth.mjs`, dispatched in `main()`):
 ```bash
@@ -30,7 +33,7 @@ node hooks/compile-rules.mjs [repo-root]              # (re)compile doc rules �
 
 ## Architecture
 
-Everything is one big deterministic engine in `hooks/groundtruth.mjs` (~2300 lines). It has **no dependencies** — pure `node:*` stdlib. The other `.mjs` files are satellites of it.
+Everything is one big deterministic engine in `hooks/groundtruth.mjs` (~2600 lines). It has **no dependencies** — pure `node:*` stdlib. The other `.mjs` files are satellites of it.
 
 **Three inputs, and only two are trusted.** The agent shares Groundtruth's trust domain (same fs, same env), so on-disk artifacts aren't a security boundary. Trust anchors on the two inputs the agent *can't* author: the **transcript** (harness record of tool calls) and the **git-computed diff**. Any new check should ground on those, not on agent-writable state. See `SECURITY.md` for the full adversarial model.
 
@@ -49,7 +52,8 @@ Note the two diff variables — this distinction matters when editing: `diff`/`g
 **Finding classes** live in `CLASS_NAME` (~line 39). The buckets map to the README's failure taxonomy (Told&Missed / Told&Ignored). Severity is `block` | `warn` | `info`. Prose-grounded honesty heuristics and test-gaming heuristics are **warn-only by design** — they never hard-block, because their trigger is a natural-language claim and a false block there is exactly the failure this tool exists to avoid.
 
 **Satellite files:**
-- `hooks/symbol-integrity.mjs` — Class 6 (`checkDroppedSymbols`): a def the diff removed, defined nowhere, still *called* → dangling ref under a "preserved" claim. Receiver-gated to kill FPs.
+- `hooks/claims-contract.mjs` — the **v2 default engine** (pure): `analyze` (fence-parse + schema-validate → the contract; last-VALID-block wins), `buildReality` (diff + transcript + untracked set + sidechain cmds → normalized reality), `verify` (the CA/UC pincer + the tests_pass sensors: only-weak, failure-substring, stale-green, filtered, exit-swallower), `contractFindings` (the Stop-hook entry, emitting `NC`/`CA`/`UC`). `addedSymbolsByFile` (in symbol-integrity) feeds its symbol check. Fully pure → directly unit-tested in `claims-contract.test.mjs`.
+- `hooks/symbol-integrity.mjs` — Class 6 (`checkDroppedSymbols`): a def the diff removed, defined nowhere, still *called* → dangling ref under a "preserved" claim. Receiver-gated to kill FPs. Also exports `addedSymbolsByFile` (function + class/enum/const decls per file) for the contract's `created`-symbol check.
 - `hooks/compile-rules.mjs` — the rule compiler. EXTRACT (regex over backtick'd `` `X` not `Y` ``/`` never `Z` `` in your docs) → GROUND (grep against the tree; already-matching = `review`, clean = `armable`) → **PROPOSE, never arm**. `/groundtruth-rules` is the human approval gate that writes `compiled-rules.json`. `compileRuleRe` is shared with the runtime for grounder⇄runtime parity.
 - `hooks/groundtruth-statusline.mjs` / `.sh` — status badge.
 - `commands/*.md` — the slash commands (`/groundtruth`, `-audit`, `-rules`, `-rules-ai`, `-block`, `-setup`, `-help`).

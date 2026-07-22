@@ -35,8 +35,9 @@ import { fileURLToPath } from 'node:url';   // NOT `new URL(...).pathname` — t
 // (symbol-integrity.mjs re-imports the pure lexers below) — safe because every cross-reference is at
 // call time, never at module-eval time.
 import { checkDroppedSymbols, addedSymbolsByFile } from './symbol-integrity.mjs';
-// v2 claims contract (opt-in, GROUNDTRUTH_CONTRACT=1). Pure module — parse + validate + verify the agent's
-// end-of-turn claims block against reality. Off by default; v1 is the fallback during soak.
+// v2 claims contract — the DEFAULT honesty engine as of v2.0.0 (disable with GROUNDTRUTH_CONTRACT=0; the
+// diff-facing checks still run, but the retired v1 prose honesty layer is NOT restored). Pure module —
+// parse + validate + verify the agent's end-of-turn claims block against reality.
 import { buildReality, contractFindings } from './claims-contract.mjs';
 
 const CLASS_NAME = { 1: 'false test/build claim', 2: 'stub/placeholder', 3: 'silent no-op', 4: 'phantom ref',
@@ -47,8 +48,8 @@ const CLASS_NAME = { 1: 'false test/build claim', 2: 'stub/placeholder', 3: 'sil
   ENV: 'env file not gitignored (secret-leak risk)', test_exclusion: 'test excluded/skipped to pass',
   test_weakened: 'test weakened/disabled to pass', mojibake: 'encoding corruption (mojibake)',
   agent: 'subagent cannot load (silently inert)',
-  // v2 claims contract (GROUNDTRUTH_CONTRACT=1): NC = no valid claims block, CA = claim unsupported by the
-  // diff/transcript, UC = a changed file no claim covers.
+  // v2 claims contract (default; disable with GROUNDTRUTH_CONTRACT=0): NC = no valid claims block, CA = claim
+  // unsupported by the diff/transcript, UC = a changed file no claim covers.
   NC: 'no claims contract', CA: 'claimed but absent (contract)', UC: 'undeclared change (contract)' };
 const CLASS_BUCKET = { 1: 'Ignored', 2: 'Missed→Ignored', 3: 'Ignored', 4: 'Missed', 6: 'Missed→Ignored', async_done: 'Ignored',
   B1: 'Ignored', B3: 'Ignored', B4: 'Ignored', C1: 'Ignored', C2: 'Ignored', R: 'Ignored' };
@@ -2431,8 +2432,9 @@ function main() {
   const envBlock = process.env.GROUNDTRUTH_BLOCK === '1';
   findings.push(...refereeTamper(diff, parsed.commandsInvoked || new Set(), envBlock));
 
-  // v2 claims contract — the honesty/completeness engine (v2.0.0: ON by default; opt OUT with
-  // GROUNDTRUTH_CONTRACT=0 for the legacy prose path, which is being retired). NC/CA/UC replace the prose
+  // v2 claims contract — the honesty/completeness engine (v2.0.0: ON by default; disable with
+  // GROUNDTRUTH_CONTRACT=0 — the diff-facing checks still run, but the v1 prose honesty layer is retired,
+  // not restored). NC/CA/UC replace the prose
   // class-1/class-3 claim detection and the prose task ledger. Reality is read from the AUTHORED `diff`
   // (git + tool ledger, so untracked creates are seen) and the transcript's bash evidence; symbols are
   // lexed per-file from scanDiff. Fully fail-open: the contract path must never break a turn.

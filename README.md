@@ -140,7 +140,7 @@ From inside Claude Code:
 
 Restart Claude Code so the hooks register, then run `/groundtruth-setup` — it writes the one-line contract instruction into your `CLAUDE.md`, inside Rule Zero's tamper perimeter. **Requires:** Claude Code, `node` ≥ 18, and a git repo (reality = the git-computed diff).
 
-Prefer the v1 prose engine, or want the contract off? `GROUNDTRUTH_CONTRACT=0` opts out entirely.
+Want the contract off? `GROUNDTRUTH_CONTRACT=0` disables it — the diff-facing checks (secrets, RLS, stubs, dropped symbols, compiled rules) keep running; only the claims-contract layer (`NC`/`CA`/`UC`) goes quiet. (The v1 prose honesty layer is retired, not a fallback.)
 
 The full walkthrough — arming rules, the status badge, warn → block, updating — lives in the **[Getting Started guide](GETTING-STARTED.md)**.
 
