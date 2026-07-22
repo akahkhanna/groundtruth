@@ -279,6 +279,19 @@ try {
     /GROUNDTRUTH_BLOCK=1 to halt/.test(k13) && /removed from an instruction doc/i.test(k13), k13.slice(0, 500));
   git(['checkout', '-q', '--', '.']); git(['rm', '-q', '--ignore-unmatch', 'CLAUDE.md']); git(['commit', '-qm', 'drop']); kreset();
 
+  // K14 — the INDEX-REMOVAL strip variant (Fable PR #2 re-review): `git rm --cached CLAUDE.md` untracks the doc
+  // (dropping it from `git ls-files`) but leaves it physically in the worktree with the instruction intact. The
+  // awareness file list UNIONS the baseline tree, so the doc is still considered → NC STILL blocks; the dodge
+  // fails. (No strip is surfaced here — the content wasn't removed, only untracked.)
+  writeFileSync(join(repo, 'CLAUDE.md'), instr);
+  git(['add', 'CLAUDE.md']); git(['commit', '-qm', 'contract instruction at baseline (k14)']);
+  git(['rm', '--cached', '-q', 'CLAUDE.md']);                 // untrack — worktree file + instruction stay
+  writeFileSync(join(repo, 'real.js'), 'export const v = 14;\n');
+  const k14 = driveClean('k14', 'Done — no manifest.', [userln('bump real.js'), writeln(join(repo, 'real.js'), 'export const v = 14;\n')]);
+  check('contract: an index-removal strip (`git rm --cached`) does NOT dodge NC (awareness unions the baseline tree)',
+    /GROUNDTRUTH_BLOCK=1 to halt/.test(k14), k14.slice(0, 400));
+  git(['add', 'CLAUDE.md']); git(['rm', '-q', '--ignore-unmatch', 'CLAUDE.md']); git(['commit', '-qm', 'drop']); kreset();
+
   delete process.env.GROUNDTRUTH_CONTRACT;
 } finally { rmSync(repo, { recursive: true, force: true }); }
 

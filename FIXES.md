@@ -532,3 +532,5 @@ A code review of the C-8-addendum NC escalation caught a **false security claim*
 - Docs: self-check counts refreshed (453 engine + 180 contract = 633, red-team 27/27), the "NC stays warn" claims corrected to "block-eligible in a contract-aware session," and plugin/package version bumped to 2.0.0.
 
 Engine **453**; contract **180**; red-team **27/27**.
+
+**C-10 re-review addendum (Fable, PR #2):** the baseline anchor fixed the CONTENT read but the awareness FILE LIST was still current-index-only, so `git rm --cached CLAUDE.md` (untrack, worktree file intact) or a full `git rm` dropped the doc from `git ls-files` → `awareBase` never queried the baseline → the strip dodge survived silently via index-removal. Fixed: the file list UNIONS `git ls-files` with the baseline tree (`git ls-tree -r <baseRef>`), so a doc present at baseline is always considered (INSTRUCTION_DOC_RE still filters after the union — no `docs/*.md` re-enters). Redteam **K14** (`git rm --cached` variant) added; the doc/comment claims now name the untrack variant. Engine **453**; contract **180**; red-team **27 → 28**.

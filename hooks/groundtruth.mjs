@@ -2466,13 +2466,22 @@ function main() {
   if (process.env.GROUNDTRUTH_CONTRACT !== '0') {
     try {
       // CONTRACT-AWARE? — an instruction doc (CLAUDE.md/AGENTS.md/.cursor|windsurfrules) carries the fenced
-      // `groundtruth-claims` block. Anchored on the SESSION BASELINE (baseRef) as well as the worktree: a strip
-      // of the instruction THIS turn cannot downgrade awareness (the baseline still carries it), closing the
-      // dodge Fable proved — one Write to CLAUDE.md had turned the NC block back into a warn. The instruction is
-      // NOT in the tamper snapshot (that covers only `.claude/groundtruth/*` + hook code), so baseline-anchoring
-      // — not a tamper claim — is what makes it robust, and a baseline-present/worktree-absent strip is SURFACED
-      // below (never silent). (Fable PR #2 review, Defect A/B.)
-      const instrDocs = git('ls-files', cwd).split('\n').filter(f => f && INSTRUCTION_DOC_RE.test(f));
+      // `groundtruth-claims` block. Anchored on the SESSION BASELINE (baseRef) — both its FILE TREE and its
+      // content — as well as the worktree, so no same-turn strip downgrades awareness: an in-place edit, a full
+      // `git rm`, and an index-removal `git rm --cached` all leave the doc present at the baseline, so NC still
+      // blocks (the dodge Fable proved — a Write, or an untrack, had turned the NC block into a warn). The
+      // instruction is NOT in the tamper snapshot (that covers only `.claude/groundtruth/*` + hook code), so
+      // baseline-anchoring — not a tamper claim — is what makes it robust; an actual content removal
+      // (baseline-present / worktree-absent) is SURFACED below (never silent). (Fable PR #2 review, Defect A/B.)
+      // UNION the current index with the BASELINE tree: `git rm --cached CLAUDE.md` (or a full `git rm`) drops
+      // the doc from `git ls-files`, so a list built from the index alone would never query the baseline and the
+      // strip dodge would survive via index-removal (a same-turn, less-conspicuous variant). Taking the union
+      // means a doc present at the baseline is ALWAYS considered; the INSTRUCTION_DOC_RE filter still runs after,
+      // so no `docs/*.md` re-enters. (Fable PR #2 re-review: index-removal strip variant.)
+      const instrDocs = [...new Set([
+        ...git('ls-files', cwd).split('\n'),
+        ...git(`ls-tree -r --name-only ${baseRef}`, cwd).split('\n'),
+      ])].filter(f => f && INSTRUCTION_DOC_RE.test(f));
       const awareBase = contractInstructionPresent(instrDocs, (f) => git(`show ${baseRef}:${f}`, cwd));
       const awareWork = contractInstructionPresent(instrDocs, (f) => readFileSync(join(cwd, f), 'utf8'));
       const contractInstruction = awareBase || awareWork;

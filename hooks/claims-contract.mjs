@@ -621,9 +621,10 @@ export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile 
 // `reality.contractInstruction`). Then NC is BLOCK-eligible: omitting the manifest on a code turn is the
 // cheapest evasion (a lie CAs and can block, but silence only warned — an asymmetry that made "just don't
 // declare" the safe dodge). Gating on the instruction preserves the conservative default for a teammate's
-// plain session that never saw it. The Stop hook anchors awareness on the SESSION BASELINE (not just the
-// worktree), so an agent that strips the instruction THIS turn can't downgrade the block — and the strip is
-// itself surfaced. (NOTE: the instruction doc is NOT in Rule Zero's tamper snapshot — that covers only
+// plain session that never saw it. The Stop hook anchors awareness on the SESSION BASELINE (file tree + content,
+// not just the worktree), so no same-turn strip — in-place edit, `git rm`, or an index-removal `git rm --cached`
+// — can downgrade the block; an actual content removal is itself surfaced. (NOTE: the instruction doc is NOT in
+// Rule Zero's tamper snapshot — that covers only
 // `.claude/groundtruth/*` + hook code — so baseline-anchoring, not a tamper claim, is the real protection.)
 // CA/UC keep verify()'s severities. (Fable PR #2 review, Defect A.)
 const SEV_NC = 'warn';

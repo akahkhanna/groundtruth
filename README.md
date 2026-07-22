@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/deterministic-no%20LLM%20%C2%B7%20no%20network%20%C2%B7%20no%20API%20key-111111?style=flat-square" alt="Deterministic: no LLM, no network, no API key">
   <img src="https://img.shields.io/badge/runs%20on-Claude%20Code-111111?style=flat-square" alt="Runs on Claude Code">
   <img src="https://img.shields.io/github/v/release/akahkhanna/groundtruth?style=flat-square&color=111111&label=release" alt="Release">
-  <img src="https://img.shields.io/badge/self--checks-453%20%2B%20180%20%C2%B7%20red--team%2027%2F27-111111?style=flat-square" alt="633 self-checks (453 engine + 180 contract), red-team 27/27">
+  <img src="https://img.shields.io/badge/self--checks-453%20%2B%20180%20%C2%B7%20red--team%2028%2F28-111111?style=flat-square" alt="633 self-checks (453 engine + 180 contract), red-team 28/28">
   <img src="https://img.shields.io/badge/license-MIT-111111?style=flat-square" alt="MIT license">
 </p>
 
@@ -57,7 +57,7 @@ One fenced block, JSON — so `JSON.parse` is the whole parser:
 
 A **closed set of eight claim types**: `created` · `modified` · `deleted` · `renamed` · `tests_pass` · `build_pass` · `deferred` · `no_change`. `status` is `complete | partial | blocked` — and `partial`/`blocked` must name what's outstanding with a `deferred` entry, so &ldquo;mostly done&rdquo; can't be left conveniently vague.
 
-`/groundtruth-setup` writes the one-line instruction that teaches your agent this form into your `CLAUDE.md`. Once it's there, the session is *contract-aware* and an omitted manifest becomes block-eligible — and because awareness is anchored on the **session baseline**, an agent can't strip the instruction mid-turn to dodge the block (the strip is surfaced instead).
+`/groundtruth-setup` writes the one-line instruction that teaches your agent this form into your `CLAUDE.md`. Once it's there, the session is *contract-aware* and an omitted manifest becomes block-eligible — and because awareness is anchored on the **session baseline** (and the baseline file tree), an agent can't strip *or untrack* the instruction mid-turn to dodge the block — and an actual content removal is surfaced.
 
 ## The three findings
 
@@ -178,7 +178,7 @@ A verifier is only worth trusting if it documents its own misses. The contract e
 - `echo "npm test"` blessing a `tests_pass` that never ran; a red re-run laundered by an earlier green. *(C-3)*
 - A gitconfig with nonstandard diff prefixes silently poisoning every path on every turn. *(C-8)*
 
-Current standing: **453 engine checks + 180 contract checks** (633 self-checks total), and a live sandboxed adversarial harness at **red-team 27/27** — a throwaway repo, a genuinely hostile scripted agent, the real hook.
+Current standing: **453 engine checks + 180 contract checks** (633 self-checks total), and a live sandboxed adversarial harness at **red-team 28/28** — a throwaway repo, a genuinely hostile scripted agent, the real hook.
 
 The through-line: *abstain or degrade to a bounded warn outside the domain a check is provably correct in — never a clean green — and never let the audited agent shape its own verdict.*
 
