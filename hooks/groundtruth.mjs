@@ -38,7 +38,7 @@ import { checkDroppedSymbols, addedSymbolsByFile } from './symbol-integrity.mjs'
 // v2 claims contract — the DEFAULT honesty engine as of v2.0.0 (disable with GROUNDTRUTH_CONTRACT=0; the
 // diff-facing checks still run, but the retired v1 prose honesty layer is NOT restored). Pure module —
 // parse + validate + verify the agent's end-of-turn claims block against reality.
-import { buildReality, contractFindings, FENCE_TAG, SCHEMA_HELP } from './claims-contract.mjs';
+import { buildReality, contractFindings, analyze as analyzeContract, openDeferrals, FENCE_TAG, SCHEMA_HELP } from './claims-contract.mjs';
 
 const CLASS_NAME = { 1: 'false test/build claim', 2: 'stub/placeholder', 3: 'silent no-op', 4: 'phantom ref',
   6: 'dropped symbol (dangling ref)', 9: 'special-casing / overfit', async_done: 'false completion (async)',
@@ -1337,10 +1337,15 @@ export function parseTranscript(jsonlText, { includeSidechain = false } = {}) {
   // `seq` is a monotonic position over ALL tool_use blocks in transcript order. The transcript is the harness's
   // own append-ordered record — one of the two inputs the agent can't author — so the ordering is trustworthy.
   const bashEvents = [], mutations = [], byToolId = new Map();
+  const assistantTexts = [];   // every assistant message's text, in order — feeds the multi-turn deferral ledger
   let seq = 0;
   let bgLaunched = 0, bgDone = 0;                  // background tasks launched vs completed (async_done evidence)
   for (const e of entries) {
     const content = e.message?.content;
+    // Each ASSISTANT message's text (newline-preserving) — so the Stop hook can recover the claims block from
+    // EVERY past turn this session, not just the current one, and reconstruct the still-open deferral set
+    // (spec §6 multi-turn tracking, anchored on the transcript rather than a forgeable ledger).
+    if (e.type === 'assistant') { const at = textOf(content); if (at) assistantTexts.push(at); }
     // completion notices arrive as text ("<task-notification> … <status>completed")
     const asText = typeof content === 'string' ? content
       : Array.isArray(content) ? content.map(b => b?.type === 'text' ? (b.text || '') : '').join(' ') : '';
@@ -1408,7 +1413,7 @@ export function parseTranscript(jsonlText, { includeSidechain = false } = {}) {
       }
     }
   }
-  return { intent, asks, commandsInvoked, commandInvocations, bashCmds, mcpCmds, results, bashEvents, mutations, sidechainCmds, bgPending: bgLaunched > bgDone, toolDiff: toolDiffParts.join('\n'), mcpSql: mcpSqlParts.join('\n') };
+  return { intent, asks, commandsInvoked, commandInvocations, bashCmds, mcpCmds, results, bashEvents, mutations, sidechainCmds, assistantTexts, bgPending: bgLaunched > bgDone, toolDiff: toolDiffParts.join('\n'), mcpSql: mcpSqlParts.join('\n') };
 }
 
 /**
@@ -2510,6 +2515,16 @@ function main() {
         // commands the filtered SIDECHAINS ran → a tests_pass claim backed only by a subagent's run ABSTAINS
         // (not a block-tier "no such command ran"). (Fable adv FP-10.)
         sidechainCmds: parsed.sidechainCmds,
+        // MULTI-TURN deferrals (spec §6): reconstruct the still-OPEN set from EVERY past turn's contract in
+        // the transcript (the unforgeable record), so a declared set-aside can't silently vanish by being
+        // omitted next turn. The current turn's message is appended in case it hasn't flushed to the file yet.
+        openDeferrals: (() => {
+          const texts = [...(parsed.assistantTexts || [])];
+          const last = payload.last_assistant_message || '';
+          if (last && texts[texts.length - 1] !== last) texts.push(last);
+          const contracts = texts.map(t => analyzeContract(t)).filter(a => a && a.ok).map(a => a.contract);
+          return openDeferrals(contracts);
+        })(),
         // CONTRACT-AWARE? (baseline-anchored, computed above) → NC becomes BLOCK-eligible, closing the
         // "just don't declare" dodge. (Fable PR #2 review, Defect A.)
         contractInstruction,

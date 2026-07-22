@@ -8,7 +8,7 @@
 import assert from 'node:assert';
 import {
   analyze, parseContract, validateContract, verify, findClaimsBlock, isValidPath,
-  filesFromDiff, buildReality, contractFindings,
+  filesFromDiff, buildReality, contractFindings, openDeferrals,
   CONTRACT_VERSION, STATUSES, CLAIM_TYPES, FENCE_TAG, SCHEMA_HELP,
 } from './claims-contract.mjs';
 
@@ -380,6 +380,46 @@ ok('contractFindings: valid contract, clean reality → no findings', contractFi
   const msg = block(JSON.stringify({ v: 1, task: 't', status: 'partial', claims: [{ t: 'modified', file: 'a.mjs' }, { t: 'deferred', what: 'e2e tests', why: 'no staging env' }] }));
   const f = contractFindings(msg, { files: [{ status: 'M', path: 'a.mjs' }], commands: [] });
   ok('contractFindings: a declared deferral surfaces as a deferred finding', f.some(x => x.cls === 'deferred' && x.msg.includes('e2e tests')));
+  // multi-turn: when the Stop hook supplies reality.openDeferrals (the session-wide OPEN set), contractFindings
+  // surfaces THOSE — a deferral from an EARLIER turn shows even though THIS turn's contract didn't re-declare it.
+  const g = contractFindings(block(JSON.stringify({ v: 1, task: 't', status: 'complete', claims: [{ t: 'modified', file: 'a.mjs' }] })),
+    { files: [{ status: 'M', path: 'a.mjs' }], commands: [], openDeferrals: [{ what: 'e2e coverage', why: 'earlier turn' }] });
+  ok('contractFindings: reality.openDeferrals surfaces prior-turn deferrals (multi-turn §6)', g.some(x => x.cls === 'deferred' && x.msg.includes('e2e coverage')));
+}
+// ── openDeferrals: reconstruct the still-open deferral set across the session's contracts (spec §6) ──
+{
+  const Ct = (task, ...claims) => ({ v: 1, task, status: 'complete', claims });
+  const C = (...claims) => Ct('t', ...claims);
+  const d = (what, why = 'r') => ({ t: 'deferred', what, why });
+  const whats = (contracts) => openDeferrals(contracts).map(x => x.what);
+  ok('openDeferrals: a deferral from turn 1 STAYS OPEN when turn 2 omits it (the persistence fix)',
+    whats([C(d('add e2e coverage')), C({ t: 'modified', file: 'x.js' })]).join(',') === 'add e2e coverage');
+  ok('openDeferrals: two turns of deferrals accumulate', openDeferrals([C(d('a thing')), C(d('another thing'))]).length === 2);
+  ok('openDeferrals: dedupes by normalized `what`', openDeferrals([C(d('Fix The Retry')), C(d('fix the retry'))]).length === 1);
+  // closes only on VERIFIED work covering the (distinctive) key, token-bounded:
+  ok('openDeferrals: a CREATED file covering the multi-word `what` (token-bounded) CLOSES it',
+    openDeferrals([C(d('add e2e coverage')), C({ t: 'created', file: 'tests/add-e2e-coverage.spec.ts' })]).length === 0);
+  ok('openDeferrals: a run `cmd` covering the `what` CLOSES it',
+    openDeferrals([C(d('run smoke suite')), C({ t: 'tests_pass', cmd: 'npm run smoke suite' })]).length === 0);
+  ok('openDeferrals: unrelated later work does NOT false-close (bias to keep-open)',
+    openDeferrals([C(d('add e2e coverage')), C({ t: 'modified', file: 'README.md' }, { t: 'tests_pass', cmd: 'npm test' })]).length === 1);
+  ok('openDeferrals: re-declaring the same turn a matching claim appears KEEPS it open',
+    openDeferrals([C(d('add e2e coverage'), { t: 'created', file: 'tests/add-e2e-coverage.spec.ts' })]).length === 1);
+  // ── Fable PR #4 review: the four proven false-close leaks must NOT silently drop a set-aside ──
+  // A/D — the agent-authored `task` is UNVERIFIED, so echoing the `what` in a later turn's task must NOT close.
+  ok('openDeferrals (A): a task that echoes the `what` on a zero-work turn does NOT close',
+    whats([Ct('add auth', { t: 'modified', file: 'src/auth.js' }, d('e2e coverage')), Ct('explain the e2e coverage plan', { t: 'no_change' })]).join(',') === 'e2e coverage');
+  ok('openDeferrals (D): a blocked turn whose task equals the `what` does NOT close the original',
+    whats([C(d('e2e coverage')), Ct('add e2e coverage', d('staging env access'))]).length === 2);
+  // C — verify() abstains on `modified` symbols, so they are agent-assertable and must NOT close.
+  ok('openDeferrals (C): a `modified` claim\'s symbols do NOT close (unverified channel)',
+    whats([C(d('e2e coverage')), C({ t: 'modified', file: 'README.md', symbols: ['e2e coverage'] })]).join(',') === 'e2e coverage');
+  // B — a terse, generic `what` must not be dropped by an incidental same-named path.
+  ok('openDeferrals (B): terse `config` is NOT closed by an incidental src/config.js',
+    whats([C(d('config')), C({ t: 'modified', file: 'src/config.js' })]).join(',') === 'config');
+  ok('openDeferrals (B): terse `tests` is NOT closed by an incidental tests/other.fixture.json',
+    whats([C(d('tests')), C({ t: 'created', file: 'tests/other.fixture.json' })]).join(',') === 'tests');
+  ok('openDeferrals: empty / non-array input → []', openDeferrals(undefined).length === 0 && openDeferrals([]).length === 0);
 }
 
 // ── addedSymbolsByFile: the per-file symbol lexer that feeds buildReality().symbolsByFile ──

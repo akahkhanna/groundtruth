@@ -13,10 +13,10 @@ Design invariant, enforced in review: **a false positive is treated as fatal.** 
 ## Commands
 
 ```bash
-node hooks/groundtruth.test.mjs      # 453 engine unit checks, no deps, no framework
-node hooks/claims-contract.test.mjs  # 180 v2 claims-contract checks (same assert style)
-node hooks/redteam.mjs               # live adversarial harness (28 checks across sandboxed throwaway repos)
-npm test                             # runs BOTH unit files (453 engine + 180 contract = 633)
+node hooks/groundtruth.test.mjs      # 454 engine unit checks, no deps, no framework
+node hooks/claims-contract.test.mjs  # 194 v2 claims-contract checks (same assert style)
+node hooks/redteam.mjs               # live adversarial harness (29 checks across sandboxed throwaway repos)
+npm test                             # runs BOTH unit files (454 engine + 194 contract = 648)
 npm run check-self                   # engine checks, but echoes the exit code as a GREEN/RED done-verdict
 ```
 

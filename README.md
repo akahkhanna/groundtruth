@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/deterministic-no%20LLM%20%C2%B7%20no%20network%20%C2%B7%20no%20API%20key-111111?style=flat-square" alt="Deterministic: no LLM, no network, no API key">
   <img src="https://img.shields.io/badge/runs%20on-Claude%20Code-111111?style=flat-square" alt="Runs on Claude Code">
   <img src="https://img.shields.io/github/v/release/akahkhanna/groundtruth?style=flat-square&color=111111&label=release" alt="Release">
-  <img src="https://img.shields.io/badge/self--checks-453%20%2B%20180%20%C2%B7%20red--team%2028%2F28-111111?style=flat-square" alt="633 self-checks (453 engine + 180 contract), red-team 28/28">
+  <img src="https://img.shields.io/badge/self--checks-454%20%2B%20194%20%C2%B7%20red--team%2029%2F29-111111?style=flat-square" alt="648 self-checks (454 engine + 194 contract), red-team 29/29">
   <img src="https://img.shields.io/badge/license-MIT-111111?style=flat-square" alt="MIT license">
 </p>
 
@@ -178,7 +178,7 @@ A verifier is only worth trusting if it documents its own misses. The contract e
 - `echo "npm test"` blessing a `tests_pass` that never ran; a red re-run laundered by an earlier green. *(C-3)*
 - A gitconfig with nonstandard diff prefixes silently poisoning every path on every turn. *(C-8)*
 
-Current standing: **453 engine checks + 180 contract checks** (633 self-checks total), and a live sandboxed adversarial harness at **red-team 28/28** — a throwaway repo, a genuinely hostile scripted agent, the real hook.
+Current standing: **454 engine checks + 194 contract checks** (648 self-checks total), and a live sandboxed adversarial harness at **red-team 29/29** — a throwaway repo, a genuinely hostile scripted agent, the real hook.
 
 The through-line: *abstain or degrade to a bounded warn outside the domain a check is provably correct in — never a clean green — and never let the audited agent shape its own verdict.*
 

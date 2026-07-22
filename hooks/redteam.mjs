@@ -292,6 +292,21 @@ try {
     /GROUNDTRUTH_BLOCK=1 to halt/.test(k14), k14.slice(0, 400));
   git(['add', 'CLAUDE.md']); git(['rm', '-q', '--ignore-unmatch', 'CLAUDE.md']); git(['commit', '-qm', 'drop']); kreset();
 
+  // K12 — §6 multi-turn deferrals: a deferral declared on an EARLIER turn STAYS on the later turn's card even
+  // when that turn's manifest omits it — it can no longer silently vanish. Reconstructed from the transcript
+  // (the unforgeable record), not a forgeable ledger.
+  const asstln = (text) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
+  writeFileSync(join(repo, 'real.js'), 'export const v = 20;\n');
+  const t1 = 'Partial.\n' + kblock({ v: 1, task: 'add auth', status: 'partial', claims: [{ t: 'modified', file: 'real.js' }, { t: 'deferred', what: 'e2e coverage', why: 'needs staging' }] });
+  const t2 = 'Tidied.\n' + kblock({ v: 1, task: 'tidy', status: 'complete', claims: [{ t: 'modified', file: 'real.js' }] });
+  const k12 = driveClean('k12', t2, [
+    userln('add auth'), asstln(t1), writeln(join(repo, 'real.js'), 'export const v = 20;\n'),
+    userln('tidy up'), asstln(t2), writeln(join(repo, 'real.js'), 'export const v = 20;\n'),
+  ]);
+  check('contract: a prior-turn deferral still shows on a later turn card (§6 persistence, not silent vanish)',
+    /e2e coverage/i.test(k12) && /deferral/i.test(k12), k12.slice(0, 400));
+  kreset();
+
   delete process.env.GROUNDTRUTH_CONTRACT;
 } finally { rmSync(repo, { recursive: true, force: true }); }
 

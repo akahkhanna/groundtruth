@@ -578,7 +578,7 @@ function relativize(p, cwd) {
  * test/build claims. An empty array means a transcript with no commands (a real "nothing ran"). This
  * distinction is why a truthful `tests_pass` on the fail-open path is no longer a false CA. (Fable finding 3.)
  */
-export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile = undefined, excluded = () => false, cwd = '', authored = undefined, lastEditSeq = undefined, untracked = undefined, sidechainCmds = undefined, contractInstruction = false } = {}) {
+export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile = undefined, excluded = () => false, cwd = '', authored = undefined, lastEditSeq = undefined, untracked = undefined, sidechainCmds = undefined, openDeferrals = undefined, contractInstruction = false } = {}) {
   const commands = bashEvents === undefined ? undefined : (bashEvents || [])
     .filter(e => e && typeof e.cmd === 'string')
     .map(e => ({
@@ -613,7 +613,7 @@ export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile 
   } else if (authoredSet) {
     for (const p of authoredSet) if (p && !seen.has(p)) files.push({ status: 'A', path: p });
   }
-  return { files, commands, symbolsByFile, excluded, authored: authoredSet, lastEditSeq, sidechainCmds, contractInstruction };
+  return { files, commands, symbolsByFile, excluded, authored: authoredSet, lastEditSeq, sidechainCmds, openDeferrals, contractInstruction };
 }
 
 // Contract-finding severities. NC is WARN unless the session is CONTRACT-AWARE — i.e. an instruction doc
@@ -662,11 +662,63 @@ export function contractFindings(message, reality = {}) {
     return [{ cls: 'NC', sev: ncSev, msg: `no valid ${FENCE_TAG} block — ${a.errors[0] || 'missing'}` }];
   }
   const out = verify(a.contract, reality).findings.map(f => ({ cls: f.cls, sev: f.sev, msg: f.msg }));
-  // Surface DECLARED deferrals as the task ledger's replacement (spec §6: declaration, not prose extraction).
-  // Warn-tier + honest — the agent named what it set aside, so it's visible, never silent (mirrors v1's
-  // human-confirmed deferral line). A deferral stays the agent's own admission, not a caught lie.
-  for (const c of a.contract.claims) {
-    if (c.t === 'deferred') out.push({ cls: 'deferred', sev: 'warn', msg: `deferred (declared) — ${c.what}${c.why ? ` — ${c.why}` : ''}` });
-  }
+  // Surface DECLARED deferrals (spec §6: declaration, not prose extraction). Warn-tier + honest — the agent
+  // named what it set aside, so it's visible, never silent (mirrors v1's human-confirmed deferral line).
+  // MULTI-TURN: if the Stop hook supplies `reality.openDeferrals` (the session-wide OPEN set reconstructed from
+  // the transcript), surface THAT — a deferral declared on an earlier turn stays visible until closed, so it
+  // can't silently vanish by being omitted next turn. Absent it (pure-unit path), fall back to THIS turn's
+  // deferrals (unchanged single-turn behavior).
+  const deferredSrc = Array.isArray(reality.openDeferrals)
+    ? reality.openDeferrals
+    : a.contract.claims.filter(c => c && c.t === 'deferred');
+  for (const d of deferredSrc) out.push({ cls: 'deferred', sev: 'warn', msg: deferralMsg(d) });
   return out;
+}
+
+// Consistent card line for a deferral (both the single-turn and multi-turn paths render identically).
+export const deferralMsg = (d) => `deferred (declared) — ${d.what}${d.why ? ` — ${d.why}` : ''}`;
+
+// Reconstruct the still-OPEN deferrals across the session from the ordered list of past+current CONTRACTS
+// (parsed from the transcript — the unforgeable harness record, so a declared set-aside can't silently vanish
+// by omission next turn; restores spec §6's multi-turn tracking WITHOUT a forgeable ledger — the v1 tasks.json
+// was agent-writable, exactly what v2 rejects). Keyed by the normalized `what`.
+//
+// A deferral CLOSES only when a later turn's VERIFIED work covers it, and only for a distinctive key — because
+// a false close SILENTLY DROPS a real open loop (the bad direction), whereas a missed close leaves a harmless
+// stale warn. So closure uses ONLY verify()-grounded channels: `file`/`from`/`to` (checked by the CA pass),
+// `cmd` (checked by the run sensors), and `symbols` ONLY from a `created` claim (the one case verify grounds
+// symbols — it deliberately abstains on `modified` symbols, so those are agent-assertable and must NOT close).
+// The turn's `task` is EXCLUDED entirely: it is the agent-authored ASK, never verified, so an agent (or a Q&A
+// turn that merely echoes the phrase) could vanish a set-aside for free. The key must be distinctive (≥2 words
+// or ≥8 chars) and match on TOKEN boundaries, so a terse `what` like "config"/"tests" isn't dropped by an
+// incidental same-named path. (All four false-close leaks Fable's PR #4 review proved: A/D task, C modified-
+// symbols, B short-key.) Session-scoped by construction. Pure → directly unit-testable.
+// Residual (accepted, warn-tier): a fully-VALID `groundtruth-claims` block QUOTED as an example in a past
+// assistant message parses as a real contract (the FP-9 last-valid-block residual), so its `deferred` claims
+// become phantom open-loops. The multi-turn path amplifies this from "current message" to "any past message,"
+// but it only ever adds a warn-tier card line (never a block), and an honest turn's real block is normally the
+// last one. Not chased here. (Fable PR #4 review, concern 3.)
+const nlow = (s) => String(s == null ? '' : s).trim().toLowerCase().replace(/\s+/g, ' ');
+const toks = (s) => ' ' + nlow(s).replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim() + ' ';   // ' tok tok '
+export function openDeferrals(contracts) {
+  const open = new Map();   // key: normalized `what` → { what, why }
+  for (const c of (Array.isArray(contracts) ? contracts : [])) {
+    const claims = Array.isArray(c && c.claims) ? c.claims : [];
+    // (1) close a deferral only when this turn's VERIFIED work covers it (token-bounded, distinctive key only).
+    const done = claims
+      .filter(x => x && x.t !== 'deferred' && x.t !== 'no_change')
+      .flatMap(x => [x.file, x.from, x.to, x.cmd, ...(x.t === 'created' && Array.isArray(x.symbols) ? x.symbols : [])])
+      .filter(isNonEmptyStr).map(toks);
+    for (const key of [...open.keys()]) {
+      const kt = toks(key).trim();                          // ' key tokens '
+      const words = kt ? kt.split(' ') : [];
+      if (words.length < 2 && kt.length < 8) continue;      // too generic → keep open (never silently drop)
+      if (done.some(d => d.includes(' ' + kt + ' '))) open.delete(key);
+    }
+    // (2) open / refresh deferrals declared this turn — re-declaring KEEPS it open even if (1) just matched.
+    for (const x of claims) {
+      if (x && x.t === 'deferred' && isNonEmptyStr(x.what)) open.set(nlow(x.what), { what: x.what, why: isNonEmptyStr(x.why) ? x.why : '' });
+    }
+  }
+  return [...open.values()];
 }

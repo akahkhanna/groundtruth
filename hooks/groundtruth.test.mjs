@@ -200,6 +200,18 @@ ok('claimsSuccess: plain claim true; hedged/negated false; quoted false',
     pt.mutations.length === 1 && /Math\.round/.test(pt.mutations[0].text) && !/keep/.test(pt.mutations[0].text));
   ok('back-compat: the flat bashCmds/results arrays are unchanged in shape and content',
     pt.bashCmds.join(',') === 'npm test,npm run lint' && pt.results.length === 2 && pt.results[1].is_error === true);
+  // §6 multi-turn deferrals: parseTranscript collects EVERY assistant message's text (newline-preserving), so
+  // the Stop hook can recover the claims block from each past turn and reconstruct the open-deferral set.
+  {
+    const M = [
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Turn one.\nline two' }] } }),
+      JSON.stringify({ type: 'user', message: { content: [{ type: 'text', text: 'next' }] } }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Turn two.' }] } }),
+    ].join('\n');
+    const at = parseTranscript(M).assistantTexts;
+    ok('parseTranscript: assistantTexts captures each assistant turn in order, newline-preserving',
+      at.length === 2 && at[0] === 'Turn one.\nline two' && at[1] === 'Turn two.');
+  }
   // C-8 (Fable adv FN-4): the PAIRED run text is DECODED (real newlines), not JSON.stringify'd — otherwise the
   // contract's line-anchored failure banner (`(?:^|\n)FAIL`) is unreachable in production and pytest/jest/go
   // banners on a zero-exit run go silently uncaught. Pin: a line-START banner survives the parse verbatim.
