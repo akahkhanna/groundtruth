@@ -370,5 +370,12 @@ export function contractFindings(message, reality = {}) {
     // NC: surface the first concrete reason (not the whole SCHEMA_HELP block — that goes to the block handback).
     return [{ cls: 'NC', sev: SEV_NC, msg: `no valid ${FENCE_TAG} block — ${a.errors[0] || 'missing'}` }];
   }
-  return verify(a.contract, reality).findings.map(f => ({ cls: f.cls, sev: f.sev, msg: f.msg }));
+  const out = verify(a.contract, reality).findings.map(f => ({ cls: f.cls, sev: f.sev, msg: f.msg }));
+  // Surface DECLARED deferrals as the task ledger's replacement (spec §6: declaration, not prose extraction).
+  // Warn-tier + honest — the agent named what it set aside, so it's visible, never silent (mirrors v1's
+  // human-confirmed deferral line). A deferral stays the agent's own admission, not a caught lie.
+  for (const c of a.contract.claims) {
+    if (c.t === 'deferred') out.push({ cls: 'deferred', sev: 'warn', msg: `deferred (declared) — ${c.what}${c.why ? ` — ${c.why}` : ''}` });
+  }
+  return out;
 }

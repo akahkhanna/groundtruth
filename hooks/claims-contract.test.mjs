@@ -234,6 +234,12 @@ ok('contractFindings: valid contract, clean reality → no findings', contractFi
   ok('contractFindings: shape is engine-native {cls,sev,msg}', f.every(x => x.cls && x.sev && x.msg));
   ok('contractFindings: undeclared surprise.mjs → UC', f.some(x => x.cls === 'UC' && x.msg.includes('surprise.mjs')));
 }
+{
+  // a declared deferral surfaces (the task-ledger replacement) — visible, warn-tier, never silent
+  const msg = block(JSON.stringify({ v: 1, task: 't', status: 'partial', claims: [{ t: 'modified', file: 'a.mjs' }, { t: 'deferred', what: 'e2e tests', why: 'no staging env' }] }));
+  const f = contractFindings(msg, { files: [{ status: 'M', path: 'a.mjs' }], commands: [] });
+  ok('contractFindings: a declared deferral surfaces as a deferred finding', f.some(x => x.cls === 'deferred' && x.msg.includes('e2e tests')));
+}
 
 // ── addedSymbolsByFile: the per-file symbol lexer that feeds buildReality().symbolsByFile ──
 {

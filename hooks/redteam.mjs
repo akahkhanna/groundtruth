@@ -84,11 +84,14 @@ try {
   check('an untracked Bash-written AWS key is flagged (git diff empty, no Write tool call)', /AWS access key/i.test(d7), d7.slice(0, 240));
   rmSync(join(repo, 'cfg.js'), { force: true });
 
-  console.log('\n── Scenario E — forged ledger (D2): status:"done" over an absent file is recomputed to PENDING ──');
+  console.log('\n── Scenario E — v2: a CLAIMED deliverable that never landed is caught as CA (replaces the forged-ledger recompute) ──');
+  // v1 minted a task from the prose ask and refused to trust a forged status:"done"; v2 gets the same
+  // guarantee more directly — the agent DECLARES created parser.js, and CA proves it absent from the diff.
   baseline('d2');
-  writeFileSync(join(gtDir, 'd2.tasks.json'), JSON.stringify([{ id: 't1', task: 'build the parser in parser.js', deliverable: ['parser.js'], status: 'done' }]));
-  const d2 = driveClean('d2', 'Done.', [JSON.stringify({ type: 'user', promptSource: 'sdk', message: { content: [{ type: 'text', text: 'build the parser in parser.js' }] } })]);
-  check('a forged status:"done" with the file absent is recomputed to pending (not trusted as green)', /Tasks — \d+ pending/.test(d2) && !/every ask that named a deliverable is delivered/.test(d2), d2.slice(0, 240));
+  const d2 = driveClean('d2', 'Done — built the parser.\n```groundtruth-claims\n'
+    + JSON.stringify({ v: 1, task: 'build the parser', status: 'complete', claims: [{ t: 'created', file: 'parser.js' }] }) + '\n```',
+    [JSON.stringify({ type: 'user', promptSource: 'sdk', message: { content: [{ type: 'text', text: 'build the parser in parser.js' }] } })]);
+  check('a claimed created file that is absent from the diff is caught as CA (not trusted as done)', /claimed but absent[^\n]*parser\.js/i.test(d2), d2.slice(0, 240));
 
   console.log('\n── Scenario F — D9: an OUT-OF-BAND (Bash) flip of config.json is caught by the SIGNED SessionStart hash snapshot ──');
   // Phase 4: the LOUD out-of-band catch lives in the TRUSTWORTHY regime — a signed snapshot under a key held

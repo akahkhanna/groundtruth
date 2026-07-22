@@ -3219,27 +3219,10 @@ function main() {
     findings.push({ cls: 'tamper', sev: envBlock ? 'block' : 'warn',
       msg: 'no session baseline AND a commit ran this session — committed work is invisible to every check (the hook is diffing against HEAD); ensure the SessionStart hook ran, or restore the deleted baseline.json' });
 
-  // Task ledger — the PERSISTENT contract memory (one ledger per session). Accumulates a task per user
-  // ask that names a deliverable, marks it DONE only when the deliverable GROUNDS in the diff (never by
-  // the agent's say-so — an acknowledgment can't close it), and DRIVES the pending ones: if the agent
-  // CLAIMS completion while tasks are still pending, those flip to BLOCK so the remediation loop
-  // re-presents them (retry cap → escalate, so a crude false-pending can't wedge); otherwise warn,
-  // persistently visible. Answers "agent acknowledged and moved on" + "user wouldn't know what's done".
-  const taskFile = join(cwd, '.claude', 'groundtruth', `${payload.session_id || 'session'}.tasks.json`);
-  let priorTasks = []; try { priorTasks = JSON.parse(readFileSync(taskFile, 'utf8')); } catch {}
-  // Honor only deferrals the USER typed (`defer <id>` in a real turn) — an agent-written 'deferred',
-  // in tasks.json or anywhere, is re-opened to pending. The lever an agent could forge is gone.
-  const ledger = applyConfirmedDeferrals(updateTaskLedger(priorTasks, parsed.asks || [], diff), humanDeferrals(parsed.asks || []));
-  // Open-loop surfacing (Phase 6): nag-once + per-token done-match + tiers, via the pure surfaceOpenLoop.
-  const surfaced = ledger.map(t => surfaceOpenLoop(t, payload.last_assistant_message || ''));
-  const tasks = surfaced.map(s => s.task);                    // next-state to persist (surfaced/age/stale)
-  for (const s of surfaced) if (s.finding) findings.push(s.finding);
-  try { writeFileSync(taskFile, JSON.stringify(tasks, null, 2) + '\n'); } catch {}
-  // What remains 'deferred' here is human-confirmed (the agent can't reach this state), so it's a
-  // legitimate set-aside — surfaced for transparency at warn, never silent, never blocking.
-  for (const t of tasks.filter(x => x.status === 'deferred'))
-    findings.push({ cls: 'deferred', sev: 'warn',
-      msg: `deferred (human-confirmed) — "${t.task}"${t.note ? ` — "${String(t.note).slice(0, 70)}"` : ''}` });
+  // Completeness (v2): the prose task ledger is retired. The contract's own passes cover it deterministically
+  // — UC catches a change the agent didn't declare, CA catches a declared deliverable that never landed, and
+  // a `deferred` claim surfaces (above, via contractFindings) as the agent's declared set-aside. No prose
+  // extraction, no persisted tasks.json to forge — declaration replaces guessing (spec §6).
 
   // Procedural compliance: did the agent follow this project's declared step-procedures (required /
   // forbidden / ordered commands) over its tool calls? Grounded in the transcript order, no LLM.
