@@ -200,6 +200,18 @@ ok('claimsSuccess: plain claim true; hedged/negated false; quoted false',
     pt.mutations.length === 1 && /Math\.round/.test(pt.mutations[0].text) && !/keep/.test(pt.mutations[0].text));
   ok('back-compat: the flat bashCmds/results arrays are unchanged in shape and content',
     pt.bashCmds.join(',') === 'npm test,npm run lint' && pt.results.length === 2 && pt.results[1].is_error === true);
+  // C-8 (Fable adv FN-4): the PAIRED run text is DECODED (real newlines), not JSON.stringify'd — otherwise the
+  // contract's line-anchored failure banner (`(?:^|\n)FAIL`) is unreachable in production and pytest/jest/go
+  // banners on a zero-exit run go silently uncaught. Pin: a line-START banner survives the parse verbatim.
+  {
+    const B = [
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'p1', name: 'Bash', input: { command: 'pytest' } }] } }),
+      JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'p1', is_error: false, content: [{ type: 'text', text: 'collected 3 items\nFAILED tests/test_x.py::t - assert 1 == 2' }] }] } }),
+    ].join('\n');
+    const bt = parseTranscript(B).bashEvents[0].text;
+    ok('paired run text is DECODED (real newline present, not the 2 chars backslash-n)', bt.includes('\n') && !bt.includes('\\n'));
+    ok('a line-START runner banner is reachable in the decoded text (production sensor can match it)', /(?:^|\n)FAILED\b/.test(bt));
+  }
   // (v1 class-1 stale-green/exit-attribution end-to-end assertions on this transcript retired with class-1;
   // the stale-green sensor now lives in the contract — see claims-contract.test.mjs.)
   ok('transcript WITHOUT ids (predates v1.1.0 / foreign harness): events stay UNPAIRED (is_error:null) → checks abstain',

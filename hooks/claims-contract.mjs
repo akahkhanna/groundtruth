@@ -220,7 +220,17 @@ const norm = (p) => String(p == null ? '' : p).trim().replace(/\\/g, '/').replac
 
 // A command that merely MENTIONS a test cmd in a string/echo/grep is not a run of it — blessing `echo "npm
 // test would pass"` (exit 0) as evidence for `tests_pass:{cmd:"npm test"}` is a false green. (Fable finding 5.)
-const LOOKALIKE_RE = /^\s*(?:echo|printf|cat|grep|rg|ag|ls|head|tail|sed|awk|:|true|false|#)\b/;
+// A command whose LEADING word only PRINTS/SEARCHES its arg (never runs it). Two clauses: word-shaped names
+// carry a `\b`; the SYMBOL builtins `:` (no-op) and `#` (comment) can't use `\b` (a `#`/`:`→space gap is not a
+// word boundary — the old `|:|…|#)\b` was DEAD, so `# npm test` and `: "npm test"` laundered a never-run claim
+// into a pass), so they match `#`/`:` followed by space/end. (Fable adversarial FN-3.)
+const LOOKALIKE_RE = /^\s*(?:echo|printf|cat|grep|rg|ag|ls|head|tail|sed|awk|true|false)\b|^\s*[#:](?:\s|$)/;
+// Interpreters that EXECUTE a quoted string as a command — ONLY these turn a QUOTED occurrence of `want` into
+// a real run. `bash -c "npm test"` runs the tests; `git grep "npm test"`, `git log --grep "npm test"`,
+// `find -name "npm test"`, `: "npm test"` merely MENTION the string — they must neither bless nor condemn the
+// claim. The old segment path tested the raw (un-masked) text, so any quoted mention counted as a run → an
+// honest `git grep "npm test"` (exit 1) forced a block-tier CA. (Fable adversarial FP-1 / FN-1.)
+const INTERP_RE = /(?:^|[\s;&|])(?:ba|z|da|a|k|c|tc)?sh\b[^"'\n]*?\s-[a-z]*c\b/i;
 
 // Does a tests_pass/build_pass claim's cmd correspond to a command that actually ran? Quoted substrings are
 // masked to SAME-LENGTH spaces ONLY to locate the unquoted `&& || ; |` split points (so an operator inside a
@@ -243,7 +253,11 @@ const SHELL_SEG_RE = /&&|\|\|?|;|\n/;
 // PASSING node:test run) and MISSED pytest's real `FAILED` banner (\b after FAIL rejects the trailing ED).
 // A false "your green output reports failures" on an honest run is exactly the FP this warn tier must not emit.
 const TEST_FAIL_RE = /\b[1-9]\d*\s+(?:failing|failed|failures?)\b|\b[1-9]\d*\s+tests?\s+(?:failed|failing)\b|\bAssertionError\b|\bnot ok \d|Tests?:\s*[1-9]\d*\s+(?:failed|failing)|#\s*fail\s+[1-9]|---\s*FAIL:|test result:\s*FAILED|\b\d+\s+examples?,\s*[1-9]\d*\s+failures?|Tests run:\s*\d+,\s*Failures:\s*[1-9]|\bpanicked\b/i;
-const TEST_FAIL_BANNER_RE = /(?:^|\s)FAIL(?:ED)?\b/;   // case-sensitive: real runner banners are uppercase
+// case-sensitive AND line-anchored: real runner banners (jest `FAIL src/x`, pytest `FAILED …`, go `FAIL\tpkg`)
+// sit at the START of a line. A mid-line `FAILED` is prose/log noise, not a verdict — a passing test TITLED
+// "FAILED to connect (now fixed)" or an app log "request FAILED (expected)" echoed in green output must NOT
+// fire. Requires the decoded (real-newline) run text from parseTranscript. (Fable adversarial FP-7.)
+const TEST_FAIL_BANNER_RE = /(?:^|\n)FAIL(?:ED)?\b/;
 const GENERIC_FILTER_RE = /\s(?:--grep|--test-?name-?patterns?)(?:[= ]\S|$)/i;
 const RUNNER_FILTERS = [
   [/\bpytest\b|\btox\b/, /\s-k[= ]\S/], [/\bgo test\b/, /\s-run[= ]\S/], [/\bjest\b|\bvitest\b/, /\s-t[= ]\S/],
@@ -268,13 +282,25 @@ function commandRun(commands, cmd) {
     // lookalike. Handles a COMPOUND declared cmd (`tsc && npm test`) the segment split can't, and an exact
     // simple run; the lookalike + mask guards exclude `grep "…npm test…" f` and `echo "npm test"`.
     if (containsCmd(norm(masked), want) && !LOOKALIKE_RE.test(norm(masked))) return true;
-    // B — segment match: a simple declared cmd invoked inside a compound run whose other segments are lookalikes
-    // (`echo start && npm test`) or a real invocation INSIDE quotes (`bash -c "npm test"`). Split at the UNQUOTED
-    // operators (found in `masked`), then test each segment's ORIGINAL text so a quoted real run isn't erased.
+    // B — segment match: a simple declared cmd invoked inside a compound run. Split at the UNQUOTED operators
+    // (found in `masked`), then classify each segment two ways:
+    //   B1 — `want` appears UNQUOTED in the segment (`echo start && npm test`) and it's not a lookalike → run.
+    //   B2 — `want` appears only QUOTED, but a shell `-c` INTERPRETER runs it (`bash -c "npm test"`) → run.
+    // A quoted `want` under a non-interpreter (grep/find/:/#) matches NEITHER — so a mention neither blesses
+    // nor condemns. (Fable adversarial FP-1 / FN-1 / FN-3.)
     const segs = []; let start = 0, m; SPLIT_OP.lastIndex = 0;
     while ((m = SPLIT_OP.exec(masked)) !== null) { segs.push(raw.slice(start, m.index)); start = m.index + m[0].length; }
     segs.push(raw.slice(start));
-    return segs.some(seg => { const s = norm(seg); return containsCmd(s, want) && !LOOKALIKE_RE.test(s); });
+    return segs.some(seg => {
+      const s = norm(seg), ms = norm(seg.replace(/"[^"]*"|'[^']*'/g, (q) => ' '.repeat(q.length)));
+      const head = s.replace(/^(?:\w+=\S+\s+)*/, '');   // drop leading env-assignments (`CI=1 pytest …`)
+      // A0 — `want` IS the command at this segment's command position (token-bounded). Covers an exact run
+      // whose OWN command carries quotes (`pytest -k "not slow"`), which the quote-mask would otherwise hide.
+      if (head.startsWith(want) && (head.length === want.length || /[^\w:.-]/.test(head[want.length]))) return true;
+      if (containsCmd(ms, want) && !LOOKALIKE_RE.test(ms)) return true;    // B1 — unquoted invocation mid-segment
+      if (containsCmd(s, want) && INTERP_RE.test(s)) return true;          // B2 — quoted, under a shell -c
+      return false;
+    });
   });
 }
 
@@ -478,8 +504,12 @@ export function filesFromDiff(diff) {
     if (cur) {
       if (line.startsWith('new file mode')) cur.added = true;
       else if (line.startsWith('deleted file mode')) cur.deleted = true;
-      else if (line.startsWith('rename from ')) cur.rFrom = stripAB(unquotePath(line.slice(12).trim()));
-      else if (line.startsWith('rename to ')) cur.rTo = stripAB(unquotePath(line.slice(10).trim()));
+      // git's `rename from`/`rename to` lines are NEVER a/ b/-prefixed (unlike the `--- `/`+++ ` header pair),
+      // so stripAB must NOT run here — it silently mangles a real leading `a/`/`b/` DIRECTORY (a repo with a
+      // top-level dir literally named `a` or `b`): `rename from a/x.js` → `x.js` → the honest rename claim
+      // reads as unsupported → block-tier CA + a UC on the mangled path. (Fable adversarial FP-2.)
+      else if (line.startsWith('rename from ')) cur.rFrom = unquotePath(line.slice(12).trim());
+      else if (line.startsWith('rename to ')) cur.rTo = unquotePath(line.slice(10).trim());
     }
     prevMinus = false;
   }
@@ -558,8 +588,14 @@ export function contractFindings(message, reality = {}) {
     // (Fable finding 6). Scope matches UC: authored files if we have the ledger, else the whole diff.
     const files = Array.isArray(reality.files) ? reality.files : [];
     const authored = reality.authored;   // Set | undefined
-    const declarable = authored === undefined ? files
-      : files.filter(f => authored.has(norm(f.path)) || (f.status === 'R' && authored.has(norm(f.from))));
+    // Mirror the UC pass's exclusion: a path GroundTruth would never audit (an out-of-repo /tmp scratch file,
+    // node_modules, a build artifact) is not something the agent could declare, so its presence must not force
+    // an NC nag on an otherwise read-only turn. The UC pass filtered it; NC didn't — a Q&A turn whose only
+    // Write was `/tmp/scratch/calc.py` got nagged. (Fable adversarial FP-4.)
+    const excluded = typeof reality.excluded === 'function' ? reality.excluded : () => false;
+    const declarable = (authored === undefined ? files
+      : files.filter(f => authored.has(norm(f.path)) || (f.status === 'R' && authored.has(norm(f.from)))))
+      .filter(f => !excluded(norm(f.path)));
     if (declarable.length === 0) return [];
     // NC: surface the first concrete reason (not the whole SCHEMA_HELP block — that goes to the block handback).
     return [{ cls: 'NC', sev: SEV_NC, msg: `no valid ${FENCE_TAG} block — ${a.errors[0] || 'missing'}` }];

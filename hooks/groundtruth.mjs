@@ -1362,7 +1362,12 @@ export function parseTranscript(jsonlText, { includeSidechain = false } = {}) {
         // Pair the result back to its Bash call. Unmatched ids (a subagent's, a non-Bash tool's) just miss the
         // map — the flat `results` above keeps them for the legacy substring sensors.
         const ev = b.tool_use_id != null ? byToolId.get(b.tool_use_id) : undefined;
-        if (ev) { ev.is_error = b.is_error === true; ev.text = JSON.stringify(b.content || ''); }
+        // DECODE the paired run output (not JSON.stringify): the contract's failure-substring sensor reads
+        // `ev.text` and matches LINE-ANCHORED runner banners (jest `FAIL src/x`, pytest `FAILED …`, `not ok`).
+        // Stringified, real newlines become the 2 chars `\n` and every line-start banner is preceded by `"`/`n`
+        // → the whole banner tier was silently INERT on the production path (unit tests pass raw text, so they
+        // never saw it). Count-anchored alternatives ("Tests: 3 failed") survive either way. (Fable adv FN-4.)
+        if (ev) { ev.is_error = b.is_error === true; ev.text = textOf(b.content); }
       }
     }
   }
@@ -2018,6 +2023,14 @@ function main() {
     try { return execSync(`git ${args}`, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); }
     catch { return ''; }
   };
+  // Pin the diff PREFIX config on every `git diff` we parse. A user's gitconfig can set diff.mnemonicPrefix
+  // (emits `c/ w/i/ …` instead of `a/ b/`), diff.noprefix (no prefix at all), or custom diff.srcPrefix/
+  // dstPrefix — any of which makes `stripAB`/the header parser mis-read EVERY path, so an honest claim gets
+  // a block-tier CA "absent from the diff" and its file also shows as an undeclared UC. That silently poisons
+  // every verdict for a whole config population (Fable adversarial FP-3). Force the canonical a/ b/ form (and
+  // pin quotePath/color so decode + parse stay deterministic regardless of the ambient config).
+  const DIFF_CFG = '-c diff.mnemonicPrefix=false -c diff.noprefix=false -c diff.srcPrefix=a/ -c diff.dstPrefix=b/ -c core.quotePath=true -c color.diff=never';
+  const gitDiffCfg = (rest, cwd) => git(`${DIFF_CFG} diff ${rest}`, cwd);
   // Shared searcher for the Class-6 dangling-ref check (used by BOTH the Stop path and the pre-commit
   // path). `-E` POSIX ERE (not `-P` — PCRE isn't guaranteed, and a `-P` error would throw → fail-open →
   // silently inert; the real receiver-gated classification is done in JS). It MUST distinguish `git grep`'s
@@ -2084,7 +2097,7 @@ function main() {
   // chat (no Stop hook ever fired for a manual paste), so the commit is where it gets caught.
   if (process.argv.includes('--pre-commit')) {
     const cwd = process.env.CLAUDE_PROJECT_DIR || process.cwd();
-    const diff = git('diff --cached', cwd);
+    const diff = gitDiffCfg('--cached', cwd);
     if (!diff.trim()) process.exit(0);
     const findings = analyze({ claim: '', diff, cwd }).concat(runCompiledRules(diff, loadCompiledRules(cwd)))
       .concat(collectEnv((a) => git(a, cwd)))
@@ -2130,7 +2143,7 @@ function main() {
         process.exit(2);
       }
     }
-    const diff = git(`diff ${dr.range}`, cwd);
+    const diff = gitDiffCfg(dr.range, cwd);
     const findings = analyze({ claim: '', diff, cwd }).concat(runCompiledRules(diff, loadCompiledRules(cwd)))
       .concat(checkDroppedSymbols({ claim: '', diff, asks: [], grepTree: mkGrepTree(cwd, { tree: dr.head }), requireClaim: false }));
     if (!findings.length) { process.stderr.write(`🟢 Groundtruth: ${dr.range} clean.\n`); process.exit(0); }
@@ -2323,7 +2336,7 @@ function main() {
     baseline = JSON.parse(readFileSync(join(cwd, '.claude', 'groundtruth', `${payload.session_id}.baseline.json`), 'utf8'));
   } catch { /* no baseline */ }
   const baseRef = baseline?.startRef || 'HEAD';
-  let diff = git(`diff ${baseRef}`, cwd);
+  let diff = gitDiffCfg(baseRef, cwd);
   const gitOnlyDiff = diff;   // capture BEFORE the tool-ledger/untracked merge — AG-B/AG-C need real -/+ pairing
 
   let parsed = { intent: '', bashCmds: [], results: [] };
