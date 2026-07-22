@@ -380,6 +380,87 @@ export function claimsSuccess(claim = '') {
   }
   return false;
 }
+
+// The claim gate for the prose fallback below — a faithful port of v1's `_passClaim`, NOT a reuse of
+// `claimsSuccess`. `claimsSuccess`/`SUCCESS_CLAIM_RE` is deliberately BROAD (it matches bare `done`/`fixed`/
+// `works` because it only ever GATES gaming heuristics that ALSO require diff/skip evidence). Used standalone
+// it fabricated a "passing test/build" claim on every honest closing — "Fixed the failing test.", "Done —
+// updated the CI config." — the fatal FP class. The correct shape is v1's: a test/build NOUN followed, in the
+// same clause, by a pass-VERDICT verb (pass(ed/es)/green/succeeded/verified/all clean — NOT a completion verb).
+// Guards ported so the deliberate v1 protections aren't dropped: quote-blanking (stripQuotedForClaim),
+// negation/hedge (CLAIM_HEDGE_RE), modal-requirement ("must/should/if … pass" is a requirement, not a result),
+// reported speech (someone ELSE said the tests pass), and a noun-stage guard for the one ambiguous verdict —
+// bare "pass" ("the tests needed another pass" is a STAGE, not a verdict; inflected/other verdicts are
+// unambiguous). Known v1 ceiling kept: a test/build noun read as a subject directly before bare "pass" ("a
+// final lint pass") can still fire — surface-identical to "lint passes" without a parser; warn-tier residual.
+// (Fable re-review: reuse of SUCCESS_CLAIM_RE both over-fired on completion verbs AND dropped v1's verdict verbs.)
+const PASS_NOUN = String.raw`(?:tests?|test\s*suite|builds?|lint(?:ing|er)?|type-?check(?:ing|s)?|specs?|coverage|ci|pipeline|suites?)`;
+const PASS_VERB = String.raw`(?:pass(?:e[ds])?|green|succeed(?:ed)?|verified|all\s+clean)`;
+const PASS_CLAIM_RE = new RegExp(String.raw`\b` + PASS_NOUN + String.raw`\b[^.!?\n]*\b` + PASS_VERB + String.raw`\b`, 'i');
+const PASS_VERB_OCC = new RegExp(String.raw`\b` + PASS_VERB + String.raw`\b`, 'gi');
+// "<report verb> … <test/build noun>" — a third party's report, not the agent's own claim.
+const PASS_REPORTED_RE = new RegExp(String.raw`\b(?:claim(?:ed|s|ing)?|flag(?:ged|s|ging)?|said|says|echo(?:ed|es|ing)?|quot(?:ed|es|ing)?|wrote|writes|report(?:ed|s|ing)?|according\s+to|per\s+the)\b(?:\s+\w+){0,4}\s+\b` + PASS_NOUN + String.raw`\b`, 'i');
+// "must/should/if/to … <verdict>" — a requirement or condition, not an assertion that it happened. (CLAIM_HEDGE_RE
+// covers should/would/will/if/once/when/ensure; this adds the must/may/can/could/to forms it lacks.)
+const PASS_MODAL_RE = new RegExp(String.raw`\b(?:should|would|must|will|[’']ll|to|need(?:s|ed)?\s+to|can|could|may|if|once|when|make\s+sure|ensure|so\s+that)\b(?:\s+\w+){0,3}\s+` + PASS_VERB, 'i');
+const PASS_NP_SUBJECT = /^(?:tests?|builds?|lints?|checks?|suites?|specs?|typecheck|type-check|they|it|all|everything|both|these|those|ci|runs?)$/i;
+const PASS_NP_DET = /^(?:the|a|an|another|this|that|each|every|first|second|third|next|final|last|one|our|my|its|their)$/i;
+const PASS_MAX_GAP = 12;   // noun↔verdict farther apart than this within a sentence is clause-glue, not a claim (v1-tuned)
+// true → every verdict occurrence in the span is a determiner-headed NOUN stage (or out of range) → abstain.
+function passNounStageOnly(span) {
+  for (const v of span.matchAll(PASS_VERB_OCC)) {
+    const toks = span.slice(0, v.index).match(/[\w-]+/g) || [];
+    if (toks.length - 1 > PASS_MAX_GAP) break;                  // this and all later occurrences are too far → glue
+    if (!/^pass$/i.test(v[0])) return false;                    // inflected/green/succeeded/verified/all clean → unambiguous
+    const last = toks[toks.length - 1], prev = toks[toks.length - 2];
+    if (!last || PASS_NP_SUBJECT.test(last)) return false;      // "tests pass" — a subject, so `pass` is the verb
+    if (!(PASS_NP_DET.test(last) || (!!prev && PASS_NP_DET.test(prev)))) return false;   // not "a pass"/"the FIX pass" → verb
+  }
+  return true;
+}
+export function claimsTestBuildPass(message = '') {
+  const { scan, inlineSpans } = stripQuotedForClaim(message);
+  let s = scan;
+  for (const [a, b] of inlineSpans) s = s.slice(0, a) + ' '.repeat(b - a) + s.slice(b);
+  for (const sent of s.split(/[.!?\n]+/)) {
+    const m = sent.match(PASS_CLAIM_RE);
+    if (!m) continue;
+    if (CLAIM_HEDGE_RE.test(sent) || PASS_MODAL_RE.test(sent) || PASS_REPORTED_RE.test(sent)) continue;
+    if (passNounStageOnly(m[0])) continue;
+    return true;
+  }
+  return false;
+}
+
+// CHANGE 1 — prose class-1 FALLBACK for a contract-UNAWARE turn. When the agent emits NO valid
+// `groundtruth-claims` block anywhere in the message (`analyzeContract(message).ok === false` — the whole-
+// message verdict, NOT merely "an NC finding fired", which is additionally gated on authored changes), the
+// contract's own tests_pass verification never runs, so a bare prose lie ("all tests pass!") on a session
+// that never adopted the manifest would go unchecked — v1's prose class-1 was retired into that verification.
+// Reinstate it, WARN-ONLY: a test/build success claim + NO completed matching test/build run in the transcript.
+// Reuses claimsTestBuildPass (negation/quote-aware + test/build-referencing) + TEST_BUILD_RE + the existing
+// bashEvents/sidechainCmds shapes — no new command matcher. Hard limits (house rules): warn tier, never block;
+// never fires when a valid block exists (the contract verifies tests_pass properly then); ABSTAINS with no
+// transcript (`bashEvents` not an array) — a missing transcript is not evidence that nothing ran; and ABSTAINS
+// when a test/build ran in a filtered SIDECHAIN (a Task subagent's run — mirrors the contract's tests_pass
+// FP-10: an orchestrator that delegates the run isn't lying). Fires regardless of the diff (v1 did too: a prose
+// "tests pass" on a read-only turn is still a checkable claim). Pure → unit-tested.
+export function proseFallbackFindings({ message = '', bashEvents = undefined, sidechainCmds = undefined } = {}) {
+  if (analyzeContract(message).ok) return [];         // a valid contract exists → its tests_pass check owns this
+  if (!Array.isArray(bashEvents)) return [];          // no transcript → abstain (never invent "nothing ran")
+  if (!claimsTestBuildPass(message)) return [];       // no test/build pass claimed → nothing to attribute
+  // "completed matching test/build run" = a bashEvent whose cmd matches TEST_BUILD_RE that actually finished
+  // (not a background launch, and paired with a result so is_error is a boolean). A green OR red completed run
+  // means a test/build DID run this session, so the fallback (which only catches "no run at all") abstains.
+  const ranTestBuild = bashEvents.some(e => e && typeof e.cmd === 'string'
+    && TEST_BUILD_RE.test(e.cmd) && e.background !== true && (e.is_error === true || e.is_error === false));
+  if (ranTestBuild) return [];
+  // A matching run in a filtered SIDECHAIN (a Task subagent's, harness-recorded) means a test/build DID run
+  // this turn — just where the main path can't read its outcome. Neither bless nor warn: ABSTAIN. Without this
+  // an honest orchestrator that delegated `npm test` to a subagent gets a false "no test ran" warn. (FP-10.)
+  if (Array.isArray(sidechainCmds) && sidechainCmds.some(c => typeof c === 'string' && TEST_BUILD_RE.test(c))) return [];
+  return [{ cls: 1, sev: 'warn', msg: 'claimed a passing test/build, but no test/build command ran this session (no claims block to verify — prose fallback)' }];
+}
 export function testExclusionFindings(claim = '', diff = '', bashCmds = []) {
   const out = [];
   if (!claimsSuccess(claim)) return out;  // only when success is genuinely claimed (negation/quote-aware)
@@ -2530,6 +2611,10 @@ function main() {
         contractInstruction,
       });
       findings.push(...contractFindings(payload.last_assistant_message || '', reality));
+      // CHANGE 1: prose class-1 fallback — a session that never emitted a valid claims block still gets its
+      // bare "tests pass" prose lie caught (warn-only). Skipped automatically when a valid block exists (the
+      // contract's tests_pass verification owns it) and abstains with no transcript. See proseFallbackFindings.
+      findings.push(...proseFallbackFindings({ message: payload.last_assistant_message || '', bashEvents: parsed.bashEvents, sidechainCmds: parsed.sidechainCmds }));
       // The instruction was present at the session baseline but is GONE from the worktree → stripped this
       // session. Awareness already held (NC still blocks), but surface the strip so the dodge is never silent.
       if (instructionStripped) findings.push({ cls: 'NC', sev: 'warn', msg: `the ${FENCE_TAG} instruction was removed from an instruction doc this session — the manifest requirement still applies (awareness is anchored on the session baseline)` });

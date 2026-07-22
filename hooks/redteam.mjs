@@ -307,6 +307,25 @@ try {
     /e2e coverage/i.test(k12) && /deferral/i.test(k12), k12.slice(0, 400));
   kreset();
 
+  // K15 — CHANGE 1 (prose class-1 fallback): a turn that emits NO groundtruth-claims block but claims "all
+  // tests pass" in PROSE, with NO test/build command in the transcript, is caught by the reinstated v1 class-1
+  // as a WARN — the honesty check that would otherwise vanish for a contract-unaware session. (Warn, not block.)
+  writeFileSync(join(repo, 'real.js'), 'export const v = 15;\n');
+  const k15 = driveClean('k15', 'All tests pass — shipped!', [userln('fix and test real.js'), writeln(join(repo, 'real.js'), 'export const v = 15;\n')]);
+  check('contract: a prose "tests pass" with NO block and NO test run is caught by the class-1 prose fallback (warn)',
+    /no test\/build command ran this session/i.test(k15), k15.slice(0, 400));
+  kreset();
+
+  // K16 — CHANGE 2 (no_change contradiction): declaring `no_change` while the agent AUTHORED an edit is a direct
+  // self-contradiction, escalated to a BLOCK-tier CA — not the old silent-ish warn-tier UC. The manifest asserts
+  // "nothing changed" while the diff shows an authored edit; the card names the contradiction and is block-eligible.
+  writeFileSync(join(repo, 'real.js'), 'export const v = 16;\n');
+  const k16 = driveClean('k16', 'Nothing to change here.\n' + kblock({ v: 1, task: 'x', status: 'complete', claims: [{ t: 'no_change' }] }),
+    [userln('look at real.js'), writeln(join(repo, 'real.js'), 'export const v = 16;\n')]);
+  check('contract: declaring no_change while authoring an edit → block-tier CA (self-contradiction, not a silent warn)',
+    /declared no_change[^\n]*real\.js/i.test(k16) && /GROUNDTRUTH_BLOCK=1 to halt/.test(k16), k16.slice(0, 400));
+  kreset();
+
   delete process.env.GROUNDTRUTH_CONTRACT;
 } finally { rmSync(repo, { recursive: true, force: true }); }
 

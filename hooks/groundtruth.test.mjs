@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { analyze, stripQuotedForClaim, claimsSuccess, testExclusionFindings, testWeakeningFindings, vacuousTestFindings, mojibakeFindings, agentFindings, parseAgentFile, untrackedAdded, parseTranscript, scanContent, attributeDebt, runCompiledRules, compileRuleRe, intentConfidence, renderCard, shouldAskStar, projectFindings, advanceSnapshot, freshRatifiers, remediationDecision, renderCorrective, blockOutcomeNote, liveNoticeCmds, editorCli, runProcedures, envFindings, loadGtConfig, pendingApprovals, refereeTamper, compareSnapshot, integrityScope, GAMED_FILE_RE, priorFindingsContext, sessionHasCommit, proposedStale, isSecret, excludedScanPath, dropExcludedFiles, preCommitHookScript, parseDiffRange, lastCodeEditSeq, contractInstructionPresent } from './groundtruth.mjs';
+import { analyze, stripQuotedForClaim, claimsSuccess, testExclusionFindings, testWeakeningFindings, vacuousTestFindings, mojibakeFindings, agentFindings, parseAgentFile, untrackedAdded, parseTranscript, scanContent, attributeDebt, runCompiledRules, compileRuleRe, intentConfidence, renderCard, shouldAskStar, projectFindings, advanceSnapshot, freshRatifiers, remediationDecision, renderCorrective, blockOutcomeNote, liveNoticeCmds, editorCli, runProcedures, envFindings, loadGtConfig, pendingApprovals, refereeTamper, compareSnapshot, integrityScope, GAMED_FILE_RE, priorFindingsContext, sessionHasCommit, proposedStale, isSecret, excludedScanPath, dropExcludedFiles, preCommitHookScript, parseDiffRange, lastCodeEditSeq, contractInstructionPresent, proseFallbackFindings } from './groundtruth.mjs';
 import { parseCorrectivePairs, parseForbidTokens, isArmableToken, extractCandidates, compile, repoSourceExts } from './compile-rules.mjs';
 import { checkDroppedSymbols, collectDefs } from './symbol-integrity.mjs';
 
@@ -1136,6 +1136,71 @@ ok('no-git: no Edit/Write calls → empty toolDiff (nothing to check)',
   ok('contractInstructionPresent: a fence in a SKILL.md does NOT count → false',
     contractInstructionPresent(['.claude/skills/x/SKILL.md'], rd({ '.claude/skills/x/SKILL.md': fenced })) === false);
   ok('contractInstructionPresent: an unreadable file is skipped, not thrown', contractInstructionPresent(['CLAUDE.md'], rd({})) === false);
+}
+
+// ── proseFallbackFindings (Change 1): the v1 class-1 reinstated as a WARN-ONLY fallback for a turn that
+//    emitted NO valid claims block — a bare prose "tests pass" with no test/build run in the transcript. ──
+{
+  const validBlock = 'Done.\n```groundtruth-claims\n' + JSON.stringify({ v: 1, task: 't', status: 'complete', claims: [{ t: 'tests_pass', cmd: 'npm test' }] }) + '\n```';
+  const ev = (cmd, over = {}) => ({ cmd, seq: 1, is_error: false, background: false, ...over });
+  const fires = (fs) => fs.length === 1 && fs[0].cls === 1 && fs[0].sev === 'warn' && /no test\/build command ran/.test(fs[0].msg);
+
+  ok('prose fallback FIRES: test/build pass claim + no block + a transcript with no test/build run',
+    fires(proseFallbackFindings({ message: 'All tests pass, done!', bashEvents: [ev('ls -la'), ev('git status')] })));
+  ok('prose fallback FIRES: "the build is green" + no block + an EMPTY transcript (nothing ran at all)',
+    fires(proseFallbackFindings({ message: 'The build is green.', bashEvents: [] })));
+  ok('prose fallback is WARN-ONLY, never block',
+    proseFallbackFindings({ message: 'tests pass', bashEvents: [] }).every(f => f.sev === 'warn'));
+  // Fable review — the FATAL FP class: a COMPLETION verb (done/fixed/works) applied to a test/build noun as the
+  // OBJECT OF WORK is not a pass-verdict and must NOT fabricate a "passing test/build" claim. These are the most
+  // common honest closings on a contract-unaware turn (v1's `_passClaim` is silent on all of them).
+  ok('prose fallback does NOT fire on a bare "Done — fixed the typo" (no test/build referenced)',
+    proseFallbackFindings({ message: 'Done — fixed the typo in README.', bashEvents: [] }).length === 0);
+  ok('prose fallback does NOT fire on "Renamed the variable as requested. Done." (bare success, no test/build)',
+    proseFallbackFindings({ message: 'Renamed the variable as requested. Done.', bashEvents: [] }).length === 0);
+  ok('prose fallback does NOT fire on "Fixed the failing test." (completion verb on a test noun, not a verdict)',
+    proseFallbackFindings({ message: 'Fixed the failing test.', bashEvents: [] }).length === 0);
+  ok('prose fallback does NOT fire on "Done — updated the CI config." (CI as object of work)',
+    proseFallbackFindings({ message: 'Done — updated the CI config.', bashEvents: [] }).length === 0);
+  ok('prose fallback does NOT fire on "Fixed the build script." (build as object of work)',
+    proseFallbackFindings({ message: 'Fixed the build script.', bashEvents: [] }).length === 0);
+  ok('prose fallback does NOT fire on "Cleaned up the tests, done." (tidy claim, no pass verdict)',
+    proseFallbackFindings({ message: 'Cleaned up the tests, done.', bashEvents: [] }).length === 0);
+  ok('prose fallback does NOT fire on a pure Q&A "It works by delegating to the scheduler — see line 42."',
+    proseFallbackFindings({ message: 'It works by delegating to the scheduler — see line 42.', bashEvents: [] }).length === 0);
+  // Fable review — the FN face: v1's pass-verdict verbs (succeeded / verified / all clean) must STILL be caught —
+  // reusing SUCCESS_CLAIM_RE had dropped them. And "the tests must pass" is a REQUIREMENT, not a result.
+  ok('prose fallback FIRES on "Build succeeded." (a v1 verdict verb)',
+    fires(proseFallbackFindings({ message: 'Build succeeded.', bashEvents: [] })));
+  ok('prose fallback FIRES on "Lint is all clean."',
+    fires(proseFallbackFindings({ message: 'Lint is all clean.', bashEvents: [] })));
+  ok('prose fallback FIRES on "The test suite is verified."',
+    fires(proseFallbackFindings({ message: 'The test suite is verified.', bashEvents: [] })));
+  ok('prose fallback does NOT fire on reported speech "The user said the tests pass."',
+    proseFallbackFindings({ message: 'The user said the tests pass.', bashEvents: [] }).length === 0);
+  ok('prose fallback does NOT fire on a requirement "The tests must pass before we merge."',
+    proseFallbackFindings({ message: 'The tests must pass before we merge.', bashEvents: [] }).length === 0);
+  ok('prose fallback does NOT fire on a noun-stage "The tests needed another pass." (pass = noun)',
+    proseFallbackFindings({ message: 'The tests needed another pass.', bashEvents: [] }).length === 0);
+  ok('prose fallback does NOT fire when a valid groundtruth-claims block exists (the contract owns tests_pass)',
+    proseFallbackFindings({ message: validBlock, bashEvents: [] }).length === 0);
+  ok('prose fallback does NOT fire when a real test/build DID complete (green run present)',
+    proseFallbackFindings({ message: 'All tests pass!', bashEvents: [ev('npm test')] }).length === 0);
+  ok('prose fallback does NOT fire on a completed RED test run either (a run happened; contract/CA territory, not "nothing ran")',
+    proseFallbackFindings({ message: 'All tests pass!', bashEvents: [ev('npm test', { is_error: true })] }).length === 0);
+  // Fable review — FP-10 parity: a test/build delegated to a Task SUBAGENT (sidechain) DID run; abstain, don't warn.
+  ok('prose fallback ABSTAINS when a matching test/build ran in a SIDECHAIN (delegated to a subagent — FP-10 parity)',
+    proseFallbackFindings({ message: 'All tests pass!', bashEvents: [], sidechainCmds: ['cd sub && npm test'] }).length === 0);
+  ok('prose fallback still FIRES when the sidechain cmd is UNRELATED (no test/build there either)',
+    fires(proseFallbackFindings({ message: 'All tests pass!', bashEvents: [], sidechainCmds: ['echo hi'] })));
+  ok('prose fallback FIRES when the ONLY matching cmd was a BACKGROUND launch (a launch is not a completed run)',
+    fires(proseFallbackFindings({ message: 'tests pass', bashEvents: [ev('npm test', { background: true, is_error: false })] })));
+  ok('prose fallback does NOT fire without a success claim (negation/hedge gate)',
+    proseFallbackFindings({ message: 'Still WIP — tests not passing yet.', bashEvents: [] }).length === 0);
+  ok('prose fallback ABSTAINS with no transcript (bashEvents undefined)',
+    proseFallbackFindings({ message: 'All tests pass!', bashEvents: undefined }).length === 0);
+  ok('prose fallback ABSTAINS with a null bashEvents (no-transcript fail-open shape)',
+    proseFallbackFindings({ message: 'All tests pass!', bashEvents: null }).length === 0);
 }
 
 // ── compile() validation gates: a seed rule must (1) compile at runtime and (2) match its positive_example
