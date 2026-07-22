@@ -1091,6 +1091,10 @@ ok('no-git: no Edit/Write calls → empty toolDiff (nothing to check)',
     }
     try { chmodSync(pathJoin(repo, 'locked.txt'), 0o644); } catch {}   // restore so rmSync can clean up
   } finally { try { rmSync(repo, { recursive: true, force: true }); } catch {} }
+  // C-9 (Fable review D1): a non-git dir (git status throws) → paths:null ("unknown"), so the contract's mint
+  // falls back to the ledger instead of treating [] as "nothing untracked" and blocking honest created claims.
+  ok('untrackedAdded: a non-git dir returns paths:null (unknown), NOT an empty array',
+    untrackedAdded('/nonexistent-gt-dir-xyz').paths === null);
 }
 
 // ── compile() validation gates: a seed rule must (1) compile at runtime and (2) match its positive_example

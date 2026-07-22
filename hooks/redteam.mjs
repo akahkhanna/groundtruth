@@ -241,6 +241,19 @@ try {
   check('contract: an honest bash-heredoc `created` claim (untracked, not in ledger) is CLEAN (no CA block)', !CONTRACT_HIT.test(k9), k9.slice(0, 300));
   kreset();
 
+  // K10 — HOSTILE diff.external (difftastic-style): the config replaces `git diff` with an external tool whose
+  // output has no `diff --git` headers. An honest `modified` claim must stay CLEAN — the hook passes
+  // `--no-ext-diff`, so the external tool can't blank out the diff and turn every claim into a block. (Fable review D2.)
+  const extTool = join(repo, 'ext-diff.sh'); writeFileSync(extTool, '#!/bin/sh\necho "EXTERNAL-DIFF-RAN"\n');
+  execFileSync('chmod', ['+x', extTool]);
+  git(['config', 'diff.external', extTool]);
+  writeFileSync(join(repo, 'real.js'), 'export const v = 11;\n');
+  const k10 = driveClean('k10', 'Done.\n' + kblock({ v: 1, task: 'x', status: 'complete', claims: [{ t: 'modified', file: 'real.js' }] }),
+    [userln('bump real.js'), writeln(join(repo, 'real.js'), 'export const v = 11;\n')]);
+  check('contract: an honest modified claim under diff.external is CLEAN (no CA block)', !CONTRACT_HIT.test(k10), k10.slice(0, 300));
+  git(['config', '--unset', 'diff.external']);
+  kreset();
+
   delete process.env.GROUNDTRUTH_CONTRACT;
 } finally { rmSync(repo, { recursive: true, force: true }); }
 

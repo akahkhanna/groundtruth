@@ -1910,11 +1910,12 @@ export function renderCorrective(blockFindings, attempts, cap = 2) {
 const UNTRACKED_SCAN_CAP = 64 * 1024 * 1024;      // per file
 const UNTRACKED_TOTAL_CAP = 128 * 1024 * 1024;    // across all untracked files. Budget is checked BEFORE a read, so one file overshoots; the printable transform (`+`-prefix per line) can ~2× a file, so worst-case content ≈ total + 2×per-file = 128 + 2×64 = 256 MB — still safely < Node's ~512 MB string cap.
 export function untrackedAdded(cwd, skip = new Set(), perFileCap = UNTRACKED_SCAN_CAP, totalCap = UNTRACKED_TOTAL_CAP) {
-  let content = ''; const oversized = []; const paths = [];
+  let content = ''; const oversized = []; const paths = []; let gitOk = false;
   try {
     // maxBuffer: execSync defaults to 1 MiB stdout; a repo with >1 MiB of untracked FILENAMES would throw into
     // the outer catch and silently skip the WHOLE untracked scan (a coverage hole). 256 MiB covers any real tree.
     const porcelain = execSync('git status --porcelain=v1 --untracked-files=all', { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 });
+    gitOk = true;   // `git status` succeeded → `paths` is an AUTHORITATIVE (possibly empty) untracked list
     for (const ln of porcelain.split('\n').filter(Boolean)) {
       if (!ln.startsWith('??')) continue;                               // untracked only — tracked edits are in git diff
       const f = ln.slice(3).trim().replace(/^"(.*)"$/, '$1');
@@ -1951,7 +1952,11 @@ export function untrackedAdded(cwd, skip = new Set(), perFileCap = UNTRACKED_SCA
       if (size > off) oversized.push(`${f} (${size} bytes) — only the first ${Math.floor(perFileCap / (1024 * 1024))} MB scanned, review the remainder`);   // truncated at the per-file cap → surfaced, never silently trusted
     }
   } catch { /* no git → skip */ }
-  return { content, oversized, paths };
+  // paths === null signals "untracked list UNKNOWN" (no-git / `git status` failed, e.g. a held index.lock) so
+  // the contract's synthetic-`A` mint falls back to the ledger instead of treating an EMPTY array as "nothing
+  // is untracked" — which would block every honest Write-created `created` claim on the fail-open path. An
+  // empty (but git-confirmed) list stays []. (Fable review D1.)
+  return { content, oversized, paths: gitOk ? paths : null };
 }
 
 // ── main: only when run directly, not when imported by the test ──
@@ -2048,7 +2053,12 @@ function main() {
   // every verdict for a whole config population (Fable adversarial FP-3). Force the canonical a/ b/ form (and
   // pin quotePath/color so decode + parse stay deterministic regardless of the ambient config).
   const DIFF_CFG = '-c diff.mnemonicPrefix=false -c diff.noprefix=false -c diff.srcPrefix=a/ -c diff.dstPrefix=b/ -c core.quotePath=true -c color.diff=never';
-  const gitDiffCfg = (rest, cwd) => git(`${DIFF_CFG} diff ${rest}`, cwd);
+  // `--no-ext-diff` (a `git diff` OPTION, so it follows the subcommand — not a top-level `-c`) neutralizes a
+  // configured `diff.external` / `GIT_EXTERNAL_DIFF` (e.g. difftastic: `git config diff.external difft`), which
+  // otherwise replaces the whole diff with an external tool's output — no `diff --git` headers → filesFromDiff
+  // parses ZERO files → every honest claim is a block-tier CA. Same "poisons every verdict for a config
+  // population" failure as the prefix knobs, via a different knob. (Fable review D2.)
+  const gitDiffCfg = (rest, cwd) => git(`${DIFF_CFG} diff --no-ext-diff ${rest}`, cwd);
   // Shared searcher for the Class-6 dangling-ref check (used by BOTH the Stop path and the pre-commit
   // path). `-E` POSIX ERE (not `-P` — PCRE isn't guaranteed, and a `-P` error would throw → fail-open →
   // silently inert; the real receiver-gated classification is done in JS). It MUST distinguish `git grep`'s

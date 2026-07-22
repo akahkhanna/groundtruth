@@ -235,11 +235,12 @@ const norm = (p) => String(p == null ? '' : p).trim().replace(/\\/g, '/').replac
 
 // A command that merely MENTIONS a test cmd in a string/echo/grep is not a run of it — blessing `echo "npm
 // test would pass"` (exit 0) as evidence for `tests_pass:{cmd:"npm test"}` is a false green. (Fable finding 5.)
-// A command whose LEADING word only PRINTS/SEARCHES its arg (never runs it). Two clauses: word-shaped names
-// carry a `\b`; the SYMBOL builtins `:` (no-op) and `#` (comment) can't use `\b` (a `#`/`:`→space gap is not a
-// word boundary — the old `|:|…|#)\b` was DEAD, so `# npm test` and `: "npm test"` laundered a never-run claim
-// into a pass), so they match `#`/`:` followed by space/end. (Fable adversarial FN-3.)
-const LOOKALIKE_RE = /^\s*(?:echo|printf|cat|grep|rg|ag|ls|head|tail|sed|awk|true|false)\b|^\s*[#:](?:\s|$)/;
+// A command whose LEADING word only PRINTS/SEARCHES its arg (never runs it). Three clauses: word-shaped names
+// carry a `\b`; `#` matches UNCONDITIONALLY (a shell comment runs to end-of-line regardless of the next char —
+// `# npm test` AND `#npm test` are both no-ops, Fable review D3); `:` (the no-op builtin) needs a space/end
+// after it, since `:foo` would be a distinct command name. The old `|:|…|#)\b` was DEAD (a `#`/`:`→space gap
+// is not a word boundary), so these mentions laundered a never-run claim into a pass. (Fable adv FN-3 + D3.)
+const LOOKALIKE_RE = /^\s*(?:echo|printf|cat|grep|rg|ag|ls|head|tail|sed|awk|true|false)\b|^\s*#|^\s*:(?:\s|$)/;
 // Interpreters that EXECUTE a quoted string as a command — ONLY these turn a QUOTED occurrence of `want` into
 // a real run. `bash -c "npm test"` runs the tests; `git grep "npm test"`, `git log --grep "npm test"`,
 // `find -name "npm test"`, `: "npm test"` merely MENTION the string — they must neither bless nor condemn the
@@ -347,6 +348,11 @@ export function verify(contract, reality = {}) {
     const file = norm(c.file);
     if (c.t === 'created' || c.t === 'modified' || c.t === 'deleted') {
       claimedPaths.add(file);
+      // A claim on an EXCLUDED path (an out-of-repo /tmp scratch, node_modules, a build artifact) can't be
+      // verified — such paths are dropped from the diff/untracked scan by design, so they'd read as "absent"
+      // and block. UC and NC already abstain on excluded paths; the CA pass must too, for consistency and the
+      // founding rule (never a false block). (Fable review C2.)
+      if (excluded(file)) continue;
       const st = byPath.get(file);
       // A rename decomposes into (delete FROM) + (create TO): a `deleted <rename-source>` or a
       // `created <rename-target>` claim is TRUE even though the source path isn't in byPath and the target
@@ -411,7 +417,11 @@ export function verify(contract, reality = {}) {
       // possible later full/fresh run. v1 gated the SESSION this way; `!last.background` alone was dead code
       // (buildReality maps background → ok:null, so `last` is never background). (Fable final review, Issue 1.)
       const ambiguousRun = runs.some(r => r.background || r.ok === null);
-      if (SWALLOW_RE.test(last.cmd))
+      // Test the swallower only against the TAIL from where `want` last appears — a forcer on an EARLIER setup
+      // command (`mkdir -p build || true; npm test`) masks THAT command's exit, not the test's, so it must not
+      // false-warn an honest green. (Fable review C1.)
+      const swTail = (() => { const lc = norm(last.cmd); const i = lc.lastIndexOf(norm(c.cmd)); return i >= 0 ? lc.slice(i) : lc; })();
+      if (SWALLOW_RE.test(swTail))
         findings.push({ cls: 'CA', sev: 'warn', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but the run's exit was force-succeeded (\`|| true\` / \`; true\`) — a zero exit there is manufactured, not a real pass` });
       else if (c.t === 'tests_pass' && weakOnly(c.cmd))
         findings.push({ cls: 'CA', sev: 'warn', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but that is a syntax/type check, not a test run — verify in the runtime that ships` });
@@ -597,7 +607,7 @@ export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile 
   // honest `created` claim doesn't block — FP-8). When `untracked` is unknown (unit tests / no-git fail-open),
   // fall back to the ledger mint so `created` claims still verify off-transcript. UC stays authored-scoped, so
   // a non-ledger untracked file surfaced here never becomes a false UC.
-  const untrackedSet = untracked === undefined ? undefined : new Set((untracked || []).map(rel));
+  const untrackedSet = untracked == null ? undefined : new Set((untracked || []).map(rel));   // null (git unknown) ⇒ ledger fallback
   if (untrackedSet) {
     for (const p of untrackedSet) if (p && !seen.has(p)) { files.push({ status: 'A', path: p }); seen.add(p); }
   } else if (authoredSet) {

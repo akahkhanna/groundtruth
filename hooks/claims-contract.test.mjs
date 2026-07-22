@@ -269,6 +269,17 @@ ok('verify: honest no_change after edit-then-revert (untracked:[]) → clean (FP
 ok('verify: Write-then-rm `created ghost.md` (untracked:[]) → CA, not blessed (FN-5)', has(verify(contract([{ t: 'created', file: 'ghost.md' }]), buildReality({ diff: '', cwd: '/r', authored: ['/r/ghost.md'], untracked: [] })), 'CA', 'absent from the diff'));
 ok('verify: honest heredoc `created tools/gen.py` (untracked-present) → clean (FP-8)', verify(contract([{ t: 'created', file: 'tools/gen.py' }]), buildReality({ diff: '', cwd: '/r', authored: [], untracked: ['tools/gen.py'] })).ok);
 ok('verify: an UNDECLARED authored untracked create still fires UC (no regression)', has(verify(contract([{ t: 'no_change' }]), buildReality({ diff: '', cwd: '/r', authored: ['/r/src/sneaky.js'], untracked: ['src/sneaky.js'] })), 'UC', 'undeclared change'));
+// C-9 (Fable review D1): untracked === null (git status failed / no-git workspace) ⇒ LEDGER fallback, not an
+// empty untracked set — else every honest Write-created `created` claim blocks on the fail-open path.
+ok('buildReality: untracked=null (git unknown) falls back to the ledger mint (honest created verifies)', buildReality({ diff: '', cwd: '/r', authored: ['/r/new.mjs'], untracked: null }).files.some(f => f.path === 'new.mjs' && f.status === 'A'));
+ok('verify: honest `created` in a no-git workspace (untracked:null) → clean, not a block', verify(contract([{ t: 'created', file: 'new.mjs' }]), buildReality({ diff: '', cwd: '/r', authored: ['/r/new.mjs'], untracked: null })).ok);
+// C-9 (Fable review C1): the swallow sensor tests only the TAIL from `want` — a forcer on an earlier setup cmd is not the test's.
+ok('sensor swallowed-exit ABSTAINS when the forcer is on an EARLIER setup cmd (`mkdir || true; npm test`)', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'mkdir -p build || true; npm test', ok: true }] }).ok);
+ok('sensor swallowed-exit STILL warns when the forcer is on the test itself (`… ; npm test || true`)', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'echo go; npm test || true', ok: true }] }), 'CA', 'force-succeeded'));
+// C-9 (Fable review C2): a claim on an EXCLUDED path abstains in the CA pass too (consistency with UC/NC).
+ok('verify: a `created` claim on an EXCLUDED path abstains (no CA block)', verify(contract([{ t: 'created', file: 'scratch/repro.js' }]), { files: [], excluded: (p) => p.startsWith('scratch/') }).ok);
+// C-9 (Fable review D3): `#npm test` (no space) is a comment → does NOT bless a never-run tests_pass.
+ok('verify: `#npm test` (no space, a comment) does NOT bless tests_pass → CA', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: '#npm test', ok: true }] }), 'CA', 'no such command ran'));
 // verify — the FP fixes
 ok('verify: truthful tests_pass with NO transcript (commands undefined) → abstain, never CA', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [] }).ok);
 ok('verify: tests_pass matched only by an unpaired run → abstain (not a false "exited non-zero")', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: null }] }).ok);
