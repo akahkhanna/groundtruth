@@ -682,6 +682,11 @@ export const deferralMsg = (d) => `deferred (declared) — ${d.what}${d.why ? ` 
 // or ≥8 chars) and match on TOKEN boundaries, so a terse `what` like "config"/"tests" isn't dropped by an
 // incidental same-named path. (All four false-close leaks Fable's PR #4 review proved: A/D task, C modified-
 // symbols, B short-key.) Session-scoped by construction. Pure → directly unit-testable.
+// Residual (accepted, warn-tier): a fully-VALID `groundtruth-claims` block QUOTED as an example in a past
+// assistant message parses as a real contract (the FP-9 last-valid-block residual), so its `deferred` claims
+// become phantom open-loops. The multi-turn path amplifies this from "current message" to "any past message,"
+// but it only ever adds a warn-tier card line (never a block), and an honest turn's real block is normally the
+// last one. Not chased here. (Fable PR #4 review, concern 3.)
 const nlow = (s) => String(s == null ? '' : s).trim().toLowerCase().replace(/\s+/g, ' ');
 const toks = (s) => ' ' + nlow(s).replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim() + ' ';   // ' tok tok '
 export function openDeferrals(contracts) {
