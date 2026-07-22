@@ -257,6 +257,15 @@ ok('verify: `grep "lint && npm test" f` (exit 1) does NOT false-CA an honest tes
   return r.ok;   // the real green npm test stands; the grep's quoted mention is masked out, not counted as a red run
 })());
 ok('verify: `echo "run npm test to verify"` alone does NOT bless tests_pass → CA no-run (round 3, Issue 1 mirror)', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'echo "run npm test to verify"', ok: true }] }), 'CA', 'no such command ran'));
+// round-3-verify: masking must NOT erase a REAL invocation inside quotes (that was a false CA block)
+ok('verify: a claim cmd WITH quotes, run exactly, matches — `pytest -k "not slow"`', verify(contract([{ t: 'tests_pass', cmd: 'pytest -k "not slow"' }]), { files: [], commands: [{ cmd: 'pytest -k "not slow"', ok: true }] }).ok);
+ok('verify: a quoted wrapper run — `bash -c "npm test"` (green) — matches an `npm test` claim', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'timeout 60 bash -c "npm test"', ok: true }] }).ok);
+ok('verify: `sh -c \'npm test\'` (green) matches an npm test claim', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: "sh -c 'npm test'", ok: true }] }).ok);
+ok('buildReality: an authored edit then `git mv` does not re-add the OLD path as a phantom A', (() => {
+  const diff = 'diff --git a/old.js b/new.js\nsimilarity index 90%\nrename from old.js\nrename to new.js';
+  const r = buildReality({ diff, cwd: '/r', authored: ['/r/old.js', '/r/new.js'] });
+  return !r.files.some(f => f.status === 'A' && f.path === 'old.js') && r.files.some(f => f.status === 'R' && f.path === 'new.js');
+})());
 ok('verify: a background launch-ack (is_error:false) does NOT bless tests_pass → abstain (finding 3 residual)', buildReality({ diff: '', bashEvents: [{ cmd: 'npm test', is_error: false, background: true }] }).commands[0].ok === null);
 ok('verify: UC scoped to agent-authored files — an undeclared HUMAN/dirty change is NOT flagged (finding 7)', verify(contract([{ t: 'modified', file: 'a.mjs' }]), { files: [{ status: 'M', path: 'a.mjs' }, { status: 'M', path: 'human.mjs' }], authored: new Set(['a.mjs']) }).ok);
 ok('verify: UC still fires on an undeclared AGENT-authored change', has(verify(contract([{ t: 'modified', file: 'a.mjs' }]), { files: [{ status: 'M', path: 'a.mjs' }, { status: 'M', path: 'sneaky.mjs' }], authored: new Set(['a.mjs', 'sneaky.mjs']) }), 'UC', 'sneaky.mjs'));

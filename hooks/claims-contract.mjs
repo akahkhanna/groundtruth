@@ -222,19 +222,22 @@ const norm = (p) => String(p == null ? '' : p).trim().replace(/\\/g, '/').replac
 // test would pass"` (exit 0) as evidence for `tests_pass:{cmd:"npm test"}` is a false green. (Fable finding 5.)
 const LOOKALIKE_RE = /^\s*(?:echo|printf|cat|grep|rg|ag|ls|head|tail|sed|awk|:|true|false|#)\b/;
 
-// Does a tests_pass/build_pass claim's cmd correspond to a command that actually ran? QUOTED substrings are
-// masked FIRST (so an operator or the cmd name inside a quoted arg — `grep "lint && npm test" pkg.json`,
-// `echo "run npm test"` — is neither split on nor counted as a run), then the remainder is split on
-// && / || / ; / | and each segment lookalike-tested. So `echo start && npm test` (a real run) matches while
-// `echo "npm test"` and `grep "…npm test…" f` do not. (Fable re-review round 3, Issue 1.)
+// Does a tests_pass/build_pass claim's cmd correspond to a command that actually ran? Quoted substrings are
+// masked to SAME-LENGTH spaces ONLY to locate the unquoted `&& || ; |` split points (so an operator inside a
+// quoted arg doesn't split); the segments are then tested against their ORIGINAL text — so a real invocation
+// INSIDE quotes (`bash -c "npm test"`, `pytest -k "not slow"`) is NOT erased and still matches, while a mere
+// mention in a lookalike (`grep "lint && npm test" f`, `echo "npm test"`) is excluded by the lookalike prefix.
+// (Fable re-review: mask-for-splitting only, never mask the matched text — masking a real run was a false CA block.)
+const SPLIT_OP = /&&|\|\|?|;/g;
 function commandRun(commands, cmd) {
   const want = norm(cmd);
   return (commands || []).filter(e => {
-    const masked = String(e.cmd).replace(/"[^"]*"|'[^']*'/g, '""');
-    return masked.split(/&&|\|\|?|;/).some(seg => {
-      const s = norm(seg);
-      return (s === want || s.includes(want)) && !LOOKALIKE_RE.test(s);
-    });
+    const raw = String(e.cmd);
+    const masked = raw.replace(/"[^"]*"|'[^']*'/g, (m) => ' '.repeat(m.length));
+    const segs = []; let start = 0, m; SPLIT_OP.lastIndex = 0;
+    while ((m = SPLIT_OP.exec(masked)) !== null) { segs.push(raw.slice(start, m.index)); start = m.index + m[0].length; }
+    segs.push(raw.slice(start));
+    return segs.some(seg => { const s = norm(seg); return (s === want || s.includes(want)) && !LOOKALIKE_RE.test(s); });
   });
 }
 
@@ -461,7 +464,8 @@ export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile 
   // content a planted `++ b/ghost.js` line could forge to launder a false `created` claim. (Fable round 3, Issue 2.)
   const files = [...gitFiles];
   if (authoredSet) {
-    const seen = new Set(gitFiles.map(f => f.path));
+    const seen = new Set();
+    for (const f of gitFiles) { seen.add(f.path); if (f.from != null) seen.add(f.from); }   // a rename's OLD path too, so an authored edit-then-`git mv` doesn't re-add a phantom A
     for (const p of authoredSet) if (p && !seen.has(p)) files.push({ status: 'A', path: p });
   }
   return { files, commands, symbolsByFile, excluded, authored: authoredSet };

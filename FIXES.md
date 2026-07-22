@@ -438,3 +438,29 @@ Self-check **719 → 726**; red-team **14/14**; corpus unchanged (17/23 at-captu
 - **Second pass on the tautology extension found the ASCII hole before ship:** the scoping test was `[A-Za-z_]`, so a correctly scoped non-English predicate (`WHERE имя = 'x'`, `WHERE 名前 = 'x'`) — and a whole-predicate bound parameter (`WHERE $1`) — read as "filters nothing" (reproduced FP, the trust-eroding direction). One token: `[\p{L}_]|\$\d` with the `u` flag. Also verified: `NOT deleted` scopes ("deleted" survives the keyword blank), `WHERE NOT (true)` fires (constant either way — a constant-false DELETE is at least as suspicious), the first-WHERE anchor is safe on `USING (SELECT … WHERE …)` shapes, and all four new regexes are linear (100 KB predicates ≈ 4 ms).
 
 Self-check **732 → 763**; red-team **14/14**; corpus unchanged (17/23 at-capture).
+
+---
+
+## v2 — the claims contract (default-on): Fable review, findings + regressions
+
+The v2 contract (declare-then-verify: `NC`/`CA`/`UC`) was reviewed by three adversarial Fable passes before ship. Every issue was a **false positive on honest, everyday work** (or a silent false-green) — the exact fatal class — reproduced end-to-end through the real Stop hook and locked with a regression test. Contract self-checks grew to **118**; red-team to **22/22** (Scenario K, the evasion table + the mixed-session seam).
+
+### C-1 · Every honest `created` of a new file was a CA **block**  *(fatal)*
+- **Symptom:** Write a new file, declare `created`, get 🔴 `claimed created X, but it is absent from the diff` — blocking honest work.
+- **Root cause:** the tool-ledger records **absolute** `file_path`; claims are repo-relative → they never string-match. `buildReality` now relativizes against cwd. (And, C-2 round 2:) the fragment for an untracked create is appended *after* the git diff, where a `diff --git`-anchored parser dropped it in any mixed session — the seam that re-opened this. Final fix: `filesFromDiff` is git-only with exact `@@` hunk counting; untracked creates come from the authoritative Write/Edit **ledger** in `buildReality`, never from parsing agent-controllable `+++ b/` diff text.
+
+### C-2 · A planted content line laundered a false `created` claim into green  *(fatal, silent)*
+- **Symptom:** claim `created ghost.js` (never created), plant one line `++ b/ghost.js` in a file you legitimately edit → the phantom satisfies the claim → 🟢.
+- **Root cause:** an in-hunk content line rendering as `+++ b/X` was read as a header. Fix: consume hunk bodies by the `@@ -a,b +c,d @@` line counts — in-hunk lines can never be reinterpreted; and ledger-sourced creates (above) remove the fragment channel entirely.
+
+### C-3 · `tests_pass` false CA blocks and false greens
+- **No-transcript / unpaired run → false "no such command ran / exited non-zero":** `commands: undefined` (fail-open) now abstains; `is_error:null` (unpaired) is tri-stated to abstain; a **background** launch-ack (`is_error:false`) no longer blesses (it's not a completed run).
+- **Lookalike / stale-green false greens:** `echo "npm test"` no longer blesses; the **last completed** matching run is the verdict (a red re-run after an earlier green isn't laundered).
+- **Quote handling (three review rounds):** a cmd mentioned in a quoted arg of a lookalike (`grep "lint && npm test" f`) must not count, **but** a real invocation *inside* quotes (`bash -c "npm test"`, `pytest -k "not slow"`) must still match. Final: mask quoted substrings only to find unquoted split points, then test the **original** segment text.
+
+### C-4 · UC / NC on work the agent didn't author + the default-on nag storm
+- **UC on dirty-tree / lockfile / manual churn** → scoped to the Write/Edit **ledger** (agent-authored only). Accepted, documented bound: a Bash-channel edit (`sed -i`, heredoc) isn't in the ledger → not caught in-session; the CI `--diff-range` gate is the backstop (SECURITY.md).
+- **NC on every block-less turn** (default-on) → NC fires only when the agent authored undeclared changes; a pure Q&A / read-only turn abstains.
+- **A standing card false-green** ("every ask … delivered", printed unconditionally after the open-loop subsystem was deleted) → the Tasks line now surfaces only declared deferrals, neutral otherwise.
+
+Contract self-check **88 → 118**; red-team **20 → 22**; engine `analyze()` shed the retired prose layer (3331 → ~2900 lines).
