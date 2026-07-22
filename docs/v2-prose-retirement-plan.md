@@ -13,7 +13,16 @@ The contract replaces the **language-facing** half only. Every **code-facing** c
 |---|---|---|
 | `stripQuotedForClaim` (l.323) | `analyze()` class-1 scan (l.816), class-3 (l.359) | `CA` on `tests_pass`/`build_pass` (a *declared* cmd verified against transcript exit) and on `created`/`modified` (a *declared* path verified against the diff) |
 
-v1 guessed "tests pass" / "I changed X" from prose; v2 has the agent **declare** `tests_pass`/`created`, and `verify()` checks it exactly. The whole quote-stripping / reported-speech / noun-`pass` FP apparatus becomes dead weight.
+v1 guessed "tests pass" / "I changed X" from prose; v2 has the agent **declare** `tests_pass`/`created`, and `verify()` checks it exactly.
+
+> **⚠ Stage-3 findings (discovered while executing — NOT a mechanical cut; needs a decision).**
+> 1. **The kill list contradicts itself.** `claimsSuccess` — which the spec KEEPS (advisory) and which gates the three test-gaming checks that stay (`l.370`/`415`/`720`: test-exclusion, test-weakening, vacuous-test) — itself calls `stripQuotedForClaim`. So `stripQuotedForClaim` cannot die while `claimsSuccess` lives. Either keep both, or rewrite `claimsSuccess` off it.
+> 2. **`CA` is a capability regression vs class-1.** The prose class-1 scan uniquely catches **stale-green** (`l.1141`: a green that predates the last source edit), **filtered-subset** (`l.1142`: "all pass" but every run was `--grep`'d), and **only-weak** (`l.1134`: only `tsc`/`node --check` ran). The contract's `tests_pass` check only asks "did that cmd run green?" — deleting class-1 drops those three sensors.
+>
+> **Decision needed before Stage 3 runs** — one of:
+> - **A) Accept the loss** — delete the class-1 prose scan + class-3; keep `claimsSuccess`+`stripQuotedForClaim` for the test-gaming checks. Simplest; `tests_pass` becomes a cruder check.
+> - **B) Port the sensors** — move stale-green / filtered / only-weak into the contract's `tests_pass` verification (thread mutation timestamps + run ordering into `reality`). Keeps capability; more work.
+> - **C) Keep class-1** — leave it firing on prose claims. Contradicts "prose isn't audited" and double-fires with `CA`.
 
 ### Subsystem B — prose INTENT / task ledger (feeds open-loop / deferred / Tasks)
 | Function | Engine site | Replaced by |
@@ -43,12 +52,14 @@ The v2 replacement coverage already exists: `claims-contract.test.mjs` (87 check
 
 ## Staged order (each stage = one green commit)
 
-1. **Flip the default** — contract runs unless `GROUNDTRUTH_CONTRACT=0`. Update the 10 engine integration spawns that drive the Stop hook to emit a valid claims block (else they'd `NC`). Green.
-2. **Cut the main() ledger wiring** (l.3232–3234) → feed the ledger from the contract's `deferred` claims. Remove the Task-ledger test section. Green.
-3. **Cut subsystem A** — remove the class-1/3 prose scan from `analyze()` and `stripQuotedForClaim`; remove the Class-1 test section. Green.
-4. **Delete the orphaned functions** (subsystem B) + prune their imports. Green.
+1. ✅ **Flip the default** — contract runs unless `GROUNDTRUTH_CONTRACT=0`. *(Done — no test breakage; suite drives `analyze()` directly, spawns tolerate the added `NC`.)*
+2. ✅ **Cut the main() ledger wiring** → declared `deferred` claims surface instead; `tasks.json` retired; redteam scenario E ported to `CA`. *(Done — 762+88, redteam 20/20.)*
+3. ⏸ **Cut subsystem A** (class 1/3 prose) — **BLOCKED on the Stage-3 decision above** (the `claimsSuccess`/`stripQuotedForClaim` entanglement + the stale-green/filtered/only-weak capability loss). Not a mechanical cut.
+4. **Delete the orphaned subsystem-B functions** (`openLoops`, `classifyDeliverables`, `splitClauses`, `extractTokens`, `pasteStripped`, `updateTaskLedger`, `claimClosesToken`, `surfaceOpenLoop`, `namedDeliverables`) + prune their imports and the Task-ledger test section (`l.1649–2260`). These are now unreferenced by `main()`; safe to delete once confirmed nothing else calls them.
 5. **Demote to advisory** — `async_done`, `claimsSuccess`, completion/deferral stamps become an info-only footer (spec §7), not deleted.
 6. **Swap the README** — `docs/README.v2-draft.md` → `README.md`; bump to `2.0.0`.
+
+**Progress: stages 1–2 done and green. Stage 3 paused for the capability decision; stage 4 (the subsystem-B function bodies) is a clean follow-up once 3 is settled.**
 
 ## Do NOT flip until
 
