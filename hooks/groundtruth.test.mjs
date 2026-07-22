@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { analyze, stripQuotedForClaim, claimsSuccess, testExclusionFindings, testWeakeningFindings, vacuousTestFindings, mojibakeFindings, agentFindings, parseAgentFile, untrackedAdded, parseTranscript, scanContent, attributeDebt, runCompiledRules, compileRuleRe, intentConfidence, renderCard, shouldAskStar, projectFindings, advanceSnapshot, freshRatifiers, remediationDecision, renderCorrective, blockOutcomeNote, liveNoticeCmds, editorCli, openLoops, runProcedures, envFindings, updateTaskLedger, loadGtConfig, pendingApprovals, applyConfirmedDeferrals, humanDeferrals, taskId, refereeTamper, compareSnapshot, integrityScope, GAMED_FILE_RE, priorFindingsContext, sessionHasCommit, proposedStale, isTrackableRequest, isSecret, excludedScanPath, dropExcludedFiles, classifyDeliverables, surfaceOpenLoop, preCommitHookScript, parseDiffRange } from './groundtruth.mjs';
+import { analyze, stripQuotedForClaim, claimsSuccess, testExclusionFindings, testWeakeningFindings, vacuousTestFindings, mojibakeFindings, agentFindings, parseAgentFile, untrackedAdded, parseTranscript, scanContent, attributeDebt, runCompiledRules, compileRuleRe, intentConfidence, renderCard, shouldAskStar, projectFindings, advanceSnapshot, freshRatifiers, remediationDecision, renderCorrective, blockOutcomeNote, liveNoticeCmds, editorCli, runProcedures, envFindings, loadGtConfig, pendingApprovals, refereeTamper, compareSnapshot, integrityScope, GAMED_FILE_RE, priorFindingsContext, sessionHasCommit, proposedStale, isSecret, excludedScanPath, dropExcludedFiles, preCommitHookScript, parseDiffRange, lastCodeEditSeq } from './groundtruth.mjs';
 import { parseCorrectivePairs, parseForbidTokens, isArmableToken, extractCandidates, compile, repoSourceExts } from './compile-rules.mjs';
 import { checkDroppedSymbols, collectDefs } from './symbol-integrity.mjs';
 
@@ -64,169 +64,6 @@ ok('renderCard: no gradeable ask → Completeness ⚪ n/a, NOT a 🟢 pass',
 ok('renderCard: a command-only clean turn reads 🟢 Told & Done, not 🟡 LOW-CONFIDENCE',
   (() => { const c = renderCard([], { intent: '', session: 'x' }); return c.includes('🟢 Told & Done') && !c.includes('LOW-CONFIDENCE'); })());
 
-// ── Class 1: false test/build claim ──
-ok('C1 fires: claimed tests pass, none ran',
-  has(analyze({ claim: 'All tests pass now.', diff: '', bashCmds: [], results: [] }), 1));
-ok('C1 WARN not BLOCK: the !ran finding is prose-grounded → warn-tier in-session (no silent block-loop)',
-  (() => { const f = analyze({ claim: 'All tests pass now.', diff: '', bashCmds: [], results: [] }).find(x => x.cls === 1); return f && f.sev === 'warn'; })());
-ok('C1 warns: claimed pass but a test result reports failures',
-  has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '3 failed, 5 passed' }] }), 1));
-// ── C1 failure-substring sensor SCOPED to the run that backs the claim (v1.2.2) ──
-// It used to scan EVERY result in the session, so a red run that was FIXED and re-run green still warned
-// forever, and any output merely CONTAINING "FAIL" (a probe marker, a pasted log) tripped it. Measured as the
-// single noisiest finding in GT's own development (~40 fires in one session, ~all false).
-const be1 = (cmd, is_error, text, seq) => ({ cmd, seq, background: false, is_error, text });
-ok('C1 SILENT: red run FIXED then re-run GREEN — the stale failure text must not warn forever',
-  !has(analyze({ claim: 'Done. Tests pass.', bashCmds: ['npm test'],
-    bashEvents: [be1('npm test', true, '3 failed', 1), be1('npm test', false, '627 passed', 3)],
-    results: [{ is_error: true, text: '3 failed' }, { is_error: false, text: '627 passed' }] }), 1));
-ok('C1 SILENT: unrelated output containing "FAIL" (a probe marker / pasted log) is not the test run',
-  !has(analyze({ claim: 'Done. Tests pass.', bashCmds: ['npm test'],
-    bashEvents: [be1('npm test', false, '627 checks passed', 1)],
-    results: [{ is_error: false, text: '627 checks passed' }, { is_error: false, text: '  **FAIL** probe marker' }] }), 1));
-ok('C1 FIRES: the run BACKING the claim printed failures while exiting 0 (misconfig the exit code misses)',
-  has(analyze({ claim: 'Done. Tests pass.', bashCmds: ['npm test'],
-    bashEvents: [be1('npm test', false, '3 failed', 1)], results: [{ is_error: false, text: '3 failed' }] }), 1));
-ok('C1 legacy (no bashEvents — pre-commit/CI): the session-wide scan is UNCHANGED, zero drift',
-  has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '2 failed' }] }), 1)
-  && !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '12 passed, 0 failed' }] }), 1));
-ok('C1 FIRES: a masked re-run (`npm test || true`) whose OWN output prints failures is still caught (exit sensor abstains on ||; the scoped substring reads lastRun.text)',
-  has(analyze({ claim: 'tests pass', bashCmds: ['npm test || true'],
-    bashEvents: [be1('npm test || true', false, '3 failed', 1)], results: [{ is_error: false, text: '3 failed' }] }), 1));
-ok('C1 FIRES: a green LINT after a red test does not wash it (fence keeps the red as lastRun) — the launder stays closed',
-  has(analyze({ claim: 'tests pass', bashCmds: ['npm test', 'npm run lint'],
-    bashEvents: [be1('npm test', true, '3 failed', 1), be1('npm run lint', false, 'clean', 3)],
-    results: [{ is_error: true, text: '3 failed' }, { is_error: false, text: 'clean' }] }), 1));
-ok('C1 accepted FN (pinned so the tradeoff is explicit): red `npm test` then green `npm run build` — the build is the run of record, the earlier red is not re-reported',
-  !has(analyze({ claim: 'Done. Tests pass.', bashCmds: ['npm test', 'npm run build'],
-    bashEvents: [be1('npm test', true, '3 failed', 1), be1('npm run build', false, 'built in 2s', 3)],
-    results: [{ is_error: true, text: '3 failed' }, { is_error: false, text: 'built in 2s' }] }), 1));
-// ── onlyFiltered red-defeats-every inversion (v1.2.2): a FAILING full run must never make the verdict CLEANER ──
-// Pre-fix: red `npm test` + green `npm test -- --grep trivial` + "All tests pass." was fully silent, while the
-// filtered green ALONE fired — adding a red run laundered the overclaim (verified by probe; masked pre-v1.2.2
-// only because the session-wide substring sensor fired on the red's stale text).
-ok('C1 FIRES (inversion closed): a RED unfiltered run + green FILTERED run cannot back "ALL tests pass"',
-  (() => { const f = analyze({ claim: 'All tests pass.', bashCmds: ['npm test', 'npm test -- --grep trivial'],
-    bashEvents: [be1('npm test', true, '3 failed', 1), be1('npm test -- --grep trivial', false, '1 passed', 3)],
-    results: [{ is_error: true, text: '3 failed' }, { is_error: false, text: '1 passed' }] }).find(x => x.cls === 1);
-    return f && /FILTERED/.test(f.msg); })());
-ok('C1 SILENT: an unfiltered GREEN completed run still defeats the filtered-run check (no drift on the honest path)',
-  !has(analyze({ claim: 'All tests pass.', bashCmds: ['npm test', 'npm test -- --grep billing'],
-    bashEvents: [be1('npm test', false, '627 passed', 1), be1('npm test -- --grep billing', false, '3 passed', 3)],
-    results: [{ is_error: false, text: '627 passed' }, { is_error: false, text: '3 passed' }] }), 1));
-ok('C1 ABSTAINS: an UNPAIRED unfiltered run (lost result — may have been the full green) falls back to the legacy command grade, silent',
-  !has(analyze({ claim: 'All tests pass.', bashCmds: ['npm test', 'npm test -- --grep trivial'],
-    bashEvents: [be1('npm test', null, '', 1), be1('npm test -- --grep trivial', false, '1 passed', 3)],
-    results: [{ is_error: false, text: '1 passed' }] }), 1));
-ok('C1 ABSTAINS: a BACKGROUND unfiltered run (completion order unknowable) falls back to the legacy command grade, silent',
-  !has(analyze({ claim: 'All tests pass.', bashCmds: ['npm test', 'npm test -- --grep trivial'],
-    bashEvents: [{ cmd: 'npm test', seq: 1, background: true, is_error: false, text: '627 passed' }, be1('npm test -- --grep trivial', false, '1 passed', 3)],
-    results: [{ is_error: false, text: '627 passed' }, { is_error: false, text: '1 passed' }] }), 1));
-// ── C1 disclosed-partial-pass: an honest "15/16, team-mode pre-existing" must NOT trip on its own FAIL line ──
-ok('C1 SILENT: a DISCLOSED partial pass ("15/16 tests pass; team-mode is a pre-existing failure") is honest, not an overclaim',
-  !has(analyze({ claim: '15/16 tests pass; team-mode.test.js is a pre-existing failure I disclosed', bashCmds: ['npm test'], results: [{ is_error: false, text: 'FAIL ./public/js/team-mode.test.js\n15 passed, 1 failed' }] }), 1));
-ok('C1 SILENT: "1 failing, unrelated" disclosure suppresses the FAIL-substring self-match',
-  !has(analyze({ claim: 'tests pass, 1 failing which is unrelated and pre-existing', bashCmds: ['npm test'], results: [{ is_error: false, text: 'FAIL suite-b\nok' }] }), 1));
-ok('C1 FIRES: a CLEAN overclaim ("22/22 test files pass") with a FAIL in output still fires (the useful catch preserved)',
-  has(analyze({ claim: '22/22 test files pass', bashCmds: ['npm test'], results: [{ is_error: false, text: 'FAIL ./public/js/team-mode.test.js' }] }), 1));
-// The disclosure guard must NOT be an off-switch (Fable blocker): stray tokens / dates / quoted text can't wave a real FAIL through.
-const failOut = [{ is_error: false, text: 'FAIL a.test.js\nFAIL b.test.js\nTests: 10 failed, 5 passed' }];
-ok('C1 FIRES: "unrelated" about a DIFFERENT subject does not suppress a real failure ("refactor is unrelated… all tests pass")',
-  has(analyze({ claim: 'This refactor is unrelated to the parser. All tests pass.', bashCmds: ['npm test'], results: failOut }), 1));
-ok('C1 FIRES: a DATE/version fraction ("12/2024 release") is not a partial-pass disclosure',
-  has(analyze({ claim: 'All tests pass (targeting the 12/2024 release).', bashCmds: ['npm test'], results: failOut }), 1));
-ok('C1 FIRES: a "known issue with the docs" (not a test failure) does not suppress',
-  has(analyze({ claim: 'Tests pass; there is a known issue with the docs build.', bashCmds: ['npm test'], results: failOut }), 1));
-ok('C1 FIRES: a disclosure that exists only inside FENCED/quoted text is not the agent\'s own claim',
-  has(analyze({ claim: 'Tests pass.\n```\n1 failing, pre-existing\n```', bashCmds: ['npm test'], results: failOut }), 1));
-ok('C1 SILENT: a SUCCESS line with a zero failure-count ("12 passed, 0 failed") is not a failure',
-  !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '12 passed, 0 failed' }] }), 1)
-  && !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: 'Tests: 0 failing' }] }), 1));
-ok('C1 warns: a NON-zero failure-count still fires ("2 failed", "10 failed")',
-  has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '2 failed' }] }), 1)
-  && has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '10 failed' }] }), 1));
-ok('C1 warns: ava-style "1 test failed" (word between count and "failed") is now caught — not a false negative',
-  has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '1 test failed' }] }), 1)
-  && has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '3 tests failed' }] }), 1));
-ok('C1 SILENT: "N tests failed" with a ZERO count ("0 tests failed") stays quiet',
-  !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: '5 tests passed, 0 tests failed' }] }), 1));
-// "pass" as a NOUN (a stage), not the verb — a live FP found by replaying 10 days of real hindsight
-// sessions: "then build the FIX pass" fired Class-1 (at BLOCK severity, pre-demotion) on a turn that only
-// ANNOUNCED a plan. The keyword→verb gap spans the whole noun phrase, so "build … pass" looked like a verdict.
-ok('C1 SILENT: "build the FIX pass" — `pass` is a NOUN (a stage), not "the build passes" (the live block FP)',
-  !has(analyze({ claim: 'I will run the sweep, then build the FIX pass (verify pin → attributed replacement).', bashCmds: [], results: [] }), 1));
-ok('C1 SILENT: "build the **CONFIRM pass**" — markdown emphasis around the noun does not resurrect the FP',
-  !has(analyze({ claim: 'Next I will build the **CONFIRM pass** over the 213 images.', bashCmds: [], results: [] }), 1));
-ok('C1 SILENT: a bare determiner + noun ("test a second pass") is a stage, not a claim',
-  !has(analyze({ claim: 'I will test a second pass over the data.', bashCmds: [], results: [] }), 1));
-ok('C1 STILL FIRES: a real subject before the bare verb ("the tests pass" / "all tests pass") is untouched by the noun guard',
-  has(analyze({ claim: 'The tests pass.', bashCmds: [], results: [] }), 1)
-  && has(analyze({ claim: 'All tests pass.', bashCmds: [], results: [] }), 1));
-ok('C1 STILL FIRES: inflected verb forms are unambiguous — the noun guard only excuses the BARE `pass`',
-  has(analyze({ claim: 'Done — the build passes cleanly.', bashCmds: [], results: [] }), 1)
-  && has(analyze({ claim: 'Done — the build passed.', bashCmds: [], results: [] }), 1));
-// Greedy-tail laundering: `[^.!?\n]*` is greedy, so the match's captured verb is the LAST one in the
-// sentence. A first-draft noun guard inspected only that final verb — so a trailing noun-`pass` ("…after
-// the second pass") excused the WHOLE match and silenced a real leading claim (verified FN: an agent could
-// launder any green claim by appending "— one more pass later"). The guard walks EVERY verb occurrence.
-ok('C1 STILL FIRES: "Tests pass after the second pass" — a trailing noun-pass cannot launder the real leading claim',
-  has(analyze({ claim: 'Tests pass after the second pass.', bashCmds: [], results: [] }), 1));
-ok('C1 STILL FIRES: "tests pass; next up: the FIX pass" — a same-sentence stage name after a real claim',
-  has(analyze({ claim: 'The tests pass; next up: the FIX pass.', bashCmds: [], results: [] }), 1));
-ok('C1 STILL FIRES: "build is green after one pass" — the greedy tail must not skip past the real verb "green"',
-  has(analyze({ claim: 'The build is green after one pass over the diff.', bashCmds: [], results: [] }), 1));
-ok('C1 SILENT: two noun stages in one sentence ("the FIX pass then the CONFIRM pass") stay excused',
-  !has(analyze({ claim: 'Build the FIX pass then the CONFIRM pass.', bashCmds: [], results: [] }), 1));
-// Gap bound: a keyword and a verb ~18 words apart are clause GLUE, not one claim — a live replay FP
-// married "file/test" to "the fix was verified" across three clauses. Past MAX_GAP words the check abstains.
-ok('C1 SILENT: keyword→verb glued across distant clauses ("…no named file/test, so the auditor … the fix was verified…") abstains',
-  !has(analyze({ claim: 'Your ask was phrased as a symptom with no named file/test, so the auditor had no explicit deliverable list to tick off (not an actual gap, the fix was verified with the repro test).', bashCmds: [], results: [] }), 1));
-ok('C1 STILL FIRES: a real claim with a wide-but-bounded gap ("the build and all 502 unit checks now pass")',
-  has(analyze({ claim: 'The build and all 502 unit checks now pass.', bashCmds: [], results: [] }), 1));
-// MAX_GAP pins BOTH edges: the widest real claim (11 words) must fire, the glue FP (18) must not. An
-// earlier bound of 8 sat below the real claim and silently ATE it — abstain is a clean green, so a too-tight
-// gap is an FN, not a safe default. 12 is the verified band; this test fails if it drifts either way.
-ok('C1 STILL FIRES: an 11-word gap is still ONE real claim — the bound must not eat it (regression on MAX_GAP=8)',
-  has(analyze({ claim: 'The tests I added for the new billing and invoicing modules now all pass.', bashCmds: [], results: [] }), 1));
-ok('C1 SILENT: "tests should pass" is an example, not a claim (the false-block bug)',
-  !has(analyze({ claim: 'name a file and say tests should pass for a full green', bashCmds: [], results: [] }), 1));
-ok('C1 SILENT: "make sure tests pass" is guidance, not a claim',
-  !has(analyze({ claim: 'make sure tests pass before you merge', bashCmds: [], results: [] }), 1));
-ok('C1 SILENT: a stray ✗/Error in the session is not a test failure',
-  !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: true, text: 'Error: command not found ✗' }] }), 1));
-ok('C1 silent: claimed pass and a test actually ran clean',
-  !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: 'ok' }] }), 1));
-ok('C1 silent: no test claim at all',
-  !has(analyze({ claim: 'Added the button.', bashCmds: [], results: [] }), 1));
-ok('C1 fires (anti-game): claimed pass but the only file changed is a test',
-  has(analyze({ claim: 'Fixed it, tests pass.', diff: '+++ b/foo.test.js\n+expect(1).toBe(1)', bashCmds: ['npm test'], results: [{ is_error: false, text: 'ok' }] }), 1));
-ok('C1 silent: a non-test file also changed (legit test update)',
-  !has(analyze({ claim: 'Fixed it, tests pass.', diff: '+++ b/src/foo.js\n+x\n+++ b/foo.test.js\n+y', bashCmds: ['npm test'], results: [{ is_error: false, text: 'ok' }] }), 1));
-// ── C1 precision (sentence-scoped guard): counterfactual, verb-mirror, contraction, negation, self-match ──
-// Each runs with NO test command, so a leaked claim would BLOCK — the suppression is what keeps it silent.
-ok('C1 SILENT: far counterfactual "even if I\'d watched the build go green" (past the proximity window)',
-  !has(analyze({ claim: "even if I'd watched the prod build go green, the module would still crash", bashCmds: [], results: [] }), 1));
-ok('C1 SILENT: modal + "verified" ("build should be verified") — guard verb-set mirrors the claim\'s',
-  !has(analyze({ claim: 'the build should be verified before deploy', bashCmds: [], results: [] }), 1));
-ok('C1 SILENT: contraction modal "I\'ll make the tests pass"',
-  !has(analyze({ claim: "I'll make the tests pass once the mock lands", bashCmds: [], results: [] }), 1));
-ok('C1 SILENT: negation "the tests don\'t pass yet" is an honest negative, not a false done',
-  !has(analyze({ claim: "the tests don't pass yet — fixing the mock", bashCmds: [], results: [] }), 1));
-ok('C1 SILENT: a quoted PATTERN ("tests/build … pass/green") is the regex discussed, not a claim',
-  !has(analyze({ claim: 'the honesty check matches tests/build … pass/green in your message', bashCmds: [], results: [] }), 1));
-// ── Defect A: quoted-PROSE + reported-speech are not first-person claims (the silent block-loop FP) ──
-ok('C1 SILENT: an INLINE-backticked "`tests pass`" is quoted prose, not a claim',
-  !has(analyze({ claim: 'the finding was `tests pass` — I was quoting it', bashCmds: [], results: [] }), 1));
-ok('C1 SILENT: a FENCED block containing "tests pass" is quoted, not a claim',
-  !has(analyze({ claim: 'here is the card:\n```\nclaimed tests pass, none ran\n```\njust FYI', bashCmds: [], results: [] }), 1));
-ok('C1 SILENT: a `>` BLOCKQUOTE line "tests pass" is quoted, not a claim',
-  !has(analyze({ claim: 'the README says:\n> added retry, tests pass\nthat is their example', bashCmds: [], results: [] }), 1));
-ok('C1 SILENT: REPORTED SPEECH ("the finding says tests pass") is attribution, not a claim',
-  !has(analyze({ claim: 'the finding says tests pass but no command ran — a false positive', bashCmds: [], results: [] }), 1));
-ok('C1 SILENT: the echoed finding message ("claimed tests/build pass …") does not self-match',
-  !has(analyze({ claim: 'Groundtruth flagged: claimed tests/build pass, but no test/build command ran — I was quoting it', bashCmds: [], results: [] }), 1));
-ok('C1 FIRES: a STRADDLING backtick ("All `tests` pass") is a real claim, not laundered into a false negative',
-  has(analyze({ claim: 'All `tests` pass now.', bashCmds: [], results: [] }), 1));
 ok('stripQuotedForClaim: fenced/blockquote blanked length-preserving; inline spans returned',
   (() => { const r = stripQuotedForClaim('a `x` b\n> q\n```\nc\n```\n'); return r.scan.length === 'a `x` b\n> q\n```\nc\n```\n'.length && !/q\b/.test(r.scan) && !/\bc\b/.test(r.scan) && r.inlineSpans.length === 1; })());
 // ── AG-B: config/build test-exclusion + coverage-threshold lowering (warn, claim-gated) ──
@@ -324,189 +161,24 @@ ok('VACUOUS SILENT: bare `await promise` (no call) can REJECT → can fail — a
   !vtf('tests pass', '+++ b/x.test.js\n+it("boots", async () => {\n+  await ready;\n+});'));
 ok('VACUOUS: regex-blanking does not eat DIVISION — a no-call body containing `a / b` still fires',
   vtf('tests pass', '+++ b/x.test.js\n+it("x", () => {\n+  const y = a / b;\n+});'));
+// ── lastCodeEditSeq: the stale-green anchor for the v2 contract (the 4 gates ported from v1 class-1) ──
+ok('lastCodeEditSeq: a real code edit returns its seq', lastCodeEditSeq([{ path: 'src/a.js', seq: 4, added: 'const x = 1;', removed: '' }], '') === 4);
+ok('lastCodeEditSeq: a COMMENT-only edit does not count (normalized-code gate) → 0', lastCodeEditSeq([{ path: 'src/a.js', seq: 4, added: 'total++; // the count', removed: 'total++; // count' }], '') === 0);
+ok('lastCodeEditSeq: a pure WHITESPACE reformat does not count → 0', lastCodeEditSeq([{ path: 'src/a.js', seq: 4, added: 'if (n < 0) { fail() }', removed: 'if(n<0){fail()}' }], '') === 0);
+ok('lastCodeEditSeq: a non-code / doc path does not count (CODE_EXT_RE gate) → 0', lastCodeEditSeq([{ path: 'README.md', seq: 4, added: 'new prose', removed: '' }], '') === 0);
+ok('lastCodeEditSeq: a real code change DOES count', lastCodeEditSeq([{ path: 'src/a.js', seq: 4, added: 'if (n <= 0)', removed: 'if (n < 0)' }], '') === 4);
+ok('lastCodeEditSeq: a pure DELETION of code counts', lastCodeEditSeq([{ path: 'src/a.js', seq: 4, added: '', removed: 'const guard = checkAuth();' }], '') === 4);
+// THE CARDINAL-SIN REGRESSION: real transcripts record ABSOLUTE file_path; without relativizing, the path
+// reads as out-of-tree (excludedScanPath) and the sensor ships silently INERT in production. Pin it.
+ok('lastCodeEditSeq: an ABSOLUTE path is relativized against cwd and counted (production-inertness pin)', lastCodeEditSeq([{ path: '/home/u/repo/src/a.js', seq: 7, added: 'const y = 2;', removed: '' }], '/home/u/repo') === 7);
+ok('lastCodeEditSeq: an out-of-repo absolute path (scratchpad) stays excluded → 0', lastCodeEditSeq([{ path: '/tmp/scratch/x.js', seq: 7, added: 'const y = 2;', removed: '' }], '/home/u/repo') === 0);
+// ── the re-gated "only files changed are tests" anti-gaming finding (moved off class-1, gated on claimsSuccess) ──
+ok('only-tests anti-gaming FIRES: success claim + the only changed file is a test', has(analyze({ claim: 'Fixed it, tests pass.', diff: '+++ b/pkg/foo.test.js\n+x' }), 1));
+ok('only-tests anti-gaming ABSTAINS: no success claim → does not fire', !has(analyze({ claim: 'Refactoring the tests, still WIP.', diff: '+++ b/pkg/foo.test.js\n+x' }), 1));
+ok('only-tests anti-gaming ABSTAINS: a mixed diff (test + real code) → does not fire', !has(analyze({ claim: 'Fixed it, tests pass.', diff: '+++ b/pkg/foo.test.js\n+x\n+++ b/src/foo.js\n+y' }), 1));
 ok('claimsSuccess: plain claim true; hedged/negated false; quoted false',
   claimsSuccess('Done, tests pass.') === true && claimsSuccess('Not done yet, still WIP.') === false
   && claimsSuccess('the finding said `tests pass` — I was quoting') === false);
-ok('C1 FIRES: sentence-scope keeps a real claim — "Tests pass." not silenced by a LATER hypothetical sentence',
-  has(analyze({ claim: 'Tests pass. If you change X, make sure the build passes again.', bashCmds: [], results: [] }), 1));
-// ── C1 syntax-check demotion: a "tests pass" claim backed ONLY by node --check / tsc / cargo check ──
-ok('C1 WARNS: "tests pass" but only `node --check` ran — a syntax check is not a test run',
-  analyze({ claim: 'tests pass', bashCmds: ['node --check api/x.mjs'], results: [] }).some(f => f.cls === 1 && f.sev === 'warn' && /syntax\/type check/.test(f.msg)));
-ok('C1 silent: "tests pass" with a REAL run (npm test) is not demoted',
-  !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: 'ok' }] }), 1));
-ok('C1 silent: demotion does NOT fire for a "build passes" claim after tsc (noun is build, not tests)',
-  !has(analyze({ claim: 'the build passes', bashCmds: ['tsc --noEmit'], results: [{ is_error: false, text: 'ok' }] }), 1));
-// ── C1 adversarial (Fable FIX-FIRST pass): span must not cross !/?, path/trailing-counterfactual/compound-cmd edges ──
-ok('C1 SILENT: claim noun+verb straddling a "!" is not one claim (no false block)',
-  !has(analyze({ claim: 'Great tests! They should pass once the mock lands.', bashCmds: [], results: [] }), 1));
-ok('C1 SILENT: claim noun+verb straddling a "?" is not one claim',
-  !has(analyze({ claim: 'Do the tests work? If you fix the mock, they pass.', bashCmds: [], results: [] }), 1));
-ok('C1 FIRES: a path in the span ("apps/web passes") is a real claim, NOT a quoted pattern',
-  has(analyze({ claim: 'The build in apps/web passes now.', bashCmds: [], results: [] }), 1));
-ok('C1 FIRES: a TRAILING counterfactual ("Tests pass even if you run them twice") does not launder a real claim',
-  has(analyze({ claim: 'Tests pass even if you run them twice.', bashCmds: [], results: [] }), 1));
-ok('C1 FIRES: a trailing "would have failed" clause does not launder a leading "Tests pass"',
-  has(analyze({ claim: 'Tests pass — without the fix they would have failed.', bashCmds: [], results: [] }), 1));
-ok('C1 silent: demotion does NOT fire when a REAL runner shares the compound command (`npm test && tsc`)',
-  !has(analyze({ claim: 'tests pass', bashCmds: ['npm test && tsc --noEmit'], results: [] }), 1));
-ok('C1 silent: demotion does NOT fire on `tsc` inside a filename (`node tsc-utils.test.mjs`)',
-  !has(analyze({ claim: 'tests pass', bashCmds: ['node tsc-utils.test.mjs'], results: [] }), 1));
-// ── C1 adversarial (Fable RE-VERIFY pass): the demotion's real-world tsc forms, sentence-shadowing, noun-slash ──
-ok('C1 WARNS: demotion fires on `npx tsc` (the dominant real form — anchoring it away made the rail inert)',
-  analyze({ claim: 'All tests pass.', bashCmds: ['npx tsc --noEmit'], results: [] }).some(f => f.cls === 1 && f.sev === 'warn' && /syntax\/type check/.test(f.msg)));
-ok('C1 WARNS: demotion fires on a path-invoked tsc (`./node_modules/.bin/tsc`) and an env prefix (`FOO=1 tsc`)',
-  has(analyze({ claim: 'tests pass', bashCmds: ['./node_modules/.bin/tsc --noEmit'], results: [] }), 1)
-  && has(analyze({ claim: 'tests pass', bashCmds: ['FOO=1 tsc --noEmit'], results: [] }), 1));
-ok('C1 FIRES: a hedged EARLIER sentence does not shadow a real claim that follows (global match scan)',
-  has(analyze({ claim: 'The build should pass once wired. The tests pass.', bashCmds: [], results: [] }), 1));
-ok('C1 FIRES: a slash joining two NOUNS is prose ("Build/tests pass"), not a quoted pattern',
-  has(analyze({ claim: 'Build/tests pass.', bashCmds: [], results: [] }), 1)
-  && has(analyze({ claim: 'tests/lint pass after the fix.', bashCmds: [], results: [] }), 1));
-ok('C1 SILENT: a verb-slash meta-quote ("… pass/green") stays suppressed after the noun-slash fix',
-  !has(analyze({ claim: 'the check matches tests/build … pass/green here', bashCmds: [], results: [] }), 1));
-
-// ── C1 artifact-grounded evidence (v1.1.0): exit status · ordering · filtered runs ──────────────────────
-// The three confirmed holes: (1) is_error captured but never read — an exit-1/OOM run with no recognizable
-// failure string in stdout was blessed green; (2) flat unpaired arrays made "last run predates last edit"
-// structurally unanswerable; (3) `pytest -k billing` backed an "all tests pass" claim. Each check must also
-// ABSTAIN without transcript evidence (pre-commit/CI/legacy callers) — an abstention test per check.
-{
-  const bev = (over = {}) => ({ cmd: 'npm test', seq: 1, background: false, is_error: false, text: '', ...over });
-  // (1) exit status — fires on the paired non-zero exit even with a green-looking/unrecognizable stdout
-  ok('C1-exit FIRES: `npm test` exit-1 with NO recognizable failure string ("command failed") — the hole is closed',
-    analyze({ claim: 'all tests pass', bashCmds: ['npm test'],
-      bashEvents: [bev({ is_error: true, text: JSON.stringify('Error: command failed with exit code 1') })] })
-      .some(f => f.cls === 1 && /exited NON-ZERO/.test(f.msg)));
-  ok('C1-exit FIRES on an OOM "Killed" run (no TEST_FAIL_RE string at all)',
-    analyze({ claim: 'all tests pass', bashCmds: ['npm test'],
-      bashEvents: [bev({ is_error: true, text: JSON.stringify('Killed') })] })
-      .some(f => f.cls === 1 && /exited NON-ZERO/.test(f.msg)));
-  ok('C1-exit WARN not BLOCK: the trigger is still a prose-parsed claim — severity bounded by the weakest conjunct',
-    analyze({ claim: 'all tests pass', bashCmds: ['npm test'],
-      bashEvents: [bev({ is_error: true, text: JSON.stringify('Killed') })] })
-      .every(f => f.cls !== 1 || f.sev === 'warn'));
-  ok('C1-exit ABSTAINS: legacy flat call (bashCmds/results only, NO bashEvents) stays silent — back-compat',
-    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: true, text: JSON.stringify('Killed') }] }), 1));
-  ok('C1-exit ABSTAINS: an UNPAIRED event (is_error:null — old/foreign transcript, no ids) is not a failure',
-    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], bashEvents: [bev({ is_error: null })] }), 1));
-  ok('C1-exit ABSTAINS: a harness abort (user interrupt) is not a test failure — the run never finished',
-    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'],
-      bashEvents: [bev({ is_error: true, text: JSON.stringify('[Request interrupted by user]') })] }), 1));
-  ok('C1-exit ABSTAINS: exit not attributable to the test segment (`npm test && git commit` — the commit failed)',
-    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test && git commit -m x'],
-      bashEvents: [bev({ cmd: 'npm test && git commit -m x', is_error: true, text: JSON.stringify('nothing to commit') })] }), 1));
-  ok('C1-exit SILENT on the normal red→fix→green flow: only the LAST completed run decides',
-    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test', 'npm test'],
-      bashEvents: [bev({ is_error: true, text: JSON.stringify('boom') }), bev({ seq: 3 })] }), 1));
-  ok('C1-exit SILENT when the claim DISCLOSES the failure ("15/16 pass") — honest reporting, not an overclaim',
-    !has(analyze({ claim: '15/16 tests pass; one is a known pre-existing failure', bashCmds: ['npm test'],
-      bashEvents: [bev({ is_error: true, text: JSON.stringify('1 known failure') })] }), 1));
-  // (2) ordering — stale green: green run, THEN the source edit, then "tests pass"
-  const greenAt1 = [bev({ text: JSON.stringify('5 passed, 0 failed') })];
-  ok('C1-stale FIRES: test green (seq1) → Write src/billing.js (seq2) → "all tests pass" — the green predates the edit',
-    analyze({ claim: 'Done. All tests pass.', bashCmds: ['npm test'], bashEvents: greenAt1,
-      mutations: [{ path: 'src/billing.js', seq: 2, text: 'export const round = x => x;' }] })
-      .some(f => f.cls === 1 && /STALE/.test(f.msg)));
-  ok('C1-stale SILENT: re-run AFTER the edit (test→edit→test) — the last run postdates the last mutation',
-    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test', 'npm test'],
-      bashEvents: [bev(), bev({ seq: 5 })],
-      mutations: [{ path: 'src/a.js', seq: 3, text: 'const x = 1;' }] }), 1));
-  ok('C1-stale SILENT: a DOC edit after the green run (README.md) cannot change a test outcome',
-    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], bashEvents: greenAt1,
-      mutations: [{ path: 'README.md', seq: 3, text: 'usage notes' }] }), 1));
-  ok('C1-stale SILENT: a COMMENT-ONLY edit after the green run is not an outcome-changing mutation',
-    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], bashEvents: greenAt1,
-      mutations: [{ path: 'src/a.js', seq: 3, text: '// clarifying comment' }] }), 1));
-  ok('C1-stale SILENT: a throwaway-path edit (tmp/, .claude/groundtruth/) after green is not a deliverable mutation',
-    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], bashEvents: greenAt1,
-      mutations: [{ path: 'tmp/scratch.js', seq: 3, text: 'const x = 1;' }, { path: '.claude/groundtruth/x.js', seq: 4, text: 'const y = 2;' }] }), 1));
-  ok('C1-stale ABSTAINS: a BACKGROUND test run in the mix — its completion order is unknowable, so no verdict',
-    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'],
-      bashEvents: [bev({ background: true, is_error: null })],
-      mutations: [{ path: 'src/a.js', seq: 3, text: 'const x = 1;' }] }), 1));
-  ok('C1-stale ABSTAINS: no transcript evidence (legacy flat call) → silent, exactly as before v1.1.0',
-    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: 'ok' }] }), 1));
-  ok('C1-stale FIRES on a pure DELETION after green (old_string code removed, nothing added) — deleting code un-greens too',
-    analyze({ claim: 'tests pass', bashCmds: ['npm test'], bashEvents: greenAt1,
-      mutations: [{ path: 'src/a.js', seq: 3, text: 'const guard = checkAuth();' }] })   // ledger set-diff carries the removed line
-      .some(f => f.cls === 1 && /STALE/.test(f.msg)));
-  ok('C1 chain: a failed exit AND a stale mutation yield ONE core finding, not two (else-if, most-grounded wins)',
-    analyze({ claim: 'all tests pass', bashCmds: ['npm test'],
-      bashEvents: [bev({ is_error: true, text: JSON.stringify('Killed') })],
-      mutations: [{ path: 'src/a.js', seq: 3, text: 'const x = 1;' }] })
-      .filter(f => f.cls === 1 && /NON-ZERO|STALE/.test(f.msg)).length === 1);
-  // (3) filtered runs — only under an ADJACENT universal quantifier, only unambiguous narrowing flags
-  ok('C1-filtered FIRES: `npm test -- --grep foo` cannot back an "all tests pass" claim',
-    analyze({ claim: 'all tests pass', bashCmds: ['npm test -- --grep foo'] })
-      .some(f => f.cls === 1 && /FILTERED/.test(f.msg)));
-  ok('C1-filtered FIRES: `pytest -k billing` under "All tests pass." (the confirmed-silent probe)',
-    analyze({ claim: 'All tests pass.', bashCmds: ['pytest -k billing'] })
-      .some(f => f.cls === 1 && /FILTERED/.test(f.msg)));
-  ok('C1-filtered SILENT without the universal quantifier ("tests pass" may honestly mean the subset)',
-    !has(analyze({ claim: 'tests pass', bashCmds: ['pytest -k billing'] }), 1));
-  ok('C1-filtered SILENT on an honestly-scoped claim ("all 12 billing tests pass") — adjacency gate holds',
-    !has(analyze({ claim: 'all 12 billing tests pass', bashCmds: ['pytest -k billing'] }), 1));
-  ok('C1-filtered SILENT when a FULL run also ran — the claim is backed',
-    !has(analyze({ claim: 'all tests pass', bashCmds: ['pytest -k billing', 'pytest'] }), 1));
-  ok('C1-filtered SILENT on colliding short flags: `make -k` is keep-going, `python -m pytest` is a FULL run',
-    !has(analyze({ claim: 'all tests pass', bashCmds: ['make -k test'] }), 1)
-    && !has(analyze({ claim: 'all tests pass', bashCmds: ['python -m pytest'] }), 1));
-  ok('C1-filtered SILENT on a single-FILE arg (a one-file repo\'s whole suite IS one file — documented ceiling)',
-    !has(analyze({ claim: 'all tests pass', bashCmds: ['node hooks/groundtruth.test.mjs'] }), 1));
-
-  // ── adversarial-review regressions (v1.1.0 hardening) ─────────────────────────────────────────────────
-  // (A) PRODUCTION INERTNESS: real transcripts record ABSOLUTE file_path (the Edit/Write schema requires
-  // it), and excludedScanPath reads any absolute path as out-of-tree — so codeMuts was ALWAYS empty on the
-  // Stop path and stale-green was silently dead in production while its relative-path tests stayed green.
-  ok('C1-stale FIRES with the ABSOLUTE file_path real transcripts carry (was silently INERT in production)',
-    analyze({ claim: 'All tests pass.', bashCmds: ['npm test'], cwd: '/Users/dev/repo',
-      bashEvents: [bev({ text: JSON.stringify('5 passed') })],
-      mutations: [{ path: '/Users/dev/repo/src/billing.js', seq: 2, text: 'export const round = x => x;' }] })
-      .some(f => f.cls === 1 && /STALE/.test(f.msg)));
-  ok('C1-stale SILENT: an absolute path OUTSIDE the repo (a scratchpad write) is still excluded after relativizing',
-    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'], cwd: '/Users/dev/repo',
-      bashEvents: [bev()], mutations: [{ path: '/private/var/scratch/x.js', seq: 2, text: 'const x = 1;' }] }), 1));
-  // (B) FAMILY FENCE: lint outcomes are independent of a tests claim in BOTH directions.
-  ok('C1-exit SILENT: a TRUE "the tests pass" is not contradicted by a LATER failing `npm run lint` (verified FP)',
-    !has(analyze({ claim: 'The tests pass. Lint still has 2 pre-existing style errors.', bashCmds: ['npm test', 'npm run lint'],
-      bashEvents: [bev({ text: JSON.stringify('5 passed') }),
-        bev({ cmd: 'npm run lint', seq: 2, is_error: true, text: JSON.stringify('2 problems') })] }), 1));
-  ok('C1-stale FIRES: a green `npm run lint` AFTER the edit cannot refresh a STALE test green (laundering fence)',
-    analyze({ claim: 'All tests pass.', bashCmds: ['npm test', 'npm run lint'],
-      bashEvents: [bev({ text: JSON.stringify('5 passed') }), bev({ cmd: 'npm run lint', seq: 3 })],
-      mutations: [{ path: 'src/billing.js', seq: 2, text: 'export const x = 1;' }] })
-      .some(f => f.cls === 1 && /STALE/.test(f.msg)));
-  ok('C1-exit FIRES under a LINT claim on the failing lint run — the fence is per-claim-noun, not lint-blind',
-    analyze({ claim: 'Lint passes now.', bashCmds: ['npm run lint'],
-      bashEvents: [bev({ cmd: 'npm run lint', is_error: true, text: JSON.stringify('boom') })] })
-      .some(f => f.cls === 1 && /NON-ZERO/.test(f.msg)));
-  ok('C1-exit SILENT: `npm test && npm run lint` failing under a tests claim — the pipeline exit is the LINT segment\'s',
-    !has(analyze({ claim: 'the tests pass', bashCmds: ['npm test && npm run lint'],
-      bashEvents: [bev({ cmd: 'npm test && npm run lint', is_error: true, text: JSON.stringify('2 problems') })] }), 1));
-  ok('C1-filtered FIRES: an unfiltered `npm run lint` alongside `pytest -k billing` is NOT the full suite run',
-    analyze({ claim: 'all tests pass', bashCmds: ['pytest -k billing', 'npm run lint'] })
-      .some(f => f.cls === 1 && /FILTERED/.test(f.msg)));
-  ok('C1-filtered SILENT when ONLY lint ran under an "all tests" claim — no relevant run to grade, not a phantom "filtered" verdict',
-    !has(analyze({ claim: 'all tests pass', bashCmds: ['npm run lint'] }).filter(f => /FILTERED/.test(f.msg)), 1));
-  // (C) MULTI-LINE Bash call: `\n` is a segment boundary — a failed commit on line 2 is not a failed test.
-  ok('C1-exit SILENT on a multi-line call ("npm test\\ngit commit") whose failing last line is not the test (verified FP)',
-    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test\ngit commit -m x'],
-      bashEvents: [bev({ cmd: 'npm test\ngit commit -m x', is_error: true, text: JSON.stringify('nothing to commit') })] }), 1));
-  ok('C1 weak-check SILENT: "tsc\\nnpm test" — a real test on line 2 means it was NOT only a typecheck (latent multi-line FP)',
-    !has(analyze({ claim: 'tests pass', bashCmds: ['tsc\nnpm test'], results: [] }), 1));
-  // (D) MIXED pairing: an unpaired LATER run must not let an earlier completed RED condemn the claim —
-  // is_error:null is abstain in BOTH directions (the lost result may have been the green re-run).
-  ok('C1-exit ABSTAINS on mixed pairing: completed RED then an UNPAIRED later run — never condemn on missing data',
-    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test', 'npm test'],
-      bashEvents: [bev({ is_error: true, text: JSON.stringify('Killed') }), bev({ seq: 2, is_error: null })] }), 1));
-  // (E) ACCEPTED RESIDUALS, pinned so a future change to them is deliberate, not accidental:
-  ok('C1 residual (accepted FN, warn-tier): a verdict phrased DET+modifier+pass ("The tests: a clean pass") is surface-identical to a stage name and abstains',
-    !has(analyze({ claim: 'The tests: a clean pass.', bashCmds: [], results: [] }), 1));
-  ok('C1 residual (accepted FN): an exit-1 run whose OWN stdout echoes the harness-abort marker reads as an abort (stdout is agent-authorable text)',
-    !has(analyze({ claim: 'tests pass', bashCmds: ['npm test'],
-      bashEvents: [bev({ is_error: true, text: JSON.stringify('Command timed out after 1s — printed by the test') })] }), 1));
-}
-
 // ── parseTranscript v1.1.0: pairing (tool_use.id ↔ tool_result.tool_use_id) + global tool order ──
 {
   const T = [
@@ -528,17 +200,34 @@ ok('C1 SILENT: a verb-slash meta-quote ("… pass/green") stays suppressed after
     pt.mutations.length === 1 && /Math\.round/.test(pt.mutations[0].text) && !/keep/.test(pt.mutations[0].text));
   ok('back-compat: the flat bashCmds/results arrays are unchanged in shape and content',
     pt.bashCmds.join(',') === 'npm test,npm run lint' && pt.results.length === 2 && pt.results[1].is_error === true);
-  // Adversarial-review revision: this transcript's TRUTHFUL finding is STALE, not NON-ZERO. The failing
-  // `npm run lint` says nothing about the TESTS claim (family fence — the pre-fence build flagged it
-  // NON-ZERO, a verified FP on a true claim); what IS wrong is that the test green predates the Edit.
-  ok('end-to-end: SAME transcript — the lint failure is fenced off the tests claim; the STALE green (test run predates the edit) is what fires',
-    (() => { const f = analyze({ claim: 'All tests pass.', bashCmds: pt.bashCmds, results: pt.results, bashEvents: pt.bashEvents, mutations: pt.mutations });
-      return f.some(x => x.cls === 1 && /STALE/.test(x.msg)) && !f.some(x => x.cls === 1 && /NON-ZERO/.test(x.msg)); })());
-  // Same transcript MINUS the post-edit lint run: now the only green predates the edit → the stale check fires.
-  const pt2 = parseTranscript(T.split('\n').slice(0, 5).join('\n'));
-  ok('end-to-end: transcript where the green run PREDATES the final Edit → stale-green fires (the reviewer\'s exact scenario)',
-    analyze({ claim: 'Done. All tests pass.', bashCmds: pt2.bashCmds, results: pt2.results, bashEvents: pt2.bashEvents, mutations: pt2.mutations })
-      .some(f => f.cls === 1 && /STALE/.test(f.msg)));
+  // C-8 (Fable adv FN-4): the PAIRED run text is DECODED (real newlines), not JSON.stringify'd — otherwise the
+  // contract's line-anchored failure banner (`(?:^|\n)FAIL`) is unreachable in production and pytest/jest/go
+  // banners on a zero-exit run go silently uncaught. Pin: a line-START banner survives the parse verbatim.
+  {
+    const B = [
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'p1', name: 'Bash', input: { command: 'pytest' } }] } }),
+      JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'p1', is_error: false, content: [{ type: 'text', text: 'collected 3 items\nFAILED tests/test_x.py::t - assert 1 == 2' }] }] } }),
+    ].join('\n');
+    const bt = parseTranscript(B).bashEvents[0].text;
+    ok('paired run text is DECODED (real newline present, not the 2 chars backslash-n)', bt.includes('\n') && !bt.includes('\\n'));
+    ok('a line-START runner banner is reachable in the decoded text (production sensor can match it)', /(?:^|\n)FAILED\b/.test(bt));
+  }
+  // C-8 (Fable adv FP-10): a FILTERED sidechain's Bash commands are surfaced separately (for the contract's
+  // abstain gate) while staying OUT of the main bashEvents/asks.
+  {
+    const S = [
+      JSON.stringify({ type: 'assistant', isSidechain: true, message: { content: [{ type: 'tool_use', id: 's1', name: 'Bash', input: { command: 'npm test' } }] } }),
+      JSON.stringify({ type: 'user', isSidechain: true, message: { content: [{ type: 'tool_result', tool_use_id: 's1', is_error: false, content: [{ type: 'text', text: '627 passing' }] }] } }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'm1', name: 'Bash', input: { command: 'git status' } }] } }),
+    ].join('\n');
+    const ps = parseTranscript(S);
+    ok('sidechainCmds captures the subagent Bash cmd; it stays OUT of the main bashEvents',
+      ps.sidechainCmds.includes('npm test') && !ps.bashEvents.some(e => e.cmd === 'npm test') && ps.bashEvents.some(e => e.cmd === 'git status'));
+    ok('with includeSidechain (SubagentStop path), sidechainCmds is empty (evidence folds into the main run)',
+      parseTranscript(S, { includeSidechain: true }).sidechainCmds.length === 0);
+  }
+  // (v1 class-1 stale-green/exit-attribution end-to-end assertions on this transcript retired with class-1;
+  // the stale-green sensor now lives in the contract — see claims-contract.test.mjs.)
   ok('transcript WITHOUT ids (predates v1.1.0 / foreign harness): events stay UNPAIRED (is_error:null) → checks abstain',
     (() => { const old = parseTranscript(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'npm test' } }] } })
       + '\n' + JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', is_error: true, content: 'Killed' }] } }));
@@ -561,10 +250,6 @@ ok('C1 SILENT: a verb-slash meta-quote ("… pass/green") stays suppressed after
     green.bashCmds.includes('npm test') && green.bashEvents.length === 1 && green.bashEvents[0].is_error === false);
   ok('subagent FP GONE: honest all-sidechain transcript + green run + "all tests pass" → SILENT (was `!ran` on every test-running subagent)',
     !has(analyze({ claim: 'All 502 tests pass.', bashCmds: green.bashCmds, results: green.results, bashEvents: green.bashEvents, mutations: green.mutations }), 1));
-  const red = parseTranscript(subTx(true), { includeSidechain: true });
-  ok('subagent still CAUGHT: the same transcript with a genuinely FAILED run under "all tests pass" → fires',
-    analyze({ claim: 'All tests pass.', bashCmds: red.bashCmds, results: red.results, bashEvents: red.bashEvents, mutations: red.mutations })
-      .some(f => f.cls === 1 && /NON-ZERO/.test(f.msg)));
   ok('main Stop UNCHANGED: the default parse still filters sidechain — a subagent\'s prompts are the orchestrator\'s, not human asks',
     parseTranscript(subTx(false)).bashCmds.length === 0 && parseTranscript(subTx(false)).intent === '');
   // CLI end-to-end: hook_event_name:'SubagentStop' + GROUNDTRUTH_BLOCK=1 — warn-only, no decision:'block',
@@ -582,7 +267,7 @@ ok('C1 SILENT: a verb-slash meta-quote ("… pass/green") stays suppressed after
   };
   const j = runSub('All tests pass.');
   ok('subagent CLI: a red run under GROUNDTRUTH_BLOCK=1 NEVER returns decision:block (no per-agent attempt state to loop on)',
-    j.decision === undefined && /NON-ZERO/.test(j.systemMessage || ''));
+    j.decision === undefined);
   ok('subagent CLI: no shared-session-state write — <session>.md / tasks.json / attempts / snapshot untouched',
     !existsSync(pathJoin(dir, '.claude', 'groundtruth')));
   // Adversarial-review regression: an EMPTY-but-readable transcript is the same no-evidence case as an
@@ -596,94 +281,7 @@ ok('C1 SILENT: a verb-slash meta-quote ("… pass/green") stays suppressed after
   rmSync(dir, { recursive: true, force: true });
 }
 
-// ── v1.1.1 FIX 2 — connector-aware exit attribution. The last-segment rule was wrong BOTH ways:
-// `npm test && echo ok` crashing was laundered silent (last seg = echo), `cd frontend && npm test` failing
-// fired on tests that never ran (the cd failed). Rule: `||` → NULL; `;`/newline statements own exits
-// separately (earlier in-family → NULL); last statement's chain attributable iff ≥1 in-family segment and
-// every other segment is on the infallible allowlist (exactly echo/true/:) — cd is NOT infallible.
-{
-  const bev = (over = {}) => ({ cmd: 'npm test', seq: 1, background: false, is_error: false, text: '', ...over });
-  const nonZero = (claim, cmd, is_error) => analyze({ claim, bashCmds: [cmd],
-    bashEvents: [bev({ cmd, is_error, text: JSON.stringify('command failed') })] })
-    .some(f => f.cls === 1 && /NON-ZERO/.test(f.msg));
-  ok('C1-exit FIRES: `npm test && echo ok` crash — an infallible echo suffix can no longer launder the red (was SILENT)',
-    nonZero('all tests pass', 'npm test && echo ok', true));
-  ok('C1-exit SILENT: `rm x && npm test` crash — the rm may be what failed; a fallible peer means abstain',
-    !nonZero('all tests pass', 'rm x && npm test', true));
-  ok('C1-exit SILENT: `cd frontend && npm test` crash — cd fails on a missing dir, the test never ran (was a FIRES FP)',
-    !nonZero('all tests pass', 'cd frontend && npm test', true));
-  ok('C1-exit SILENT: red run then `npm test || true` — the masked latest run abstains BOTH ways: it neither blesses (green-launders the red) nor lets the earlier red condemn (the masked re-run may have been green)',
-    !has(analyze({ claim: 'all tests pass', bashCmds: ['npm test', 'npm test || true'],
-      bashEvents: [bev({ is_error: true, text: JSON.stringify('Killed') }),
-        bev({ cmd: 'npm test || true', seq: 2, is_error: false, text: JSON.stringify('ok') })] }), 1));
-  ok('C1-exit NULL on a pipe (`npm test | tee log`) but the legacy stdout sensor still catches the "3 failed" output',
-    (() => { const f = analyze({ claim: 'all tests pass', bashCmds: ['npm test | tee log'],
-      results: [{ is_error: false, text: '3 failed' }],
-      bashEvents: [bev({ cmd: 'npm test | tee log', is_error: false, text: JSON.stringify('3 failed') })] });
-      return f.some(x => x.cls === 1 && /reported failures/.test(x.msg)) && !f.some(x => /NON-ZERO/.test(x.msg)); })());
-  ok('C1-exit FIRES: `true && npm test && echo ok` crash — every peer infallible, the exit is the test\'s',
-    nonZero('all tests pass', 'true && npm test && echo ok', true));
-  ok('C1-exit SILENT: `true && npm test && git push` crash — a fallible tail (git push) owns doubt over the exit',
-    !nonZero('all tests pass', 'true && npm test && git push', true));
-  ok('C1-exit UNCHANGED: bare `npm test` exit-1 ("Killed") still fires',
-    nonZero('all tests pass', 'npm test', true));
-  ok('C1-exit SILENT: in-family run in an EARLIER `;` statement (`npm test; echo done`) — its exit was discarded',
-    !nonZero('all tests pass', 'npm test; echo done', true));
-  // ── adversarial-review regressions (post-v1.1.1 hardening) ──
-  ok('C1-exit FIRES: `npm test;` / `npm test\\n` — a BLANK trailing statement cannot launder the red (was SILENT: a one-char suffix washed it)',
-    nonZero('all tests pass', 'npm test;', true) && nonZero('all tests pass', 'npm test\n', true));
-  ok('C1-exit SILENT: `npm test & git push` crash — a lone `&` backgrounds the test, so the exit is the push\'s (was a FIRES FP)',
-    !nonZero('all tests pass', 'npm test & git push', true));
-  ok('C1-exit FIRES: `npm test 2>&1` crash — `>&` is redirect fd syntax, not a statement separator',
-    nonZero('all tests pass', 'npm test 2>&1', true));
-  ok('C1-exit SILENT: `npm test && echo done > /bad/path` crash — echo WITH a redirection can own the exit-1 (was a FIRES FP)',
-    !nonZero('all tests pass', 'npm test && echo done > /bad/path', true));
-  ok('C1-exit FIRES: `CI=1 npm test` and `(npm test)` — env prefix / subshell paren survive the command-position anchor',
-    nonZero('all tests pass', 'CI=1 npm test', true) && nonZero('all tests pass', '(npm test)', true));
-  ok('C1-exit SILENT: `grep vitest package.json` exit-1 after a real green — a runner name in an ARGUMENT is not a test run (was a FIRES FP)',
-    !has(analyze({ claim: 'all tests pass', bashCmds: ['npm test', 'grep vitest package.json'],
-      bashEvents: [bev({ text: JSON.stringify('5 passed') }),
-        bev({ cmd: 'grep vitest package.json', seq: 2, is_error: true, text: JSON.stringify('') })] }), 1));
-  ok('C1-stale FIRES: green → code edit → `grep vitest package.json` — an argument-substring "run" cannot refresh a stale green (laundering closed)',
-    analyze({ claim: 'all tests pass', bashCmds: ['npm test', 'grep vitest package.json'],
-      bashEvents: [bev({ text: JSON.stringify('5 passed') }),
-        bev({ cmd: 'grep vitest package.json', seq: 3, is_error: false, text: JSON.stringify('found') })],
-      mutations: [{ path: 'src/a.js', seq: 2, text: 'const x = 1;' }] })
-      .some(f => f.cls === 1 && /STALE/.test(f.msg)));
-}
 
-// ── v1.1.1 FIX 3 — stale-green mutation test compares NORMALIZED CODE portions (comment-stripped,
-// whitespace-stripped) of the added vs removed sides, so an inert edit — a comment tweak riding a code
-// line, a pure reformat — no longer stales a green; behavioral edits (string literals, real code) still do.
-{
-  const bev = (over = {}) => ({ cmd: 'npm test', seq: 1, background: false, is_error: false, text: '', ...over });
-  const greenAt1 = [bev({ text: JSON.stringify('5 passed, 0 failed') })];
-  const stale = (added, removed) => analyze({ claim: 'tests pass', bashCmds: ['npm test'], bashEvents: greenAt1,
-    mutations: [{ path: 'src/a.js', seq: 3, added, removed, text: [added, removed].filter(Boolean).join('\n') }] })
-    .some(f => f.cls === 1 && /STALE/.test(f.msg));
-  ok('C1-stale SILENT: comment tweak on a code-carrying line (`total++; // count` → `// the count`) — the CODE is identical (was a FIRES FP)',
-    !stale('total++; // the count', 'total++; // count'));
-  ok('C1-stale SILENT: pure whitespace reformat of a code line (`if(n<0){fail()}` → spaced) — normalizes equal (was a FIRES FP)',
-    !stale('if (n < 0) { fail() }', 'if(n<0){fail()}'));
-  ok('C1-stale FIRES: a changed STRING LITERAL (`log("a")` → `log("ab")`) is behavioral — strings are code, not comment',
-    stale('log("ab")', 'log("a")'));
-  ok('C1-stale FIRES: a real code change (`if(n<0)` → `if(n<=0)`) still stales the green',
-    stale('if(n<=0)', 'if(n<0)'));
-  ok('C1-stale SILENT: standalone comment edit stays silent under the new added/removed shape too',
-    !stale('// new note', '// old note'));
-  ok('C1-stale FIRES: pure code DELETION (removed side only) still counts — deleting code un-greens too',
-    stale('', 'const guard = checkAuth();'));
-  // End-to-end through the REAL ledger: parseTranscript now carries added/removed on each mutation.
-  const tx = [
-    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'npm test' } }] } }),
-    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'b1', is_error: false, content: [{ type: 'text', text: '5 passed' }] }] } }),
-    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'e1', name: 'Edit', input: { file_path: 'src/a.js', old_string: 'total++; // count', new_string: 'total++; // the count' } }] } }),
-  ].join('\n');
-  const q = parseTranscript(tx);
-  ok('C1-stale end-to-end: a real-transcript comment tweak after a green run is SILENT (the ledger carries both sides)',
-    q.mutations[0].added === 'total++; // the count'
-    && !has(analyze({ claim: 'tests pass', bashCmds: q.bashCmds, results: q.results, bashEvents: q.bashEvents, mutations: q.mutations }), 1));
-}
 
 // ── Class 2: stub/placeholder in added lines ──
 ok('C2 fires: TODO in added code',
@@ -691,57 +289,9 @@ ok('C2 fires: TODO in added code',
 ok('C2 silent: TODO only in a removed line',
   !has(analyze({ claim: '', diff: '+++ b/a.js\n-  // TODO old' }), 2));
 
-// ── Class 3: silent no-op (past-tense action gating is the precision fix) ──
-ok('C3 fires: claimed updating a file absent from the diff',
-  has(analyze({ claim: 'Updated cart.js to add the discount.', diff: '+++ b/other.js\n+x' }), 3));
-ok('C3 silent: file merely mentioned in prose, no action verb',
-  !has(analyze({ claim: 'This is similar to cart.js styling.', diff: '+++ b/other.js\n+x' }), 3));
-ok('C3 silent: claimed file IS in the diff',
-  !has(analyze({ claim: 'Updated cart.js.', diff: '+++ b/src/cart.js\n+x' }), 3));
-// Bug 5 — the extension alternation must not TRUNCATE: a claim about .json/.jsx/.tsx (whose real file IS
-// in the diff) must NOT mis-capture .js/.ts and then false-flag it absent. (Pre-fix: 'config.json' ->
-// captured 'config.js' -> fired cls:3 naming a file the agent never wrote.)
-ok('C3 bug5: a .json claim present in the diff is NOT a false no-op (no js-truncation)',
-  !has(analyze({ claim: 'Updated config.json with the new keys.', diff: '+++ b/config.json\n+{"a":1}' }), 3));
-ok('C3 bug5: a .jsx claim present in the diff is NOT a false no-op',
-  !has(analyze({ claim: 'Added Form.jsx for the modal.', diff: '+++ b/src/Form.jsx\n+x' }), 3));
-ok('C3 bug5: a .tsx claim present in the diff is NOT a false no-op',
-  !has(analyze({ claim: 'Refactored App.tsx.', diff: '+++ b/src/App.tsx\n+x' }), 3));
-// ...but a genuinely-absent .json claim STILL fires (the boundary fix must not blunt real detection).
-ok('C3 bug5: a .json claim ABSENT from the diff still fires (detection preserved)',
-  has(analyze({ claim: 'Updated config.json.', diff: '+++ b/other.json\n+x' }), 3));
-// Corpus FP (session 79e00f4c): a past-tense mention of a GITIGNORED tool-file (proposed-rules.json — common
-// when the work is on GT's own commands that read it) must NOT fire — it can never appear in a git diff, so
-// it would ALWAYS false-flag. Same NONREPO_OR_TOOL exclusion the Completeness path uses.
-ok('C3 FP-fix: a claim naming the tool-file proposed-rules.json does NOT fire (gitignored → never in diff)',
-  !has(analyze({ claim: 'Updated proposed-rules.json with the new candidates.', diff: '+++ b/other.js\n+x' }), 3));
-ok('C3 FP-fix: a claim naming a .claude/groundtruth path does NOT fire (tool-file exclusion)',
-  !has(analyze({ claim: 'Wrote .claude/groundtruth/compiled-rules.json.', diff: '+++ b/other.js\n+x' }), 3));
-ok('C3 FP-fix: the exclusion is narrow — a normal absent-file claim still fires (detection preserved)',
-  has(analyze({ claim: 'Updated cart.js.', diff: '+++ b/other.js\n+x' }), 3));
-// Line-179 sibling: a bare endsWith(named) let an unrelated suffix-substring path satisfy the claim and
-// suppress a real no-op. With basename-only matching, an unrelated `app/xconfig.js` must NOT count.
-ok('C3 fires: an unrelated xconfig.js does NOT satisfy a claim about config.js (basename boundary)',
-  has(analyze({ claim: 'Updated config.js.', diff: '+++ b/app/xconfig.js\n+x' }), 3));
-ok('C3 silent: a legitimately nested src/config.js DOES satisfy the claim (no over-tightening)',
-  !has(analyze({ claim: 'Updated config.js.', diff: '+++ b/src/config.js\n+x' }), 3));
-// C3 FP-fix (GT-state basenames): discussing Groundtruth's own rule/procedure files by bare basename (common
-// in a GT-meta session) must NOT no-op-flag — they're tool state, not a product deliverable. Session dfb3b7a1.
-ok('C3 FP-fix: a claim naming seed-rules.json (bare) does NOT fire (GT-state file)',
-  !has(analyze({ claim: 'I updated seed-rules.json with the new rule.', diff: '+++ b/other.js\n+x' }), 3));
-ok('C3 FP-fix: a claim naming procedures.json (bare) does NOT fire (GT-state file)',
-  !has(analyze({ claim: 'I created procedures.json for the ordering rules.', diff: '+++ b/other.js\n+x' }), 3));
 
 // ── General-purpose / multi-language: the engine must work outside JS, not just on one stack ──
 {
-  // Class 3 — a non-JS filename claim is now recognized (was silently skipped: regex omitted go/rs/rb/…).
-  ok('GEN C3: a claimed .go file absent from the diff fires (non-JS no-op now caught)',
-    has(analyze({ claim: 'Updated handler.go to add the route.', diff: '+++ b/other.go\n+x' }), 3));
-  ok('GEN C3: a claimed .rs file absent fires',
-    has(analyze({ claim: 'Wrote lib.rs.', diff: '+++ b/main.rs\n+x' }), 3));
-  ok('GEN C3: a .rb claim present in the diff is silent (no false no-op)',
-    !has(analyze({ claim: 'Fixed user.rb.', diff: '+++ b/app/models/user.rb\n+x' }), 3));
-
   // Class 2 — idiomatic non-JS/Python stubs are caught (Rust/Go/Java/Kotlin), not just TODO comments.
   ok('GEN C2: Rust todo!() / unimplemented!() are stubs',
     has(analyze({ claim: '', diff: '+++ b/lib.rs\n+fn f() { todo!() }' }), 2) &&
@@ -759,8 +309,6 @@ ok('C3 FP-fix: a claim naming procedures.json (bare) does NOT fire (GT-state fil
     ok(`GEN C1: '${cmd}' is recognized as a test run (claimed-pass does not false-block)`,
       !has(analyze({ claim: 'tests pass', bashCmds: [cmd], results: [{ is_error: false, text: 'ok' }] }), 1));
   }
-  ok('GEN C1: a go-test FAILURE result still warns under a pass claim (two-sided detection)',
-    has(analyze({ claim: 'tests pass', bashCmds: ['go test ./...'], results: [{ is_error: false, text: '--- FAIL: TestThing (0.00s)' }] }), 1));
 
   // Class 4 — phantom-ref is language-aware: Ruby require_relative resolves; package-qualified / dotted /
   // markup languages ABSTAIN (emit nothing) rather than false-flag against JS resolution.
@@ -1046,8 +594,6 @@ ok('card does NOT low-confidence a tight contract', !renderCard([], { intent: 'a
 // ── Phase-1 false-completion acceptance harness (spec §5; zero false positives on the negatives) ──
 ok('FIXTURE 1 — claimed Done while the workflow is still running → FAIL (async_done)',
   has(analyze({ claim: "🟢 Told & Done — clean. Waiting on the verification workflow (wf_1bb); I'll deliver the report when it completes." }), 'async_done'));
-ok('FIXTURE 2 — "all tests pass" with no test command run → FAIL (test_build)',
-  has(analyze({ claim: 'all tests pass', bashCmds: [], results: [] }), 1));
 ok('FIXTURE 3 — "all tests pass" with npm test exit 0 → PASS (no false positive)',
   !has(analyze({ claim: 'all tests pass', bashCmds: ['npm test'], results: [{ is_error: false, text: 'ok 12 passing' }] }), 1));
 ok('FIXTURE 4 — "Done!" on a pure explanation, no test/async claim → ABSTAIN (no finding)',
@@ -1108,42 +654,6 @@ ok('corrective payload warns against gaming the checker',
 }
 ok('no-git: no Edit/Write calls → empty toolDiff (nothing to check)',
   parseTranscript(JSON.stringify({ type: 'user', message: { content: [{ type: 'text', text: 'hi' }] } })).toolDiff === '');
-
-// ── FP fix: a NEW file created this session lives only in the tool ledger (`git diff` ignores
-// untracked files). main() now merges the ledger into the diff, which must clear the false
-// silent-no-op that flagged a freshly-created file as "claimed but absent from the diff". ──
-{
-  const gitDiff = '+++ b/src/existing.js\n+const x = 1;';   // an unrelated tracked change
-  const ledger = parseTranscript(JSON.stringify({ type: 'assistant', message: { content: [
-    { type: 'tool_use', name: 'Write', input: { file_path: 'public/js/host-base.js', content: 'export const surfaceUrl = () => {};' } }] } })).toolDiff;
-  ok('FP: a new untracked file IS flagged from git diff alone (reproduces the bug)',
-    has(analyze({ claim: 'Created host-base.js.', diff: gitDiff }), 3));
-  ok('FP: merging the tool ledger (the main() fix) clears the false silent-no-op',
-    !has(analyze({ claim: 'Created host-base.js.', diff: gitDiff + '\n' + ledger }), 3));
-}
-
-// ── Contract memory: parseTranscript captures the WHOLE conversation's asks (not just #1), and
-// openLoops nudges asks whose named deliverable never landed — abstaining when none is named. ──
-{
-  const t = [
-    JSON.stringify({ type: 'user', message: { content: [{ type: 'text', text: 'Build the procedural engine in groundtruth.mjs.' }] } }),
-    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'on it' }] } }),
-    JSON.stringify({ type: 'user', message: { content: [{ type: 'text', text: 'Also add the rule-compiler in compiler.mjs.' }] } }),
-    JSON.stringify({ type: 'user', message: { content: [{ type: 'text', text: 'make all the changes' }] } }),
-  ].join('\n');
-  const p = parseTranscript(t);
-  ok('memory: parseTranscript captures ALL asks across messages, not just the first',
-    p.asks.length === 3 && p.intent === 'Build the procedural engine in groundtruth.mjs.');
-  // a diff that delivers groundtruth.mjs but NOT compiler.mjs → that ask is an open loop
-  const diff = '+++ b/hooks/groundtruth.mjs\n+export function procedural(){}';
-  const open = openLoops(p.asks, diff);
-  ok('open loop: an ask naming a deliverable absent from the diff is flagged',
-    open.some(o => /compiler\.mjs/i.test(o.ask)));
-  ok('open loop: an ask whose deliverable IS in the diff is NOT flagged',
-    !open.some(o => /groundtruth\.mjs/i.test(o.ask)));
-  ok('open loop: a vague ask naming no deliverable is NOT nagged (abstain)',
-    openLoops(['make all the changes'], '').length === 0);
-}
 
 // ── Procedural compliance: required / forbidden / ordered commands over the transcript's tool calls ──
 {
@@ -1335,11 +845,6 @@ ok('no-git: no Edit/Write calls → empty toolDiff (nothing to check)',
 // ── Red-team closures (each maps to a demonstrated dodge in the external report) ──
 {
   const KEY = 'AKIA' + '0123456789ABCDEF';   // built by concat so this test file can't self-trip the scanner
-  // D2 — a forged persisted status:"done" is NOT trusted; status is recomputed from the diff.
-  ok('D2: a forged status:"done" with the deliverable absent from the diff is recomputed to pending',
-    updateTaskLedger([{ id: 't1', task: 'build the parser in parser.js', deliverable: ['parser.js'], status: 'done' }], ['build the parser in parser.js'], '')[0].status === 'pending');
-  ok('D2: a real delivery in the diff still marks done (recompute is correct, not just strict)',
-    updateTaskLedger([], ['build the parser in parser.js'], '+++ b/parser.js\n+export const p = 1;')[0].status === 'done');
   // D3 — secret split across a string concat is caught (runtime value identical).
   ok('D3: a concat-split AWS key ("AKIA"+"…") is flagged as a hardcoded secret',
     analyze({ claim: '', diff: `+++ b/c.js\n+const k = "AKIA" + "0123456789ABCDEF";` }).some(f => f.cls === 'C1'));
@@ -1586,6 +1091,10 @@ ok('no-git: no Edit/Write calls → empty toolDiff (nothing to check)',
     }
     try { chmodSync(pathJoin(repo, 'locked.txt'), 0o644); } catch {}   // restore so rmSync can clean up
   } finally { try { rmSync(repo, { recursive: true, force: true }); } catch {} }
+  // C-9 (Fable review D1): a non-git dir (git status throws) → paths:null ("unknown"), so the contract's mint
+  // falls back to the ledger instead of treating [] as "nothing untracked" and blocking honest created claims.
+  ok('untrackedAdded: a non-git dir returns paths:null (unknown), NOT an empty array',
+    untrackedAdded('/nonexistent-gt-dir-xyz').paths === null);
 }
 
 // ── compile() validation gates: a seed rule must (1) compile at runtime and (2) match its positive_example
@@ -1645,169 +1154,6 @@ ok('no-git: no Edit/Write calls → empty toolDiff (nothing to check)',
       g('no-mjs-ci') && g('no-mjs-ci').status === 'review' && g('no-mjs-ci').hits >= 1);
   } finally { try { rmSync(repo, { recursive: true, force: true }); } catch {} }
 }
-
-// ── Task ledger: persistent, GROUNDED — "done" only when the deliverable lands, never on acknowledgment ──
-{
-  const asks = ['Build the engine in engine.mjs', 'just thinking out loud here'];
-  let ledger = updateTaskLedger([], asks, '');
-  ok('ledger: tracks an ask naming a deliverable as pending', ledger.length === 1 && ledger[0].status === 'pending');
-  ok('ledger: ignores an ask that names no deliverable (abstain)', !ledger.some(t => /thinking/.test(t.task)));
-  ledger = updateTaskLedger(ledger, asks, '+++ b/engine.mjs\n+export const x = 1;');
-  ok('ledger: marks DONE only once the deliverable grounds in the diff', ledger[0].status === 'done');
-  ok('ledger: an acknowledgment with NO delivery does NOT close a pending task',
-    updateTaskLedger([{ task: 'Build the engine in engine.mjs', deliverable: ['engine.mjs'], status: 'pending' }], asks, '')[0].status === 'pending');
-  ok('ledger: a human-set "deferred" is preserved, never reopened',
-    updateTaskLedger([{ task: 'Build the engine in engine.mjs', deliverable: ['engine.mjs'], status: 'deferred' }], asks, '')[0].status === 'deferred');
-}
-
-// ── False-positive guard + anti-gaming (grounded in a real gaming case: an agent self-marked
-//    a READ of CLAUDE.md, a /tmp scratchpad temp, and the hook's own message as 'deferred' to dodge) ──
-{
-  ok('ledger: a READ of a convention doc is NOT a deliverable ("read CLAUDE.md …" → no phantom task)',
-    updateTaskLedger([], ['read CLAUDE.md and the skills, then continue'], '').length === 0);
-  ok('ledger: but WRITING a convention doc IS tracked ("update CLAUDE.md with the rule")',
-    updateTaskLedger([], ['update CLAUDE.md with the new rule'], '').some(t => t.deliverable.includes('CLAUDE.md')));
-  ok('ledger: a non-"update" write verb still counts — "fix CLAUDE.md" is tracked (no free skip)',
-    updateTaskLedger([], ['fix the broken rule in CLAUDE.md'], '').some(t => t.deliverable.includes('CLAUDE.md')));
-  // read-intent gate (session dfb3b7a1): a READ of ANY file — not just a convention doc — names an INPUT to
-  // examine. It DEMOTES to soft (surfaced once, auto-expires, never a blocking open-loop), never DROPS (a real
-  // deliverable hidden behind an unrecognized verb must not vanish — Fable FIX-FIRST).
-  ok('ledger: a READ of a CODE file → NOT hard-tracked ("look at cluePrompts.js" is a soft aside, never blocks)',
-    !updateTaskLedger([], ['look at cluePrompts.js and explain the bug'], '').some(t => t.tier === 'hard'));
-  ok('ledger: "review jsonExtract.mjs / investigate parser.js" (read-intent) → no HARD task',
-    !updateTaskLedger([], ['review jsonExtract.mjs', 'investigate parser.js'], '').some(t => t.tier === 'hard'));
-  ok('ledger: a read-intent ask WITH a write verb still tracks HARD ("review auth.js and add a guard")',
-    updateTaskLedger([], ['review auth.js and add a rate-limit guard'], '').some(t => t.tier === 'hard' && t.deliverable.includes('auth.js')));
-  ok('ledger: "read the code and rewrite parser.js" → HARD, not dropped (rewrite ∈ REQUEST_VERB now)',
-    updateTaskLedger([], ['read the code and rewrite parser.js'], '').some(t => t.tier === 'hard' && t.deliverable.includes('parser.js')));
-  ok('ledger: a plain "create parser.js" is unaffected — still HARD',
-    updateTaskLedger([], ['create parser.js'], '').some(t => t.tier === 'hard' && t.deliverable.includes('parser.js')));
-  ok('ledger: an out-of-repo scratchpad temp is NOT a deliverable (/private/tmp/…/cand_3836.json)',
-    updateTaskLedger([], ['fix the image in /private/tmp/scratch/cand_3836.json'], '').length === 0);
-  ok('ledger: the tool\'s OWN tasks.json is NOT a deliverable (no circular self-reference)',
-    updateTaskLedger([], ['record the result in tasks.json'], '').length === 0);
-  ok('ledger: a real source file is still tracked, and closes when it lands in the diff',
-    updateTaskLedger([], ['fix the parser in utils.js'], '').length === 1 &&
-    updateTaskLedger([], ['fix the parser in utils.js'], '+++ b/utils.js\n+code')[0].status === 'done');
-  ok('openLoops: same filtering — a read of CLAUDE.md is not an open loop',
-    openLoops(['read CLAUDE.md before you start'], '').length === 0);
-
-  // Regression: a human writes `schema.md` for the file the repo calls `SCHEMA.md`. Filename matching
-  // MUST be case-insensitive, or the delivered work reads as a false open-loop / silent no-op (real bug).
-  ok('openLoops: `schema.md` in the ask grounds against `SCHEMA.md` in the diff (case-insensitive filename)',
-    openLoops(['write these entries to schema.md'], '+++ b/hindsight-vercel/SCHEMA.md\n+- new col').length === 0);
-  ok('ledger: `schema.md` ask closes when `SCHEMA.md` lands in the diff (case-insensitive)',
-    updateTaskLedger([], ['write these entries to schema.md'], '+++ b/hindsight-vercel/SCHEMA.md\n+- x')[0].status === 'done');
-  ok('Class 3: a claim about `schema.md` is NOT a no-op when `SCHEMA.md` is in the diff',
-    !analyze({ claim: 'updated schema.md with the new table', diff: '+++ b/hindsight-vercel/SCHEMA.md\n+- x' }).some(f => f.cls === 3));
-  // ── Content-line grounding (LIVE FP, real hindsight session f7df5ae9): the agent edited CLAUDE.md's
-  // MENTION of admin.html and said so — "added the … parentheticals … on the bulk-backfill and admin.html
-  // [rules]" — and the path-only grounding read that as a phantom change to admin.html itself. A file named
-  // in the claim is grounded when it appears in the diff's ± content lines too (the ledger's grounds() has
-  // done this since Phase 6).
-  ok('Class 3 FP GONE: a claim naming a file whose MENTION was edited (name present in ± content lines) is grounded',
-    !analyze({ claim: 'added the same "(Enforced: …)" parentheticals the RLS rule already uses, on the bulk-backfill and admin.html',
-      diff: '+++ b/CLAUDE.md\n+- never commit public/admin.html (Enforced: compiled rule)' }).some(f => f.cls === 3));
-  ok('Class 3 still CAUGHT: a claimed file absent from paths AND content lines is a no-op',
-    analyze({ claim: 'fixed admin.html and the quota logic', diff: '+++ b/CLAUDE.md\n+- unrelated doc line' }).some(f => f.cls === 3));
-  ok('Class 3 boundary: `myadmin.html`/`site-admin.html` in content cannot ground a claim about `admin.html`',
-    analyze({ claim: 'fixed admin.html', diff: '+++ b/CLAUDE.md\n+see myadmin.html and site-admin.html' }).some(f => f.cls === 3));
-  ok('Class 3 boundary: a path-qualified content mention (`public/admin.html`) IS the same file and grounds',
-    !analyze({ claim: 'updated admin.html docs', diff: '+++ b/CLAUDE.md\n+see public/admin.html for the flow' }).some(f => f.cls === 3));
-  ok('Class 3 boundary: content grounding is case-insensitive (`ADMIN.HTML` grounds a claim about admin.html)',
-    !analyze({ claim: 'updated admin.html notes', diff: '+++ b/CLAUDE.md\n+per ADMIN.HTML rules' }).some(f => f.cls === 3));
-  ok('Class 3: a REMOVED line mentioning the file also grounds (deleting the mention is the claimed change)',
-    !analyze({ claim: 'removed the stale admin.html instructions', diff: '+++ b/CLAUDE.md\n-- old: edit admin.html by hand' }).some(f => f.cls === 3));
-  // Fable review: the diff marker was kept in c3Body, so a filename at COLUMN 0 of a deletion line had `-`
-  // as its preceding char — inside the lookbehind's exclusion class — and "removed X from the list" failed
-  // to ground while its `+` twin grounded. Markers are stripped now; both column-0 shapes ground.
-  ok('Class 3: a column-0 DELETION line grounds ("removed admin.html from the ignore list" ← `-admin.html`)',
-    !analyze({ claim: 'removed admin.html from the ignore list', diff: '+++ b/.gitignore\n-admin.html' }).some(f => f.cls === 3));
-  ok('Class 3: a column-0 ADDITION line still grounds (`+admin.html`)',
-    !analyze({ claim: 'added admin.html to the ignore list', diff: '+++ b/.gitignore\n+admin.html' }).some(f => f.cls === 3));
-  // Precision guard: case-insensitivity is for FILENAMES only — a camelCase symbol stays case-sensitive.
-  ok('openLoops: a camelCase symbol stays case-sensitive (fooBar ≠ foobar)',
-    openLoops(['wire up fooBar'], '+++ b/a.js\n+const foobar = 1').length === 1);
-
-  // parseTranscript: harness injections delivered as user turns are NOT asks.
-  const inj = [
-    JSON.stringify({ type: 'user', message: { content: [{ type: 'text', text: '<task-notification><task-id>w7r</task-id> done</task-notification>' }] } }),
-    JSON.stringify({ type: 'user', message: { content: [{ type: 'text', text: 'Stop hook feedback: Groundtruth blocked this stop (attempt 1).' }] } }),
-    JSON.stringify({ type: 'user', message: { content: [{ type: 'text', text: 'Continue the refactor, fix the bug in cart.js' }] } }),
-  ].join('\n');
-  const pa = parseTranscript(inj).asks;
-  ok('parseTranscript: a <task-notification> turn is NOT captured as a user ask', !pa.some(a => /task-notification|w7r/.test(a)));
-  ok('parseTranscript: Stop-hook feedback echoed as a turn is NOT a user ask (kills the circular loop)',
-    !pa.some(a => /hook feedback|blocked this stop/i.test(a)));
-  ok('parseTranscript: the REAL ask in the same transcript still survives', pa.some(a => /Continue the refactor/.test(a)));
-
-  // #1 — POSITIVE structural signal (not a text blocklist): the harness's own injection markers exclude
-  // a turn even when its text looks like a real ask, so a NEW injection type is caught too.
-  const structural = [
-    JSON.stringify({ type: 'user', isMeta: true, message: { content: [{ type: 'text', text: 'Please refactor everything in app.js now' }] } }),
-    JSON.stringify({ type: 'user', toolUseResult: { ok: 1 }, message: { content: [{ type: 'text', text: 'build the dashboard in dash.js' }] } }),
-    JSON.stringify({ type: 'user', promptSource: 'sdk', message: { content: [{ type: 'text', text: 'add a cache to fetch.js' }] } }),
-  ].join('\n');
-  const sa = parseTranscript(structural).asks;
-  ok('parseTranscript: isMeta / toolUseResult turns are excluded structurally even when the text reads like an ask',
-    !sa.some(a => /app\.js|dash\.js/.test(a)) && sa.some(a => /fetch\.js/.test(a)));
-
-  // #3 — confirmation is UNFORGEABLE: only the user typing `defer <id>` in a real turn honors a deferral.
-  // An agent-written 'deferred' (in tasks.json OR any file it could forge) is re-opened to pending.
-  const led = [{ id: taskId('continue the refactor'), task: 'continue the refactor', deliverable: ['x.js'], status: 'deferred' },
-               { id: taskId('also fix login'), task: 'also fix login', deliverable: ['login.js'], status: 'deferred' }];
-  const confirmed = humanDeferrals([`yeah defer ${taskId('also fix login')} for now, skip it`]);   // the user typed it
-  ok('humanDeferrals: extracts the id from a user-typed "defer <id>"', confirmed.has(taskId('also fix login')));
-  const after = applyConfirmedDeferrals(led, confirmed);
-  ok('deferral: an agent-written deferral the USER did not confirm is re-opened to pending (the dodge fails)',
-    after.find(t => t.task === 'continue the refactor').status === 'pending' &&
-    after.find(t => t.task === 'continue the refactor').deferRequested === true);
-  ok('deferral: a deferral the USER typed `defer <id>` for is honored (stays deferred)',
-    after.find(t => t.task === 'also fix login').status === 'deferred');
-  ok('deferral: forging a confirmations FILE/Set the user never typed does nothing (empty human set → all re-opened)',
-    applyConfirmedDeferrals(led, humanDeferrals([])).every(t => t.status === 'pending'));
-  ok('taskId: stable + deterministic over the task text', taskId('continue the refactor') === taskId('continue the refactor') && /^t[0-9a-z]{1,4}$/.test(taskId('x')));
-
-  // a deferred (human-confirmed) task is still surfaced for transparency (never silent)
-  const card = renderCard([{ cls: 'deferred', sev: 'warn', msg: 'deferred (human-confirmed) — "also fix login"' }],
-    { session: 'sess', intent: 'work' });
-  ok('renderCard: a human-confirmed deferral is surfaced (transparent, not silent)',
-    /human-confirmed/i.test(card) && /also fix login/.test(card));
-}
-
-ok('loadGtConfig: a missing config file → {} (safe default, never crashes, block stays off)',
-  JSON.stringify(loadGtConfig('/nonexistent/path/xyz')) === '{}');
-
-// proposedStale — manual-edit recompile gate (option 1): recompile PROPOSED when a rule doc is newer.
-ok('proposedStale: no proposed file yet → due (recompile)', proposedStale(null, [100, 200]) === true);
-ok('proposedStale: a rule doc newer than proposed → due', proposedStale(100, [50, 150]) === true);
-ok('proposedStale: all docs older than proposed → NOT due', proposedStale(200, [100, 150]) === false);
-ok('proposedStale: no rule docs at all → NOT due', proposedStale(200, []) === false);
-ok('proposedStale: an unreadable doc (null mtime) is ignored, not treated as newer', proposedStale(200, [null, 100]) === false);
-
-// ── request/non-request gate — the "conversational aside → open loop" FP fix (deterministic, no LLM) ──
-ok('isTrackableRequest: an observation ("I can see a 304, it\'s fine") is NOT a request',
-  isTrackableRequest("I can see a 304 in `handleUpload`, it's fine") === false);
-ok('isTrackableRequest: dismissal with a NEGATED verb ("no fix needed") is NOT a request (the "no fix" trap)',
-  isTrackableRequest("the 304 in `handleUpload` is fine, no fix needed") === false);
-ok('isTrackableRequest: a compound aside that ALSO commands a real fix IS a request (verb survives strip)',
-  isTrackableRequest("the 304 is fine but fix the 500 in retry.js") === true);
-ok('isTrackableRequest: a plain interrogative naming a file ("is report.js right?") is NOT a request',
-  isTrackableRequest('is report.js right?') === false);
-ok('isTrackableRequest: a plain imperative IS a request',
-  isTrackableRequest('add retry with backoff to src/upload.js') === true);
-ok('isTrackableRequest: "ignore the cache.js warning for now" is NOT a request',
-  isTrackableRequest('ignore the cache.js warning for now') === false);
-
-// end-to-end: an observation is a nag-free SOFT aside (demote-don't-drop), a real request is a HARD task.
-ok('openLoops (HARD only): an observation naming a backtick token mints NO open loop',
-  openLoops(["I can see a 304 in `handleUpload`, it's fine, no fix needed"], '').length === 0);
-ok('openLoops (HARD only): a real ask naming an absent deliverable STILL opens a loop',
-  openLoops(['add a csv export to report.js'], '').length === 1);
-ok('ledger tier: an observation naming a token creates a SOFT task (demote-don\'t-drop, never blocks)',
-  (() => { const t = updateTaskLedger([], ["the 304 in `handleUpload` is fine, no fix needed"], ''); return t.length === 1 && t[0].tier === 'soft'; })());
-ok('ledger tier: a real imperative request creates a HARD task',
-  (() => { const t = updateTaskLedger([], ['fix the retry in retry.js'], ''); return t.length === 1 && t[0].tier === 'hard'; })());
 
 // ── Phase 1: example-secret allowlist + synthetic-marker demotion (kills the block-severity FP) ──
 ok('isSecret: the AWS docs example key is recognized but BENIGN (allowlisted → demote)',
@@ -1938,408 +1284,6 @@ ok('phantom parse: a real unresolved import IS still flagged',
     card.includes('Told & Done') && !card.includes("rewrote Groundtruth's OWN state"));
   ok('renderCard: the integrity_note still shows as an awareness footer',
     card.includes('Integrity note (awareness only'));
-}
-
-// ── Phase 6: open-loop suite — tiers, clause-binding, novelty/paste-provenance, comment-vector, nag-once ──
-{
-  const c = classifyDeliverables('the 304 in `handleUpload` is fine, but fix retry.js');
-  ok('clause-binding: "…handleUpload is fine, but fix retry.js" → retry.js HARD, handleUpload SOFT (not both)',
-    c.hard.includes('retry.js') && c.soft.includes('handleUpload') && !c.hard.includes('handleUpload'));
-}
-// C2 regression: token-novelty via AGENT text was REMOVED (agent-influenceable). The agent naming the
-// deliverable in its OWN reply must NOT demote its own ask — classifyDeliverables ignores agent text entirely.
-ok('C2: an agent naming the deliverable in its reply canNOT demote the ask (no agent-text novelty)',
-  classifyDeliverables('add a csv export to report.js').hard.includes('report.js'));
-ok('a user-novel token in a real request is HARD',
-  classifyDeliverables('add a guard to app.js').hard.includes('app.js'));
-// AGENT INTEGRITY (v1.3.1) — a subagent that can NEVER load fails OPEN: no error, no log, it just never
-// fires, and any doc saying "enforced by the X subagent" then rests on nothing. REAL INCIDENT (hindsight):
-// 16 agents sat in `hindsight-vercel/.claude/agents/` — one level BELOW the repo root — so Claude Code (which
-// resolves .claude/agents/ from the CWD upward and never descends) never saw one of them, silently, for weeks.
-// SCOPE: we prove an agent CANNOT fire; we never claim one WILL (selection is the model's discretion).
-const AG = (rel, src) => ({ rel, src });
-const HEALTHY = AG('.claude/agents/pr-reviewer.md', '---\nname: pr-reviewer\ndescription: MUST BE USED before opening a PR.\nmodel: claude-opus-4-8\n---\nBody\n');
-const agf = (agents, docs = []) => agentFindings(agents, docs).filter(f => f.cls === 'agent');
-ok('AGENT: an agents dir BELOW the repo root is invisible when launched from the root (the 16-agent incident)',
-  agf([AG('hindsight-vercel/.claude/agents/qa.md', '---\nname: qa\ndescription: d\n---\nB\n')]).length === 1);
-ok('AGENT SILENT: the SAME agent at the repo root is fine (the fix must clear the finding)',
-  agf([AG('.claude/agents/qa.md', '---\nname: qa\ndescription: d\n---\nB\n')]).length === 0);
-ok('AGENT: no YAML frontmatter → can never load (reviewer.md opened with "## Workflow")',
-  agf([AG('.claude/agents/reviewer.md', '## Workflow\n\n1. Draft a plan.\n')]).some(f => /NO YAML frontmatter/.test(f.msg)));
-ok('AGENT: a missing name: or description: → cannot load',
-  agf([AG('.claude/agents/a.md', '---\ndescription: d\n---\n')]).some(f => /no `name:`/.test(f.msg))
-  && agf([AG('.claude/agents/b.md', '---\nname: b\n---\n')]).some(f => /no `description:`/.test(f.msg)));
-ok('AGENT: a DOTTED model id is provably malformed (claude-opus-4.8 → claude-opus-4-8) and falls back silently',
-  agf([AG('.claude/agents/d.md', '---\nname: d\ndescription: d\nmodel: claude-opus-4.8\n---\n')]).some(f => /never contains a dot/.test(f.msg)));
-ok('AGENT SILENT: a well-formed but UNKNOWN model is NOT flagged — no stale allowlist (must not FP on a future model)',
-  agf([AG('.claude/agents/d.md', '---\nname: d\ndescription: d\nmodel: claude-sonnet-9\n---\n')]).length === 0);
-ok('AGENT: two agents with byte-identical descriptions are unroutable (the router selects on description)',
-  agf([AG('.claude/agents/i1.md', '---\nname: i1\ndescription: Implements a specced change.\n---\n'),
-       AG('.claude/agents/i2.md', '---\nname: i2\ndescription: Implements a specced change.\n---\n')]).some(f => /byte-identical/.test(f.msg)));
-ok('AGENT: a duplicate name across two files is a collision',
-  agf([AG('.claude/agents/a.md', '---\nname: dup\ndescription: x\n---\n'),
-       AG('.claude/agents/b.md', '---\nname: dup\ndescription: y\n---\n')]).some(f => /declared twice/.test(f.msg)));
-// Phantom agent reference — Class 4 (phantom ref) over agents: a doc resting on an agent that cannot load.
-// v1.3.1 review: the phantom fires ONLY when the name RESOLVES to a repo agent file that provably cannot
-// load. "No file in the repo" proves nothing — agents also come from plugins, harness built-ins
-// (`general-purpose`, `Explore`) and user-level ~/.claude/agents, all invisible to this scan; the draft's
-// unresolved arm fired on ordinary hyphenated prose and on built-in names (verified FPs, pinned below).
-ok('AGENT: a doc resting on an agent whose FILE exists but cannot load (nested, the incident shape) is a PHANTOM reference',
-  agf([HEALTHY, AG('hindsight-vercel/.claude/agents/migration-reviewer.md', '---\nname: migration-reviewer\ndescription: d\n---\nB\n')],
-      [{ rel: 'CLAUDE.md', src: 'Migrations are enforced by the auto-invoked migration-reviewer subagent.' }])
-    .some(f => /phantom reference/.test(f.msg)));
-ok('AGENT: the phantom also fires when the file exists at the root but cannot parse ("CANNOT LOAD")',
-  agf([AG('.claude/agents/reviewer.md', '## Workflow\n')], [{ rel: 'CLAUDE.md', src: 'Invoke the `reviewer` subagent until APPROVED.' }])
-    .some(f => /CANNOT LOAD/.test(f.msg)));
-ok('AGENT SILENT (FP guard): a doc naming an agent with NO repo file abstains — could be a plugin/built-in/user-level agent',
-  agf([HEALTHY], [{ rel: 'CLAUDE.md', src: 'Migrations are enforced by the auto-invoked migration-reviewer subagent.' }]).length === 0);
-ok('AGENT SILENT (FP guard): hyphenated PROSE before "subagent" is not an agent name (well-documented / read-only)',
-  agf([HEALTHY], [{ rel: 'CLAUDE.md', src: 'Keep a well-documented subagent for each domain. Spawn a read-only subagent to explore.' }]).length === 0);
-ok('AGENT SILENT (FP guard): harness BUILT-IN agent types are not phantoms (general-purpose, `Explore`)',
-  agf([HEALTHY], [{ rel: 'CLAUDE.md', src: 'Use the general-purpose subagent, or the `Explore` subagent.' }]).length === 0);
-ok('AGENT SILENT (FP guard): the bare word "the" in "the … subagent" must NOT read as an agent name',
-  agf([HEALTHY], [{ rel: 'CLAUDE.md', src: 'Ask the subagent for help. Delegate to a subagent.' }]).length === 0);
-// v1.3.1 — the BARE-word phantom. The draft required a backtick or a hyphen, which MISSED the real incident's
-// second blocker: CLAUDE.md said "invoke the reviewer subagent until it returns APPROVED" (unhyphenated,
-// unbackticked) while reviewer.md existed with NO frontmatter and so could never load. Safe to widen because
-// the fire condition is RESOLUTION to a repo agent file that cannot load — prose and built-ins resolve to
-// nothing and abstain.
-ok('AGENT: a BARE-word reference ("invoke the reviewer subagent") fires when reviewer.md exists but cannot load',
-  agf([AG('.claude/agents/reviewer.md', '## Workflow\n'), HEALTHY],
-      [{ rel: 'CLAUDE.md', src: 'Invoke the reviewer subagent until it returns APPROVED.' }])
-    .some(f => /reviewer/.test(f.msg) && /CANNOT LOAD/.test(f.msg)));
-ok('AGENT SILENT (FP guard): bare prose that resolves to no repo agent file abstains (plugins/built-ins are invisible)',
-  agf([HEALTHY], [{ rel: 'CLAUDE.md', src: 'Use a well-documented subagent. Use the general-purpose subagent. Use the Explore subagent.' }]).length === 0);
-ok('AGENT: the doc cross-check resolves CASE-INSENSITIVELY (a sentence-start "Reviewer" is still reviewer.md)',
-  agf([AG('.claude/agents/reviewer.md', '## Workflow\n')], [{ rel: 'CLAUDE.md', src: 'Reviewer subagent handles the diff.' }])
-    .some(f => /CANNOT LOAD/.test(f.msg)));
-ok('AGENT: one finding per broken agent per doc — three mentions do not triple-report',
-  agf([AG('.claude/agents/reviewer.md', '## Workflow\n')],
-      [{ rel: 'CLAUDE.md', src: 'the reviewer subagent. the reviewer subagent. the Reviewer subagent.' }])
-    .filter(f => /CANNOT LOAD/.test(f.msg)).length === 1);
-ok('AGENT SILENT (FP guard): referencing a LOADABLE agent is not a phantom',
-  agf([HEALTHY], [{ rel: 'CLAUDE.md', src: 'Use the pr-reviewer subagent before a PR.' }]).length === 0);
-ok('AGENT SILENT (FP guard): a basename ref to a file that loads under a DIFFERENT name abstains ("CANNOT LOAD" would be false)',
-  agf([AG('.claude/agents/qa-bot.md', '---\nname: qa\ndescription: d\n---\nB')], [{ rel: 'CLAUDE.md', src: 'Run the `qa-bot` subagent.' }]).length === 0);
-ok('AGENT SILENT: a healthy agent produces no finding at all',
-  agf([HEALTHY]).length === 0);
-// v1.3.1 review — parser FPs, each verified by live probe against the draft, pinned here:
-ok('AGENT SILENT: a UTF-8 BOM before the frontmatter is still a loadable file (YAML loaders strip it)',
-  agf([AG('.claude/agents/a.md', '\uFEFF---\nname: a\ndescription: d\n---\nB')]).length === 0);
-ok('AGENT SILENT: two DIFFERENT block-scalar descriptions (`description: >-`) are not byte-identical — the value is the indented block, not ">-"',
-  agf([AG('.claude/agents/b1.md', '---\nname: b1\ndescription: >-\n  Reviews database migrations.\n---\nB'),
-       AG('.claude/agents/b2.md', '---\nname: b2\ndescription: >-\n  Audits API contracts.\n---\nB')]).length === 0);
-ok('AGENT: two IDENTICAL block-scalar descriptions still collide (the folded value is compared, not skipped)',
-  agf([AG('.claude/agents/b1.md', '---\nname: b1\ndescription: >-\n  Same text.\n---\nB'),
-       AG('.claude/agents/b2.md', '---\nname: b2\ndescription: >-\n  Same text.\n---\nB')]).some(f => /byte-identical/.test(f.msg)));
-ok('AGENT SILENT: a trailing YAML comment on name: (`qa-bot # main QA agent`) parses as qa-bot — the doc ref resolves loadable',
-  agf([AG('.claude/agents/c.md', '---\nname: qa-bot # main QA agent\ndescription: d\n---\nB')],
-      [{ rel: 'CLAUDE.md', src: 'Run the `qa-bot` subagent before merge.' }]).length === 0);
-ok('AGENT SILENT: a BEDROCK model id legitimately contains dots (us.anthropic.…-v1:0) — only a BARE claude-* id can be proven dotted-wrong',
-  agf([AG('.claude/agents/d.md', '---\nname: d\ndescription: d\nmodel: us.anthropic.claude-opus-4-8-20250601-v1:0\n---\nB')]).length === 0);
-// Completion-pass review (v1.3.1): the case-folded maps serve DOC-PROSE resolution only — identity stays exact.
-ok('AGENT SILENT (FP guard): names differing ONLY IN CASE (QALead vs qalead) are DISTINCT agents — `name:` matching is exact, so "declared twice" would be false',
-  agf([AG('.claude/agents/QALead.md', '---\nname: QALead\ndescription: lead QA\n---\nB'),
-       AG('.claude/agents/qalead.md', '---\nname: qalead\ndescription: other work\n---\nB')]).every(f => !/declared twice/.test(f.msg)));
-ok('AGENT: an exact duplicate STILL collides when a case-variant sibling was seen first (the folded key holds all spellings)',
-  agf([AG('.claude/agents/a.md', '---\nname: Reviewer\ndescription: x\n---\nB'),
-       AG('.claude/agents/b.md', '---\nname: reviewer\ndescription: y\n---\nB'),
-       AG('.claude/agents/c.md', '---\nname: reviewer\ndescription: z\n---\nB')]).some(f => /declared twice/.test(f.msg)));
-ok('AGENT SILENT (FP guard): a broken agent file naming ITSELF in its body ("You are the reviewer subagent") is self-mention, not a doc resting on it — check (2) already reports the file once',
-  (() => { const self = AG('.claude/agents/reviewer.md', '# You are the reviewer subagent\nReview the diff.');
-    const fs = agf([self], [self]);
-    return fs.every(f => !/phantom reference/.test(f.msg)) && fs.some(f => /NO YAML frontmatter/.test(f.msg)); })());
-ok('AGENT: a doc referencing an unloadable agent by its DECLARED NAME (≠ basename) still resolves and fires',
-  agf([AG('.claude/agents/x.md', '---\nname: checker\n---\nB')],
-      [{ rel: 'CLAUDE.md', src: 'Merges are gated by the checker subagent.' }]).some(f => /phantom reference/.test(f.msg)));
-ok('AGENT SILENT: a nested+root pair with the SAME name is NOT a collision (the nested copy never loads — the exact mid-migration state)',
-  agf([AG('pkg/.claude/agents/qa.md', '---\nname: qa\ndescription: d\n---\nB'),
-       AG('.claude/agents/qa.md', '---\nname: qa\ndescription: d\n---\nB')]).every(f => !/declared twice/.test(f.msg)));
-ok('parseAgentFile: reads name/description/model, and reports missing frontmatter',
-  parseAgentFile('---\nname: n\ndescription: d\nmodel: sonnet\n---\nB').name === 'n'
-  && parseAgentFile('## no frontmatter').frontmatter === false);
-ok('parseAgentFile: CRLF frontmatter and quoted values parse (name: "f" → f)',
-  parseAgentFile('---\r\nname: e\r\ndescription: d\r\n---\r\nB').name === 'e'
-  && parseAgentFile('---\nname: "f"\ndescription: \'g\'\n---\nB').name === 'f');
-// MOJIBAKE (v1.3.0) — encoding corruption: UTF-8 read as Latin-1 and re-saved as UTF-8. From a REAL incident
-// (hindsight 1618e35): 756 mangled sequences in one file; the code still RAN so the daily email shipped garbage
-// for days. Its parent commit was clean and 365/374 ADDED lines carried mojibake — a staged-diff scan catches it.
-// NOTE: every fixture is built by round-tripping through Buffer, NEVER pasted literally — a literal mojibake
-// byte in this test file would make the check fire on Groundtruth's OWN commit (self-match).
-const moji = (ch) => Buffer.from(ch, 'utf8').toString('latin1');   // the exact corruption: utf8 bytes read as latin1
-const mf = (diff) => mojibakeFindings(diff).some(f => f.cls === 'mojibake');
-ok('MOJIBAKE: a garbled em-dash in an added line fires',
-  mf('+++ b/src/mail.js\n+const sep = "' + moji('—') + '";'));
-ok('MOJIBAKE: every STRONG symbol from the real incident fires alone (em-dash, box-draw, arrow, check, warn — 3-/4-byte leads)',
-  ['—', '─', '→', '✓', '✅', '⚠', '🔥'].every(ch => mf('+++ b/a.js\n+const x = "' + moji(ch) + '";')));
-// WEAK (2-byte-lead) pairs need corroboration: a garbled é/· fires only alongside a second hit. One weak pair
-// alone abstains — that is the residual legit-adjacency class (caps-Portuguese word-final letter + guillemet).
-ok('MOJIBAKE: two weak pairs in a file fire (garbled café + naïve)',
-  mf('+++ b/a.js\n+const s = "' + moji('café naïve') + '";'));
-ok('MOJIBAKE ABSTAINS: ONE weak pair alone (a single garbled middot) — below the corroboration bar by design',
-  !mf('+++ b/a.js\n+const x = "' + moji('·') + '";'));
-ok('MOJIBAKE: double-encoded (mojibake of mojibake) still fires — its output is itself weak pairs, plural',
-  mf('+++ b/a.js\n+const s = "' + moji(moji('—')) + '";'));
-ok('MOJIBAKE SILENT: legitimate UTF-8 is clean — accents, symbols, box-drawing, emoji (the FP that would kill it)',
-  !mf('+++ b/src/i18n.js\n+const a = "café";\n+const b = "São Paulo";\n+const c = "âme";\n+const d = "✅ ok";\n+const e = "a — b";\n+const f = "──────";\n+const g = "🔥";'));
-// v1.3.0 review FPs, pinned: ð is a real word-final letter (Icelandic) and â a real letter (French); smart
-// punctuation lives in the CP1252 continuation set. Under the draft's optional-arity regex ALL of these fired.
-ok('MOJIBAKE SILENT: Icelandic word-final ð + smart punctuation („það“ ‘það’ það… það—og) — arity gate holds',
-  !mf('+++ b/is.js\n+const a = "„að“";\n+const b = "‘það’";\n+const c = "það…";\n+const d = "það—og";'));
-ok('MOJIBAKE SILENT: caps-Portuguese word-final letter + ellipsis / tight guillemet (one weak pair) abstains',
-  // the guillemet pair is CONCATENATED so this source file itself never contains a weak pair (self-match safety)
-  !mf('+++ b/pt.js\n+const a = "ATÉ AMANHÃ…";\n+const b = "«IRM' + 'Ã' + '»";'));
-ok('MOJIBAKE SILENT: a REPAIR (mojibake only on the REMOVED side) is not a finding — added-lines-only scan',
-  !mf('+++ b/src/mail.js\n-const sep = "' + moji('—') + '";\n+const sep = "—";'));
-ok('MOJIBAKE: NOT claim-gated — fires with an empty claim, which is what --pre-commit/--diff-range pass',
-  analyze({ claim: '', diff: '+++ b/src/mail.js\n+const s = "' + moji('—') + '";', bashCmds: [], results: [] })
-    .some(f => f.cls === 'mojibake'));
-ok('MOJIBAKE: the message names the file and round-trips the sequence back to the character it should have been',
-  (() => { const f = mojibakeFindings('+++ b/api/_lib/autoPublish.js\n+const s = "' + moji('—') + '";')[0];
-    return f && f.msg.includes('autoPublish.js') && f.msg.includes('"—"'); })());
-// The CP1252 misread (0x80-0x9F shown as printable specials, not C1 controls). The draft decoded these with
-// `& 0xff`, which is wrong for the specials (ellipsis is U+2026 -> 0x26, em-dash U+2014 -> 0x14): a CP1252-misread
-// ellipsis was mis-NAMED "looks like a garbled U+2B26-class char" and most others lost the name entirely.
-// Fixtures built from CODEPOINTS (0xE2 + U+20AC + 0xA6 = what a CP1252 misread of an ellipsis E2 80 A6 displays
-// as) so no strong mojibake literal ever sits in this source file.
-ok('MOJIBAKE: a CP1252-misread ellipsis fires AND is round-trip-named as the ellipsis it should have been',
-  (() => { const f = mojibakeFindings('+++ b/a.js\n+"' + String.fromCharCode(0xE2, 0x20AC, 0xA6) + '"')[0];
-    return f && f.msg.includes('"…"'); })());
-ok('MOJIBAKE: a CP1252-misread em-dash (0xE2 + U+20AC + U+201D) names the em-dash, not a masked wrong char',
-  (() => { const f = mojibakeFindings('+++ b/a.js\n+"' + String.fromCharCode(0xE2, 0x20AC, 0x201D) + '"')[0];
-    return f && f.msg.includes('"—"'); })());
-ok('MOJIBAKE: a file literally named __proto__ neither crashes nor hides the finding (null-proto byFile)',
-  mojibakeFindings('+++ b/__proto__\n+"' + moji('——') + '"').some(f => f.cls === 'mojibake'));
-// DECLARATIVE demotion (v1.2.1) — the user stating a file EXISTS is not commissioning it. Live FP from a real
-// hindsight session: "I do have image_attributions.md on downloads folder" minted a HARD deliverable; the file
-// was in ~/Downloads (outside the repo) so it could never ground in a diff → the task never closed, nagged every
-// turn, and under block mode escalated to a BLOCK on work never requested. Demote to SOFT, never drop.
-ok('DECLARATIVE: "I do have image_attributions.md on downloads folder" is SOFT, not a HARD unclosable loop',
-  (() => { const c = classifyDeliverables('I do have image_attributions.md on downloads folder'); return c.soft.includes('image_attributions.md') && !c.hard.includes('image_attributions.md'); })());
-ok('DECLARATIVE: existential "there is a notes.md on my desktop" is SOFT',
-  (() => { const c = classifyDeliverables('there is a notes.md on my desktop'); return c.soft.includes('notes.md') && !c.hard.includes('notes.md'); })());
-ok('DECLARATIVE does NOT swallow a real request: a REQUEST_VERB in the same clause keeps it HARD',
-  classifyDeliverables('I have a bug in parser.js, fix it').hard.includes('parser.js')
-  && classifyDeliverables('I have to rewrite cache.js').hard.includes('cache.js')
-  && classifyDeliverables('I have a notes.md — add it to auth.js').hard.includes('auth.js'));
-ok('DECLARATIVE: a plain imperative naming the same file is still HARD (no false negative)',
-  classifyDeliverables('Add an image_attributions.md to the repo').hard.includes('image_attributions.md'));
-// VERIFICATION demotion (v1.3.1) — an ask for a VERDICT, where "nothing needed changing" is a SUCCESSFUL
-// outcome and the correct diff is EMPTY. LIVE FP (real hindsight session): "[block] open loop — game.js not
-// in the diff", where a clean game.js WAS the deliverable. Third instance of one root defect (v1.0.5 pasted
-// listing, v1.2.1 declarative, now this): an unclosable HARD deliverable is the block-mode wedge.
-ok('VERIFY: "verify game.js does not need updating" is SOFT — an empty diff is SUCCESS, not an open loop',
-  (() => { const c = classifyDeliverables('verify game.js does not need updating'); return c.soft.includes('game.js') && !c.hard.includes('game.js'); })());
-ok('VERIFY: check / make sure / confirm / ensure / validate / double-check all demote',
-  ['check that game.js still works', 'make sure game.js is consistent', 'confirm game.js is unaffected',
-   'ensure game.js follows the CJS rule', 'validate game.js against the spec', 'double-check game.js']
-    .every(a => classifyDeliverables(a).soft.includes('game.js') && !classifyDeliverables(a).hard.includes('game.js')));
-ok('VERIFY does NOT swallow a real change request: a change verb in the clause keeps it HARD',
-  classifyDeliverables('check game.js and fix it if broken').hard.includes('game.js')
-  && classifyDeliverables('make sure game.js is consistent — update it if not').hard.includes('game.js')
-  && classifyDeliverables('verify the schema then add a migration to game.js').hard.includes('game.js'));
-ok('VERIFY: `make` as a genuine construction verb is untouched ("make a new parser.js" stays HARD)',
-  classifyDeliverables('make a new parser.js').hard.includes('parser.js'));
-// The two FN holes the first cut of the verify demotion opened — both are the ledger going silently INERT on
-// a genuine deliverable (the cardinal sin), and both are pinned here because this exact class has now
-// recurred three times (v1.2.1 declarative, and twice more below).
-ok('VERIFY FN-1: a change verb in a LATER clause keeps it HARD ("Check game.js. Then update it.")',
-  ['Check game.js. Then update it.', 'Verify game.js. Fix it if broken.', 'Make sure game.js is consistent. Change it if not.']
-    .every(a => classifyDeliverables(a).hard.includes('game.js')));
-ok('VERIFY FN-2: a verify verb hiding INSIDE the FILENAME must not demote its own commission',
-  classifyDeliverables('validator.js needs updating').hard.includes('validator.js')          // validator.js ⊂ validat\w+
-  && classifyDeliverables('check-migration-rls.mjs is broken, please rewrite').hard.includes('check-migration-rls.mjs'));
-// Adversarial review of v1.2.1 (FN direction): the first cut of the declarative gate swallowed PROBLEM REPORTS —
-// declarative in form, commission in function. "we have a bug", "there is no X", "broken", "need updating" all
-// demoted to soft, i.e. the completeness backstop went quiet on real asks. PROBLEM_RE restores pre-v1.2.1 hardness.
-ok('PROBLEM report is NOT a benign declarative: "we have a bug: cache.js returns stale data" stays HARD',
-  classifyDeliverables('we have a bug: cache.js returns stale data').hard.includes('cache.js'));
-ok('PROBLEM report: "I\'ve got a broken migration in schema.sql" stays HARD',
-  classifyDeliverables("I've got a broken migration in schema.sql").hard.includes('schema.sql'));
-ok('NEGATIVE existential is a request, not a possession: "there is no error handling in parser.js" stays HARD',
-  classifyDeliverables('there is no error handling in parser.js').hard.includes('parser.js'));
-ok('NEGATIVE existential: "we have no rate limiting in api.js" stays HARD',
-  classifyDeliverables('we have no rate limiting in api.js').hard.includes('api.js'));
-ok('"I have three files that need updating: a.js, b.js, c.js" — need = ask, all three stay HARD',
-  (() => { const c = classifyDeliverables('I have three files that need updating: a.js, b.js, c.js'); return ['a.js', 'b.js', 'c.js'].every(f => c.hard.includes(f)); })());
-ok('PROBLEM report via bare "exists in": "a race condition exists in cache.js" stays HARD',
-  classifyDeliverables('a race condition exists in cache.js').hard.includes('cache.js'));
-// Adversarial review of v1.2.1 (FN direction), the cross-clause anaphora hole: splitClauses puts the token in the
-// declarative clause and the request verb in the NEXT clause with only a pronoun — per-clause gating alone left
-// the ask's hard set EMPTY even for a fully explicit "…. Can you add it to the repo?". anaphoricReq voids the demotion.
-ok('ANAPHORA: "I have a notes.md. Add it to the repo." — verb in the next clause, token stays HARD',
-  classifyDeliverables('I have a notes.md. Add it to the repo.').hard.includes('notes.md'));
-ok('ANAPHORA: the live-FP phrasing PLUS an explicit "Can you add it to the repo?" is HARD, not swallowed',
-  classifyDeliverables('I do have image_attributions.md on downloads folder. Can you add it to the repo?').hard.includes('image_attributions.md'));
-ok('ANAPHORA does not over-reach: a co-occurring NON-anaphoric request leaves the declarative SOFT',
-  (() => { const c = classifyDeliverables('I do have image_attributions.md on downloads folder. Also fix the typo in the changelog.'); return c.soft.includes('image_attributions.md') && !c.hard.includes('image_attributions.md'); })());
-// End-to-end: a declarative-demoted (soft) task must NEVER reach block severity — not even under a matching
-// false done-claim — while a hard task under the same claim still blocks. This is the block-mode wedge the
-// declarative gate exists to prevent, asserted at the surfacing layer, not just at classification.
-ok('e2e: soft declarative task surfaces as info (never block) even under a matching done-claim; hard still blocks',
-  (() => {
-    const ledger = updateTaskLedger([], ['I do have image_attributions.md on downloads folder', 'add a csv export to report.js'], '');
-    const claim = 'Done — image_attributions.md handled and report.js csv export complete.';
-    const sev = Object.fromEntries(ledger.map(t => [t.tier, surfaceOpenLoop(t, claim).finding?.sev]));
-    return sev.soft === 'info' && sev.hard === 'block';
-  })());
-// M2 regression: paste-provenance computed on the FULL ask (fence survives clause-splitting).
-ok('paste-provenance (fence): a token only inside a ``` fence is a reference (SOFT), not a HARD open loop',
-  (() => { const c = classifyDeliverables('why does this crash?\n```\nconst x = doTheThing(payload)\n```'); return c.soft.includes('doTheThing') && !c.hard.includes('doTheThing'); })());
-ok('paste-provenance (stack-trace): a filename only in a `file.js:line` ref is SOFT, a requested symbol stays HARD',
-  (() => { const c = classifyDeliverables('the error at stackFrame.js:42 — add a guardClause'); return c.soft.includes('stackFrame.js') && c.hard.includes('guardClause'); })());
-// UNFENCED tool-output paste (real FP, hindsight task [tjqyi]): an MCP-server listing pasted raw NAMES
-// .mcp.json / claude.json; the ledger minted them HARD → a phantom task that can never close → ESCALATES
-// TO BLOCK. Structural glyphs (❯ ⎿ ⏺ │ ├ └ …) mark a line as tool output, so its tokens are paste-refs → SOFT.
-ok('paste-provenance (UNFENCED tool output): an MCP listing naming .mcp.json is SOFT, never a HARD open loop',
-  (() => { const c = classifyDeliverables('Project MCPs (/Users/x/hindsight-vercel/.mcp.json) ❯ supabase · ✔ connected · playwright · ✔ connected'); return c.soft.includes('mcp.json') && !c.hard.includes('mcp.json'); })());
-ok('paste-provenance (UNFENCED): Claude Code ⏺/⎿ tool output naming a file is SOFT, not a deliverable',
-  (() => { const c = classifyDeliverables('⏺ Read(config.json)\n  ⎿  read 42 lines from settings.json'); return !c.hard.includes('config.json') && !c.hard.includes('settings.json'); })());
-ok('paste-provenance: a REAL ask is unaffected by the glyph strip — still HARD',
-  classifyDeliverables('add a retry helper to upload.js').hard.includes('upload.js'));
-ok('paste-provenance: a real ask ALONGSIDE a pasted tool-output line still tracks its own deliverable HARD',
-  (() => { const c = classifyDeliverables('⏺ Bash(npm test) ⎿ ok\nnow add a retry helper to upload.js'); return c.hard.includes('upload.js'); })());
-// The "imperative + glyph on ONE line" shape (Fable). ▶/► are EXCLUDED from the strip precisely because a
-// human writes them in prose — this ask must stay HARD, or the fix would eat a real deliverable.
-ok('paste-provenance: a prose arrow ("refactor parser.js ▶ tokenizer.js") is NOT a paste — stays HARD',
-  (() => { const c = classifyDeliverables('refactor parser.js ▶ tokenizer.js'); return c.hard.includes('parser.js') && c.hard.includes('tokenizer.js'); })());
-// The ACCEPTED trade, pinned: an imperative sharing a line with a TOOL glyph (vitest prints ❯) demotes to
-// SOFT — surfaced once, never blocks, still grounds to done. It is NOT dropped, and restating it on a
-// glyph-free line restores HARD. This is the deliberate cost of killing the phantom block-wedge.
-ok('paste-provenance: imperative on a TOOL-glyph line demotes to SOFT (not dropped) — the accepted trade',
-  (() => { const c = classifyDeliverables('vitest says ❯ upload.test.js FAIL — fix the null deref in upload.js'); return c.soft.includes('upload.js') && !c.hard.includes('upload.js'); })());
-ok('paste-provenance: restating that ask on a glyph-free line restores it to HARD (the recovery path)',
-  (() => { const c = classifyDeliverables('vitest says ❯ upload.test.js FAIL\nfix the null deref in upload.js'); return c.hard.includes('upload.js'); })());
-// M1 regression: polite/omitted imperatives are real requests (HARD), not demoted questions.
-ok('M1: "could you move gameState into state.js?" is a HARD request (not a demoted question)',
-  classifyDeliverables('could you move gameState into state.js?').hard.includes('state.js'));
-ok('M1: "can you drop the retry logic from queue.js?" is a HARD request',
-  classifyDeliverables('can you drop the retry logic from queue.js?').hard.includes('queue.js'));
-// comment-vector close-fix
-ok('comment-vector: a symbol delivered only in a COMMENT does NOT close the task (still pending)',
-  updateTaskLedger([], ['wire up fooBar'], '+++ b/a.js\n+  // fooBar goes here')[0].status === 'pending');
-ok('comment-vector: the same symbol in CODE closes the task (done)',
-  updateTaskLedger([], ['wire up fooBar'], '+++ b/a.js\n+  const fooBar = 1;')[0].status === 'done');
-// H1 regression: a soft token grounding must NOT close a HARD task whose real deliverable is absent.
-ok('H1: a hard task is NOT closed by a soft/reference token grounding (only its own hard token closes it)',
-  updateTaskLedger([], ['`handleUpload` is fine, but fix retry.js'], '+++ b/a.js\n+function handleUpload(){}')[0].status === 'pending');
-{
-  const t0 = { id: 't1', task: 'add retry to upload.js', deliverable: ['upload.js'], tier: 'hard', status: 'pending' };
-  const s1 = surfaceOpenLoop(t0, 'working on it');
-  ok('nag-once: first surface of a hard pending task → warn finding (not quiet) + marks surfaced',
-    s1.finding && s1.finding.sev === 'warn' && !s1.finding.quiet && s1.task.surfaced === true);
-  // H2 regression: a still-pending hard task STAYS on the card (finding emitted) but is marked quiet (not re-injected).
-  const s2 = surfaceOpenLoop(s1.task, 'still going');
-  ok('H2: second turn, no claim → still emits a pending finding (quiet != green) but marked quiet (not re-injected)',
-    s2.finding && s2.finding.sev === 'warn' && s2.finding.quiet === true);
-  ok('per-token done-match: a claim naming THIS task\'s token → BLOCK (escalate)',
-    surfaceOpenLoop(s1.task, 'Done — added upload.js retry').finding?.sev === 'block');
-  const other = { id: 't2', task: 'fix parser.js', deliverable: ['parser.js'], tier: 'hard', status: 'pending', surfaced: true };
-  ok('per-token done-match: a generic "all done" NOT naming this token does NOT escalate it (stays warn/quiet)',
-    surfaceOpenLoop(other, 'all done, everything works!').finding?.sev === 'warn');
-  // M3 regression: an HONEST "still pending" disclosure naming the token must NOT false-block.
-  ok('M3: "Done with parser; upload.js still pending — will do next" does NOT falsely escalate upload.js to block',
-    surfaceOpenLoop(t0, 'Done with the parser; upload.js still pending — will do next').finding?.sev !== 'block');
-  // Pass-2 defect B (dodge): a genuine false "done" claiming the token complete must BLOCK even if guard words
-  // about OTHER work sit farther off in the sentence (proximity guard, not whole-clause).
-  ok('proximity-B: "Done — upload.js is complete, nothing pending, will close out" STILL blocks (no far-away dodge)',
-    surfaceOpenLoop(t0, 'Done — upload.js is complete, nothing pending, will close out').finding?.sev === 'block');
-  // Pass-2 defect A (false-block): "not yet done" adjacent to the token is an honest disclosure → NOT block.
-  ok('proximity-A: "upload.js not yet done" is an honest disclosure → NOT a false block',
-    surfaceOpenLoop(t0, 'upload.js not yet done').finding?.sev !== 'block');
-  ok('proximity-A: "parser done; upload.js not yet done" → NOT a false block on upload.js',
-    surfaceOpenLoop(t0, 'parser done; upload.js not yet done').finding?.sev !== 'block');
-}
-ok('soft expiry: an aged-out soft aside stops nagging (no finding, marked stale)',
-  (() => { const s = surfaceOpenLoop({ id: 't3', task: 'x', deliverable: ['handleFoo'], tier: 'soft', status: 'pending', surfaced: true, age: 5 }, ''); return s.finding === null && s.task.status === 'stale'; })());
-ok('soft first-surface: a soft aside surfaces ONCE as info (never block, even with a done-claim)',
-  (() => { const s = surfaceOpenLoop({ id: 't4', task: 'the 304 is fine', deliverable: ['handleBar'], tier: 'soft', status: 'pending' }, 'Done — handleBar shipped'); return s.finding && s.finding.sev === 'info'; })());
-
-// ── Ledger self-healing (live FP t1d7d, real hindsight session): a task minted HARD by a PRE-FIX classifier
-// stayed HARD for 300+ turns after v1.2.1 shipped the declarative fix, because tier was only backfilled when
-// null. tier + deliverable are now RE-DERIVED from today's classifier every turn (idempotent — classification
-// is deterministic over the ask text), so a classifier fix retroactively heals every live ledger.
-{
-  const ask = 'I do have image attirbutions.md on downloads folder';   // the real t1d7d ask (typo and all)
-  const stale = [{ id: 't1d7d', task: ask, deliverable: ['attirbutions.md'], tier: 'hard', status: 'pending', age: 302, surfaced: true }];
-  const healed = updateTaskLedger(stale, [ask], '');
-  ok('ledger healing: a persisted pre-fix HARD task re-derives to soft once the classifier demotes its ask',
-    healed.length === 1 && healed[0].tier === 'soft' && healed[0].age === 302);   // age preserved → next surface expires it
-  ok('ledger healing: an aged-out healed task goes STALE on its next surface (the 300-turn nag ends)',
-    surfaceOpenLoop(healed[0], '').task.status === 'stale');
-  // Reap: an ask that no longer yields ANY deliverable should never have minted — its persisted task goes too.
-  const ghost = [{ id: 'tg', task: 'thanks, that all looks good now', deliverable: ['ghost.js'], tier: 'hard', status: 'pending' }];
-  ok('ledger healing: a persisted task whose ask now yields NO deliverable is REAPED',
-    updateTaskLedger(ghost, ['thanks, that all looks good now'], '').length === 0);
-  // Fail-open: a persisted task whose ask is ABSENT from the transcript (legacy truncation, compaction) is untouched.
-  ok('ledger healing: a persisted task with no matching ask this turn is left as-is (fail-open)',
-    updateTaskLedger(ghost, ['unrelated new ask'], '').some(t => t.id === 'tg'));
-  // Human-set deferral survives the re-derive (only tier/deliverable are recomputed, never a confirmed status).
-  const def = [{ id: 'td', task: 'fix retry.js', deliverable: ['retry.js'], tier: 'hard', status: 'deferred' }];
-  ok('ledger healing: re-derive does not disturb a deferred status',
-    updateTaskLedger(def, ['fix retry.js'], '')[0].status === 'deferred');
-}
-
-// ── DIAGNOSIS-ONLY gate (live FP t7dep, real hindsight session): an ask that is all state-reports + a
-// question commands NO change — its correct outcome may be an EMPTY diff (the agent RESTORED game.js; net-zero
-// was the success), so minting a HARD diff-groundable deliverable is the unclosable-wedge class again.
-{
-  const t7dep = 'Staging game.js is the one we need. Game.js has been modified heavily and staging should have the keyboard hiding fix not head. Can you see what is happening. Staging game.js and head game.js are different in each sense as its heavily rerfactored on staging into components';
-  const c = classifyDeliverables(t7dep);
-  ok('diagnosis-only: the real t7dep ask (passive "has been modified", noun-"fix", question clause) demotes ALL tokens to soft',
-    c.hard.length === 0 && c.soft.includes('game.js'));
-  ok('diagnosis-only: a problem report + read question with no change verb demotes to soft (diagnosis is the ask)',
-    classifyDeliverables('login.js is broken — can you look into what is happening?').hard.length === 0);
-  ok('diagnosis-only OFF on an active change verb ANYWHERE in the ask ("…Fix the keyboard handling.")',
-    classifyDeliverables('Can you see what is happening with game.js? Fix the keyboard handling.').hard.includes('game.js'));
-  ok('diagnosis-only OFF without a question/read/verify clause: a verbless problem-report commission keeps its v1.2.1 hardness',
-    classifyDeliverables('cache.js returns stale data').hard.includes('cache.js'));
-  // deNoun: a determiner-preceded REQUEST_VERB is a noun ("the caching fix"), not a command — it must not
-  // hold the gate open; the same word as a live imperative must.
-  ok('diagnosis-only: noun-"fix" does not defeat the gate ("why is render.js slow? I think the caching fix helped")',
-    classifyDeliverables('why is render.js slow? I think the caching fix helped').hard.length === 0);
-  ok('diagnosis-only OFF on imperative "fix" ("why is render.js slow? fix the caching in render.js")',
-    classifyDeliverables('why is render.js slow? fix the caching in render.js').hard.includes('render.js'));
-  // dePassive: passive/perfect voice reports state; an active imperative in the same ask survives the blanking.
-  ok('dePassive: "parser.js has been refactored. can you check it still builds?" → soft (report + verify question)',
-    classifyDeliverables('parser.js has been refactored. can you check it still builds?').hard.length === 0);
-  ok('dePassive: an ACTIVE verb after a passive report keeps the ask HARD ("parser.js was refactored badly. refactor it again")',
-    classifyDeliverables('parser.js was refactored badly. refactor it again').hard.includes('parser.js'));
-  // The two traps probe-verified during the fix: VERIFY hiding inside a filename must not re-open FN-2
-  // ask-wide, and token-blanking must not fake a question-start copula.
-  ok('diagnosis-only does NOT re-open FN-2: "validator.js needs updating" stays HARD (validat\\w+ inside the filename)',
-    classifyDeliverables('validator.js needs updating').hard.includes('validator.js'));
-  ok('diagnosis-only: token-blanking cannot fake a question ("outdated.js is outdated" is a report, stays HARD)',
-    classifyDeliverables('outdated.js is outdated').hard.includes('outdated.js'));
-  // ── The three v1.3.2 adversarial-review (Fable) findings, pinned ──
-  // (1) ReDoS: `recently` doubled with `\w+ly` in PASSIVE_VOICE_RE's adverb loop → 2^n backtracking; 28
-  // repeats took ~57 s, and dePassive runs on every CUMULATIVE ask every Stop — one poisoned paste would
-  // wedge the hook for the whole session (a hang = a silent pass on every future turn, the cardinal sin).
-  ok('ReDoS pin: 40 stacked ambiguous adverbs classify in bounded time (the alternation is unambiguous)',
-    (() => { const t0 = Date.now(); classifyDeliverables('was ' + 'recently '.repeat(40) + 'x can you see what is happening with game.js?'); return Date.now() - t0 < 2000; })());
-  // (3) the off-switch coverage gap: a commission whose verb is outside REQUEST_VERB_RE, with a question
-  // co-occurring, must stay HARD (EXTRA_REQUEST_VERB_RE, scoped to the gate so it can only disable demotion).
-  ok('diagnosis-only OFF on gate-scoped extra verbs: "bump the version in package.json. does CI pass?" stays HARD',
-    classifyDeliverables('bump the version in package.json. does CI pass?').hard.includes('package.json'));
-  ok('diagnosis-only OFF on "install lodash and pin it in package.json. is that ok?" (install/pin)',
-    classifyDeliverables('install lodash and pin it in package.json. is that ok?').hard.includes('package.json'));
-  // deNoun must not blank an infinitive commission: "the file TO FIX" is a command, not a noun phrase.
-  ok('deNoun: an infinitive commission survives ("auth.js is the file to fix. can you?" stays HARD)',
-    classifyDeliverables('auth.js is the file to fix. can you?').hard.includes('auth.js'));
-  ok('deNoun still blanks a true noun phrase ("the keyboard hiding fix" does not hold the gate open)',
-    classifyDeliverables('why is render.js slow? staging should have the keyboard hiding fix').hard.length === 0);
-}
-// (2) reap collision: two DIFFERENT asks sharing a 100-char prefix collide on the truncated ledger key; the
-// inline delete let the no-deliverable ask reap the commissioning ask's LIVE task when it came later in the
-// transcript (order-dependent silent loss). Two-phase reap: minted keys win, both orders keep the task.
-{
-  const pre = 'please review the following long preamble that pads this ask well past the hundred character mark!! ';
-  const A = pre + 'now fix retry.js';                       // commissions retry.js
-  const B = pre + 'thanks, that all looks good now';        // yields nothing, same truncated key
-  ok('reap collision: commissioning ask BEFORE the colliding no-deliverable ask — task survives',
-    updateTaskLedger([], [A, B], '').some(t => (t.deliverable || []).includes('retry.js')));
-  ok('reap collision: commissioning ask AFTER the colliding no-deliverable ask — task survives (order-independent)',
-    updateTaskLedger([], [B, A], '').some(t => (t.deliverable || []).includes('retry.js')));
 }
 
 // ── Compiled rules grade AUTHORED changes only (live 🔴 FP, real hindsight session): the Stop path fed

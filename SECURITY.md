@@ -76,3 +76,9 @@ Under those conditions the env-anchored block is un-disablable and the transcrip
 ## Scope
 
 This policy covers Groundtruth's own rails — its findings, its block loop, and the integrity of its verdict. It does not cover vulnerabilities in your project's code that Groundtruth reviews; those are for your own security process. Groundtruth's security checks (hardcoded secrets, RLS-off tables, committed `.env`) are heuristics that raise the floor, not a substitute for a dedicated scanner or audit.
+
+### The v2 claims contract — an accepted scope bound
+
+The claims contract's completeness checks (`UC` — a change you didn't declare; `NC` — you changed files but gave no contract) are scoped to files the agent's **Write / Edit tool ledger** shows it authored. This is deliberate precision: a tree that was dirty at session start, a manual edit, or lockfile churn from `npm install` is not something the agent can honestly declare, and flagging it would be a false positive.
+
+The bound this accepts: a file the agent edits through the **Bash channel** (`sed -i`, `> file`, a heredoc) is not in the Write/Edit ledger, so an *undeclared* Bash-channel change is not caught by `UC`/`NC` in-session. This is the same tool-ledger blind spot the in-session security scanners already carry, and the mitigation is the same: the **CI / pre-merge `--diff-range` gate** sees the whole diff with no ledger dependency and is the real backstop for anything that must not slip. In-session honesty-of-completeness is best-effort; CI is the boundary.

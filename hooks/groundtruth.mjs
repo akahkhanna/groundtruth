@@ -34,16 +34,22 @@ import { fileURLToPath } from 'node:url';   // NOT `new URL(...).pathname` — t
 // Class 6 lives in its own module (this engine is already large). The import is a deliberate cycle
 // (symbol-integrity.mjs re-imports the pure lexers below) — safe because every cross-reference is at
 // call time, never at module-eval time.
-import { checkDroppedSymbols } from './symbol-integrity.mjs';
+import { checkDroppedSymbols, addedSymbolsByFile } from './symbol-integrity.mjs';
+// v2 claims contract (opt-in, GROUNDTRUTH_CONTRACT=1). Pure module — parse + validate + verify the agent's
+// end-of-turn claims block against reality. Off by default; v1 is the fallback during soak.
+import { buildReality, contractFindings } from './claims-contract.mjs';
 
 const CLASS_NAME = { 1: 'false test/build claim', 2: 'stub/placeholder', 3: 'silent no-op', 4: 'phantom ref',
   6: 'dropped symbol (dangling ref)', 9: 'special-casing / overfit', async_done: 'false completion (async)',
   B1: 'RLS off on new table', B3: 'permissive policy (anon-readable)', B4: 'unscoped UPDATE/DELETE (no WHERE)',
   C1: 'hardcoded secret', C2: 'private key',
-  R: 'compiled rule (from your docs)', openloop: 'open loop (asked, not delivered)', P: 'procedure (step skipped / out of order)',
+  R: 'compiled rule (from your docs)', P: 'procedure (step skipped / out of order)',
   ENV: 'env file not gitignored (secret-leak risk)', test_exclusion: 'test excluded/skipped to pass',
   test_weakened: 'test weakened/disabled to pass', mojibake: 'encoding corruption (mojibake)',
-  agent: 'subagent cannot load (silently inert)' };
+  agent: 'subagent cannot load (silently inert)',
+  // v2 claims contract (GROUNDTRUTH_CONTRACT=1): NC = no valid claims block, CA = claim unsupported by the
+  // diff/transcript, UC = a changed file no claim covers.
+  NC: 'no claims contract', CA: 'claimed but absent (contract)', UC: 'undeclared change (contract)' };
 const CLASS_BUCKET = { 1: 'Ignored', 2: 'Missed→Ignored', 3: 'Ignored', 4: 'Missed', 6: 'Missed→Ignored', async_done: 'Ignored',
   B1: 'Ignored', B3: 'Ignored', B4: 'Ignored', C1: 'Ignored', C2: 'Ignored', R: 'Ignored' };
 
@@ -184,14 +190,6 @@ const importLang = (file) => IMPORT_LANGS.find(l => l.ext.test(file));
 // a truly exotic runner outside this set still reads as "not run" — block is opt-in (default warn), so that
 // is a documented limit, not a silent false block (see ROADMAP: per-language block-degrade).
 const TEST_BUILD_RE = /\b(npm (?:test|run (?:build|lint|typecheck))|yarn (?:test|build|lint)|pnpm (?:test|build|lint)|bun (?:test|run)|deno (?:test|task|check)|node --check|node\s+[^|;&]*\.test\.|vitest|jest|mocha|ava|playwright|cypress|tsc|pytest|tox|nox|unittest|go (?:test|build|vet)|cargo (?:test|build|check|clippy)|(?:bundle exec )?rspec|rails test|rake test|minitest|(?:\.\/)?(?:mvnw?|gradlew?)\b[^|;&]*\b(?:test|verify|build|check)|phpunit|pest|dotnet (?:test|build)|ctest|cmake --build|make(?:\s+[\w.-]+)?|swift test|bats|mix test|lein test|clojure -M:test)\b/;
-// A test RESULT that clearly reports failures, across runners (JS/TAP, Go, Cargo, pytest, RSpec, JUnit/Maven).
-// Failure COUNTS require a non-zero leading digit (`[1-9]\d*`) — a success line like "12 passed, 0 failed" or
-// "Tests: 0 failing" must NOT read as a failure (the zero-count false-warn Fable caught). The `[1-9]\d*\s+tests?\s+`
-// alternative catches ava's "1 test failed" form, where the word "test" between the count and "failed" defeats
-// the bare-count matcher. NOTE: we deliberately do NOT broaden `FAIL\b`→`FAILED` (to catch pytest's bare
-// `FAILED path::test` line) — the word "failed" in "0 failed" would then re-trip the zero-count FP; pytest
-// failures are already caught by their always-present `=== N failed ===` summary bar.
-const TEST_FAIL_RE = /\b[1-9]\d*\s+(?:failing|failed|failures?)\b|\b[1-9]\d*\s+tests?\s+(?:failed|failing)\b|\bAssertionError\b|\bnot ok \d|Tests?:\s*[1-9]\d*\s+(?:failed|failing)|(?:^|\s)FAIL\b|---\s*FAIL:|test result:\s*FAILED|\b\d+\s+examples?,\s*[1-9]\d*\s+failures?|Tests run:\s*\d+,\s*Failures:\s*[1-9]|\bpanicked\b/i;
 // Test/spec files across languages — JS (.test./.spec.), Go (_test.go), Python (test_*.py / *_test.py),
 // Ruby (*_spec.rb), Elixir (*_test.exs), plus conventional dirs (tests/, __tests__/, spec/, src/test/).
 // Drives the Class-1 "whole diff is tests" anti-gaming warn AND the remediation gaming guard (GAMED_FILE_RE).
@@ -769,6 +767,30 @@ export function vacuousTestFindings(claim = '', diff = '') {
  * mutations:[{path,seq,text}] (ordered Edit/Write ledger). When absent (pre-commit, --diff-range, any legacy
  * caller) the checks that need them ABSTAIN — they never fire and never bless on missing data.
  */
+
+// The "last source edit" anchor for the v2 contract's stale-green sensor: the max transcript seq of a
+// mutation that touched CODE (not comment/whitespace, not an excluded/non-code path), paths relativized
+// against cwd. Extracted from the retired v1 class-1 block so the four gates that killed its verified FPs are
+// preserved VERBATIM — comment-only edit, whitespace reformat, scratchpad write, and the absolute-path
+// silent-inertness (real transcripts record absolute file_paths; excludedScanPath reads those as out-of-tree,
+// so without relativizing, codeMuts is always empty on the one path that supplies mutations). 0 = none.
+export function lastCodeEditSeq(mutations = [], cwd = process.cwd()) {
+  const normCodeSet = (s, mext) => { const st = { block: false, fence: false };
+    return new Set(String(s).split('\n').map(l => splitCodeComment(l, mext, st).code.replace(/\s+/g, '')).filter(Boolean)); };
+  const touches = (m) => { const mext = extOf(m.path);
+    if (m.added !== undefined || m.removed !== undefined) {
+      const a = normCodeSet(m.added ?? '', mext), r = normCodeSet(m.removed ?? '', mext);
+      return [...a].some(l => !r.has(l)) || [...r].some(l => !a.has(l)); }
+    const mst = { block: false, fence: false };
+    return String(m.text).split('\n').some(l => splitCodeComment(l, mext, mst).code.trim() !== ''); };
+  const relPath = (p) => { const s = String(p).replace(/\\/g, '/');
+    const root = String(cwd).replace(/\\/g, '/').replace(/\/+$/, '') + '/';
+    return s.toLowerCase().startsWith(root.toLowerCase()) ? s.slice(root.length) : s; };
+  return (Array.isArray(mutations) ? mutations : [])
+    .map(m => ({ ...m, path: relPath(m.path) }))
+    .filter(m => CODE_EXT_RE.test(m.path) && !excludedScanPath(m.path) && touches(m))
+    .reduce((mx, m) => Math.max(mx, m.seq || 0), 0);
+}
 export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], results = [], cwd = process.cwd(), bgPending = false, bashEvents = null, mutations = null }) {
   const findings = [];
   // AG-B/AG-C need REAL -/+ pairing, which only the git diff has. `diff` here is the WIDER scanDiff (git +
@@ -777,371 +799,7 @@ export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], 
   // test-gaming checks to the git-only diff (falls back to `diff` when a caller passes none, e.g. the tests).
   const gDiff = gitDiff != null ? gitDiff : diff;
   const files = changedFiles(diff);
-  const added = diff.split('\n').filter(l => l[0] === '+' && !l.startsWith('+++'));
-
-  // Class 1 — false test/build claim
-  // Only a real, POSITIVE assertion counts. The claim's noun+verb must share a SENTENCE (the gap excludes .!?
-  // so "Great tests! They should pass" isn't read as one claim), and exclusions are scoped to that sentence —
-  // a hypothetical in a LATER sentence can't silence a real claim ("Tests pass. If you change X, make sure the
-  // build passes."). Exclusions:
-  //   (a) a modal OR negation within 3 words of the verb ("tests should pass", "tests don't pass yet") — the
-  //       guard's verb set MIRRORS the claim's (…|verified|all clean), else "should be VERIFIED" leaks as a block;
-  //   (b) a counterfactual whose marker PRECEDES the claim ("even if I'd watched … go green") — a TRAILING
-  //       "…even if you retry" / "…would have failed" clause must NOT launder a leading real claim, so (b) is
-  //       tested only on the sentence PREFIX up to the claim.
-  // We scan ALL matches (global) and take the FIRST that survives the exclusions — so a hedged EARLIER
-  // sentence ("The build should pass once wired. The tests pass.") can't shadow a real claim that follows.
-  const VERB = String.raw`(?:pass(?:e[ds])?|green|succeed(?:ed)?|verified|all clean)`;
-  const nearModalOrNeg = new RegExp(String.raw`\b(?:should|would|must|will|[’']ll|to|need(?:s|ed)?\s+to|can|could|may|if|once|when|make sure|ensure|so that|not|never|no|\w*n[’']t)\b(?:\s+\w+){0,3}\s+` + VERB, 'i');
-  const counterfactual = /\b(?:even\s+if|if\s+\w+[’']d|if\s+\w+\s+had|would(?:[’']ve|\s+have)|had\s+i)\b/i;
-  // A quoted PATTERN, not prose — "tests/build … pass/green", "pass(?:e[ds])?|green" — is Groundtruth's own
-  // regex being discussed, not a claim. Tell: a slash/pipe with a VERB keyword on AT LEAST ONE side, or regex
-  // group syntax. (Real prose slashes nouns and leaves the verb bare — "Build/tests pass" is a claim; meta
-  // slashes the verb pair — "pass/green" is a quote.)
-  const V = String.raw`(?:pass\w*|green|succeed\w*|verified|clean)`;
-  const K = String.raw`(?:tests?|build|lint|check|typecheck|pass\w*|green|succeed\w*|verified|clean)`;
-  const quotedPattern = new RegExp(`${V}\\s*[\\/|]\\s*${K}|${K}\\s*[\\/|]\\s*${V}|\\(\\?[:=!<]`, 'i');
-  //   (c) REPORTED SPEECH — an attribution verb governing the noun ("claimed/flagged/said/echoed/reported
-  //       … tests pass") is quotation, not a fresh claim; this is what an echoed finding message
-  //       ("claimed tests/build pass …") tripped, driving a silent self-match block-loop.
-  const reportedSpeech = new RegExp(String.raw`\b(?:claim(?:ed|s|ing)?|flag(?:ged|s|ging)?|said|says|echo(?:ed|es|ing)?|quot(?:ed|es|ing)?|wrote|writes|report(?:ed|s|ing)?)\b(?:\s+\w+){0,4}\s+\b(?:tests?|build|lint|typecheck|type-check)\b`, 'i');
-  // Scan the QUOTE-STRIPPED view (fenced/blockquote blanked; offsets preserved so sentence-scoping aligns);
-  // a match wholly inside an inline `code` span is quoted prose and excused (a straddling one still fires).
-  const { scan: claimScan, inlineSpans } = stripQuotedForClaim(claim);
-  const insideInline = (m) => inlineSpans.some(([a, b]) => m.index >= a && m.index + m[0].length <= b);
-  //   (d) "pass" as a NOUN — a STAGE, not the verb. The keyword→verb gap (`[^.!?\n]*`) spans a whole noun
-  //       phrase, so "then build the FIX pass" / "build the **CONFIRM pass**" read as "the build passes"
-  //       and flag a turn that merely ANNOUNCED a plan. Live FP, found by replaying 10 days of real
-  //       sessions: it fired on a hindsight turn at BLOCK severity (pre-demotion) for describing a
-  //       validation stage. Tell: a bare `pass` headed by a determiner (+ optional modifier) — "a pass",
-  //       "the FIX pass", "a second pass". Only the BARE form is ambiguous; the inflected verbs
-  //       (passes/passed) and green/verified/succeeded are unambiguous and untouched. A real SUBJECT
-  //       before it ("the tests pass", "all tests pass") is not a determiner, so a true claim still fires.
-  //       Because `[^.!?\n]*` is GREEDY, m[2] is the LAST verb in the sentence — so a first-draft guard
-  //       that only inspected m[2] excused "Tests pass after the second pass" / "build is green after one
-  //       pass" wholesale: a trailing noun-`pass` silenced a REAL leading claim (verified FN — a one-noun
-  //       suffix would launder any green claim). Walk EVERY verb occurrence in the span instead; the match
-  //       is excused only if NO occurrence is a credible verb.
-  //   (e) gap bound — a keyword and a verb 18 words apart are clause GLUE, not one claim: live replay FP
-  //       "…no named file/test, so the auditor had no explicit deliverable list to tick off (… the fix was
-  //       verified …)" married "test" to "verified" across three clauses. Real claims are short ("all 502
-  //       unit checks pass" is a 4-word gap); past MAX_GAP words the check ABSTAINS (warn-tier heuristic —
-  //       abstention outside the provable scope is the charter, a distant FN is the accepted cost).
-  const NP_SUBJECT = /^(?:tests?|builds?|lints?|checks?|suites?|specs?|typecheck|type-check|they|it|all|everything|both|these|those|ci|runs?)$/i;
-  const NP_DET = /^(?:the|a|an|another|this|that|each|every|first|second|third|next|final|one|our|my|its|their)$/i;
-  const VERB_OCC = new RegExp(String.raw`\b` + VERB + String.raw`\b`, 'gi');
-  // Tuned against BOTH directions, not guessed: the live glue FP spans 18 words, while a real claim ("the
-  // tests I added for the new billing and invoicing modules now all pass") spans 11 — so 8 silently ATE that
-  // real claim (an FN: abstain = clean green). 12 sits between the two and is the only band verified to hold
-  // every case in the regression set; ≥18 lets the glue FP back in.
-  const MAX_GAP = 12;
-  const noCredibleVerb = (m) => {                                    // true → abstain (noun-only or out-of-range span)
-    for (const v of m[0].matchAll(VERB_OCC)) {
-      const toks = m[0].slice(0, v.index).match(/[\w-]+/g) || [];    // keyword + everything before THIS occurrence
-      if (toks.length - 1 > MAX_GAP) break;                          // (e) this and all later occurrences are too far
-      if (!/^pass$/i.test(v[0])) return false;                       // inflected/other verb forms are unambiguous
-      const last = toks[toks.length - 1], prev = toks[toks.length - 2];
-      if (!last || NP_SUBJECT.test(last)) return false;              // "tests pass" — a subject, so `pass` is the verb
-      if (!(NP_DET.test(last) || (!!prev && NP_DET.test(prev)))) return false;   // not "a pass" / "the FIX pass" → treat as verb
-    }
-    return true;                                                     // every in-range occurrence is a determiner-headed noun
-  };
-  // ponytail: known ceiling — a DET inside a PP modifying a real subject ("tests on this branch pass") is
-  // surface-identical to a noun stage ("lint in a final pass") and abstains; needs a parser to do better.
-  let _passClaim = null, _passSentence = '';
-  for (const m of claimScan.matchAll(/\b(tests?|build|lint|typecheck|type-check)\b[^.!?\n]*\b(pass(?:e[ds])?|green|succeed(?:ed)?|verified|all clean)\b/gi)) {
-    if (quotedPattern.test(m[0])) continue;                          // a quoted pattern, not a claim
-    if (insideInline(m)) continue;                                   // wholly inside a `code` span → quoted prose
-    if (noCredibleVerb(m)) continue;                                 // "the FIX pass" — a stage, not a verdict — or clause glue
-    const before = claimScan.slice(0, m.index);
-    const sentBefore = before.slice(before.search(/[^.!?\n]*$/));    // the claim's sentence, up to the claim
-    const after = claimScan.slice(m.index);
-    const sentence = sentBefore + after.slice(0, (after.search(/[.!?\n]/) + 1) || after.length);
-    if (nearModalOrNeg.test(sentence) || counterfactual.test(sentBefore) || reportedSpeech.test(sentence)) continue;   // hedged / negated / counterfactual / reported speech
-    _passClaim = m; _passSentence = sentence; break;                 // first surviving real claim (+ its sentence, for the universality gate below)
-  }
-  if (_passClaim) {
-    const ev = ` ("${claim.slice(_passClaim.index, _passClaim.index + _passClaim[0].length).trim().slice(0, 60)}")`;   // slice the ORIGINAL (offsets align) so evidence has no blanking artifacts
-    const testHits = bashCmds.filter(c => TEST_BUILD_RE.test(c));
-    const ran = testHits.length > 0;
-    // NOTE: `failed` (the failure-substring sensor) is defined BELOW, once `lastRun` exists — it is scoped to
-    // the run that actually BACKS the claim, not to every result in the session. See the v1.2.2 note there.
-    // A "tests pass" claim backed ONLY by a syntax/type check (node --check, tsc, cargo check, …) is the
-    // ESM-class trap: raw-node / compile green ≠ the runtime that actually ships. Warn (not block) — the noun
-    // is specifically "tests", so FP is low, but a legit tsc-as-test turn shouldn't halt. Split on shell
-    // separators + anchor at segment start, and allow the real-world prefixes agents use (`npx tsc`,
-    // `./node_modules/.bin/tsc`, `FOO=1 tsc`), while `tsc(?=\s|$)` keeps `node tsc-x.test.mjs` (tsc in a
-    // filename) and `npm test && tsc` (a real run in the same string) from being mistaken for a bare check.
-    const WEAK_CHECK_RE = /^\s*(?:\w+=\S+\s+)*(?:(?:npx|bunx|pnpm exec|pnpm dlx|yarn)\s+)?(?:\S*\/)?(?:node --check|node\s+-e\b|tsc(?=\s|$)|deno check|cargo check|go vet|py_compile|ruby -c\b)/;
-    // `\n` is a shell separator too: agents routinely write ONE Bash call as several lines
-    // ("npm test\ngit commit -m x"). Without `\n` in the split, the whole call read as ONE segment, so a
-    // failed COMMIT on line 2 was attributed to the green test on line 1 (verified exit-check FP), and
-    // "tsc\nnpm test" read as a bare typecheck (a weakOnly FP the same split fixes).
-    const SHELL_SEG_RE = /&&|\|\|?|;|\n/;
-    const weakOnly = c => { const ts = c.split(SHELL_SEG_RE).filter(s => TEST_BUILD_RE.test(s)); return ts.length > 0 && ts.every(s => WEAK_CHECK_RE.test(s)); };
-    const onlyWeak = ran && testHits.every(weakOnly);
-    // A claim that itself DISCLOSES a partial/known failure — "15/16 pass", "1 failing", "team-mode is a
-    // pre-existing failure I disclosed" — is honest reporting, not an overclaim. The `failed` branch below is
-    // a substring sensor (TEST_FAIL_RE on the output); an honest disclosure PRINTS `FAIL …team-mode.test.js`
-    // right next to `pass`, tripping it (confirmed FP on a real card). Suppress `failed` (only that branch —
-    // NOT `!ran`) when the claim OWNS the failure. Precision (Fable): test the QUOTE-STRIPPED view (someone
-    // else's fenced words aren't the agent's claim); BIND the fraction to a test/pass word so a date "12/2024"
-    // or a step "2/5" isn't a false disclosure and "22/22" stays a clean claim; require the contrastive
-    // markers (unrelated/aside from/known…) to co-occur with a FAILURE word in the SAME sentence, so
-    // "unrelated to the parser" / "known issue with docs" can't wave a real discrepancy through.
-    let partialPass = false;                                            // "15/16 pass", "passed 15 of 16" (N<M)
-    for (const fm of claimScan.matchAll(/\b(\d+)\s*(?:\/|of|out of)\s*(\d+)\b\s*(?:tests?|specs?|files?|suites?|pass\w*|green)|\bpass\w*\s+(\d+)\s*(?:\/|of|out of)\s*(\d+)\b/gi)) {
-      const n = +(fm[1] ?? fm[3]), mm = +(fm[2] ?? fm[4]);
-      if (n < mm) { partialPass = true; break; }
-    }
-    const countFail = /\b[1-9]\d*\s+(?:tests?|specs?|files?|of\s+them)?\s*fail\w*/i.test(claimScan);   // "1 failing", "2 tests failed"
-    const markerFail = claimScan.split(/[.!?\n]+/).some(s =>            // a known/pre-existing/contrastive marker, ABOUT a failure
-      /\bpre[-\s]?existing\b|\bknown\b|\baside from\b|\bother than\b|\bunrelated\b|\bnot (?:caused|introduced) by\b/i.test(s)
-      && /\bfail\w*|\bflaky\b|\bbroken\b/i.test(s));
-    const disclosesFailure = partialPass || countFail || markerFail;   // NOTE (documented ceiling): magnitude isn't cross-checked, so "18/20 pass" over 10 real fails still suppresses — warn-tier only.
-    // ── Artifact-grounded Class-1 evidence (v1.1.0): exit status · ordering · filtered runs ──
-    // These ground on the TRANSCRIPT's paired/ordered record (bashEvents/mutations) — an input the agent
-    // can't author — unlike the prose sensors above. They are STILL warn, not block: each fires only under
-    // _passClaim, a prose-parsed natural-language trigger, and a conjunction's severity is bounded by its
-    // weakest conjunct (the exact rule that demoted the !ran branch after its live block-loop FP). The
-    // artifact strengthens the EVIDENCE side; the TRIGGER stays prose. CI is where this class earns block.
-    // ABSTAIN contract: bashEvents/mutations are optional — null on --pre-commit / --diff-range and on any
-    // caller predating them (all legacy tests). With no paired/ordered data these emit NOTHING and bless
-    // nothing; the flat-array sensors keep their old coverage unchanged.
-    const events = Array.isArray(bashEvents) ? bashEvents : [];
-    // FAMILY FENCE (adversarial-review fix): TEST_BUILD_RE spans tests+build+lint+typecheck as ONE family —
-    // a breadth the legacy sensors (ran/onlyWeak/failed) deliberately share and KEEP (changing them would
-    // drift legacy verdicts). The artifact-grounded checks must not inherit it: a TRUE "the tests pass" was
-    // warned NON-ZERO because `npm run lint` exited 1 AFTER the green `npm test` (verified FP — a lint
-    // failure falsifies nothing about tests), and inversely a green `npm run lint` run after the last edit
-    // "refreshed" a stale test green (verified laundering FN — any cheap green family member washed the
-    // stale check dark). LINT is the one member whose outcome is independent of tests/build/typecheck in
-    // both directions, so it alone is fenced: under a lint claim only lint segments count; under any other
-    // noun, lint segments don't. Build/typecheck failures stay relevant to a tests claim ON PURPOSE — code
-    // that doesn't compile can't honestly be "tests pass" — matching the legacy sensors' breadth.
-    const LINT_SEG_RE = /\b(?:lint|eslint|stylelint|prettier|ruff|flake8|pylint|rubocop|clippy|golangci|vet)\b/i;
-    const claimIsLint = /^lint$/i.test(_passClaim[1]);
-    const famOK = (seg) => claimIsLint ? LINT_SEG_RE.test(seg) : !LINT_SEG_RE.test(seg);
-    // COMMAND-POSITION anchor (adversarial-review fix, v1.1.1): TEST_BUILD_RE is a \b-substring by design —
-    // the legacy ran/failed sensors want that breadth in the BLESS direction, and it stays there. But the
-    // artifact checks CONDEMN and ORDER on family membership, and a substring hit inside an ARGUMENT made a
-    // non-run "family": `grep vitest package.json` exiting 1 (no match) after a genuine green read as a
-    // FAILED test run (verified FP), and the same grep run AFTER the last edit refreshed lastTestSeq and
-    // washed a stale green dark (verified laundering FN — any argument mentioning a runner re-blessed the
-    // green). Family here therefore requires the runner in COMMAND position: optional subshell paren /
-    // env-var prefixes / npx-style wrappers / a path prefix — the same prefix idiom WEAK_CHECK_RE uses —
-    // then the family command itself.
-    const FAM_CMD_RE = new RegExp(String.raw`^[\s({!]*(?:\w+=\S+\s+)*(?:(?:npx|bunx|pnpm exec|pnpm dlx|yarn)\s+)?(?:\S*/)?(?:` + TEST_BUILD_RE.source + ')');
-    const famSegs = (c) => String(c).split(SHELL_SEG_RE).filter(s => FAM_CMD_RE.test(s) && famOK(s));
-    const testEvents = events.filter(x => famSegs(x.cmd).length > 0);
-    // (1) EXIT STATUS — the confirmed hole: `npm test` → exit 1 whose output carries NO string TEST_FAIL_RE
-    // recognizes ("Killed" from the OOM killer, a bare "command failed with exit code 1") was blessed green.
-    // The harness records is_error on the PAIRED result; a non-zero exit on the LAST completed run contradicts
-    // a pass claim regardless of stdout. Scope guards (each a real FP class, not caution theater):
-    //   • LAST completed run only — red → fix → re-run green is the normal flow and must stay silent;
-    //   • a harness ABORT (user interrupt / permission rejection / timeout) is not a test failure — the run
-    //     never finished, so it neither backs nor contradicts the claim → treated as no-result (abstain);
-    //   • exit ATTRIBUTABLE: in `npm test && git commit`, the recorded exit is the last segment's — a failed
-    //     commit after green tests must not read as failed tests. Attribute only when the FINAL shell segment
-    //     is itself the test/build invocation;
-    //   • background runs excluded — their result lands out of order.
-    const HARNESS_ABORT_RE = /\[Request interrupted|doesn'?t want to proceed|Command timed out after/i;
-    const completedRuns = testEvents.filter(x => !x.background && x.is_error !== null && !HARNESS_ABORT_RE.test(x.text));
-    const lastRun = completedRuns.length ? completedRuns[completedRuns.length - 1] : null;
-    // (1b) FAILURE-SUBSTRING sensor, SCOPED to the run that backs the claim (v1.2.2). It used to scan EVERY
-    // `results` entry in the session — so it fired on:
-    //   • a red run that was then FIXED and re-run GREEN (the last run is green; the stale failure text from
-    //     the earlier red lingers in `results` forever) — the normal red→fix→green flow, warned every turn;
-    //   • ANY tool output or pasted text merely CONTAINING "FAIL"/"N failed" — a probe script printing a
-    //     `**FAIL**` marker, a quoted CI log, a pasted report. Nothing to do with the test run at all.
-    // Measured: this was the single noisiest finding in GT's own development (~40 fires in one session, ~all
-    // false). Fix: when the paired `bashEvents` exist (the Stop path), test only the LAST COMPLETED FAMILY
-    // RUN's own stdout — the run that actually backs the claim, exactly the run the exit-status sensor above
-    // judges (the two sensors now agree on WHICH run is on trial; they only differ on how it failed —
-    // non-zero exit vs a failure line in otherwise-exit-0 output, which is why BOTH are kept: a misconfigured
-    // runner that prints "3 failed" and still exits 0 is invisible to the exit code).
-    // Fallback (no drift): with NO bashEvents — `--pre-commit`, `--diff-range`, a transcript with no tool ids,
-    // any legacy caller — `lastRun` is null and we keep the session-wide scan, i.e. exactly the old behavior.
-    // Accepted FN (documented, shared with the exit sensor — the shape is ANY trailing green in-family run,
-    // not just build): a red `npm test` followed by a green `npm run build` / `tsc --noEmit` / a filtered or
-    // file-scoped test run makes THAT the last family run, so the earlier red is not re-reported (probes 7/14,
-    // v1.2.2 review). The family fence is deliberate (v1.1.1) and the last family run is the evidence the
-    // claim rests on. Bounds that keep the laundering path narrow: a green LINT does not wash a red test (the
-    // fence excludes it → the red stays lastRun and fires); a filtered green under an "ALL tests" claim is
-    // caught by onlyFiltered (whose red-defeats-every inversion is fixed below, v1.2.2); a `|| true` masked
-    // re-run whose own output prints failures is still caught here (its text IS lastRun.text); and a
-    // same-command matching rule to close the rest was weighed and REJECTED — this repo's own honest idiom
-    // (red `npm test` → fix → green `node hooks/groundtruth.test.mjs`) changes the command string, so it
-    // would false-fire on the exact red→fix→green flow this scoping exists to keep silent. CI's fresh
-    // full-suite run is the enforcement backstop for the residual (SECURITY.md's layer split).
-    const failed = lastRun ? TEST_FAIL_RE.test(lastRun.text) : results.some(r => TEST_FAIL_RE.test(r.text));
-    // CONNECTOR-AWARE exit attribution (v1.1.1) — the old "final shell segment must be the test" rule was
-    // wrong in BOTH directions: `npm test && echo ok` crashing read as unattributable (last seg = echo) and
-    // the red was LAUNDERED silent behind a decorative suffix (verified FN), while `cd frontend && npm test`
-    // failing read as failed TESTS when the `cd` was what failed — the test never ran (verified FP). The
-    // exact rule, connector by connector:
-    //   (1) any `||` anywhere → NULL: masking semantics — the recorded exit can't indict the test;
-    //   (2) statements (split on `;`/newline/lone-`&`) own their exits SEPARATELY, and the recorded exit is
-    //       the LAST statement's — an in-family run in an EARLIER statement is exit-NULL (its own exit was
-    //       discarded: "npm test\ngit commit" — the failed commit is not a failed test, the multi-line FP);
-    //   (3) within the last statement's `&&`-chain / pipeline: attributable iff ≥1 segment is in-family AND
-    //       every other segment is INFALLIBLE — an allowlist of exactly `echo` / `true` / `:` (commands that
-    //       can't plausibly own a non-zero exit). `cd` is deliberately NOT on it (fails on a missing dir —
-    //       the frontend FP above), nor is `tee` (a pipe stage can own the pipeline exit under pipefail).
-    // A NULL run abstains in BOTH directions (mirror of the unpairedFg pattern): it neither fires NOR serves
-    // as the green "last run" — and because lastRun deliberately KEEPS null runs (filtering them out would
-    // resurrect an earlier attributable red as the run of record), `npm test || true` after a red can't
-    // launder the red into a bless, and the earlier red can't fire either (the masked re-run may genuinely
-    // have been green — condemning past it would be deciding on missing data).
-    // Adversarial-review tighten (v1.1.1): `echo` IS fallible when it carries a redirection —
-    // `npm test && echo done > /bad/path` records the echo's exit-1 over green tests (verified FP) — so any
-    // `<`/`>` in the segment drops it off the allowlist (end-anchored now, so args are inspected). Command
-    // substitution stays allowed: `echo $(x)` discards the substitution's exit and still exits 0.
-    const INFALLIBLE_SEG_RE = /^\s*(?:echo\b[^<>]*|true\s*|:\s*)$/;
-    const inFam = (seg) => FAM_CMD_RE.test(seg) && famOK(seg);
-    const exitAttributable = (x) => {
-      const cmd = String(x.cmd);
-      if (cmd.includes('||')) return false;                                                 // (1) masked → NULL
-      // Statement separators: `;`, newline, AND a lone `&` — `a & b` backgrounds a, so the compound's exit
-      // is b's, exactly like `a; b` (verified FP: `npm test & git push` attributed the push's exit-1 to the
-      // test). The lookarounds keep `&&` whole and never split `>&`/`&>` (redirect fd syntax — splitting
-      // there turned the ubiquitous `npm test 2>&1` into two statements and NULLed a real red). BLANK
-      // statements are dropped: `npm test;` / a trailing newline made the LAST statement empty, so the real
-      // run sat in an "earlier" statement and went exit-NULL — a one-char suffix laundered a red silent
-      // (verified FN, the exact laundering class rule (3) exists to close).
-      const stmts = cmd.split(/[;\n]|(?<![&>])&(?![&>])/).filter(s => s.trim());
-      if (!stmts.length) return false;
-      if (stmts.slice(0, -1).some(s => s.split(/&&|\|/).some(inFam))) return false;         // (2) earlier statement's exit was discarded
-      const segs = stmts[stmts.length - 1].split(/&&|\|/);
-      return segs.some(inFam) && segs.every(s => inFam(s) || INFALLIBLE_SEG_RE.test(s));    // (3) family + only-infallible peers
-    };
-    // MIXED pairing = malformed/truncated/foreign transcript: a live Stop transcript pairs every foreground
-    // Bash before the final claim exists. Falling back past an UNPAIRED later run to an earlier completed
-    // RED would CONDEMN on missing data — the exact mirror of blessing on it (the later run may have been
-    // the green re-run whose result was lost). is_error:null means abstain in BOTH directions.
-    const unpairedFg = testEvents.some(x => !x.background && x.is_error === null);
-    const exitFailed = !!(!unpairedFg && lastRun && lastRun.is_error === true && exitAttributable(lastRun));
-    // (2) ORDERING — stale green: the last test/build run PREDATES the last mutation that could change its
-    // outcome (the structurally-impossible-before-v1.1.0 check: flat arrays carried no interleaving). The
-    // "mutation" scope is deliberately narrow — charter: provable scope or abstain:
-    //   • CODE files only (CODE_EXT_RE): a README/CLAUDE.md/.yaml edit after a green run doesn't invalidate
-    //     it. Accepted FN: package.json/tsconfig CAN change outcomes but ride out with the other non-code
-    //     extensions — under-fire, never over;
-    //   • not a throwaway/tool path (excludedScanPath — tmp/, .claude/groundtruth/, absolute);
-    //   • the edit's CHANGED lines must contain CODE (splitCodeComment): a comment-only edit — already
-    //     set-diffed free of its untouched context lines by the mutation ledger — can't go stale a green.
-    // ANY background test run → abstain entirely: its completion may postdate a later edit, so seq order
-    // can't be trusted for it (bounded abstention; a documented FN, never a guessed FP).
-    // NORMALIZED-CODE mutation test (v1.1.1): the line-granular test ("any changed line contains code")
-    // fired stale-green on `total++; // count` → `total++; // the count` (the comment changed; the code on
-    // that line did NOT) and on pure whitespace reformats — both inert edits, both verified FPs. When the
-    // ledger carries the raw added/removed sides, compare their CODE PORTIONS instead: per line, strip the
-    // comment (splitCodeComment) and ALL whitespace; the mutation is real only if the normalized code SETS
-    // differ. Whitespace is stripped fully, not squeezed to one space: prettier-style reformats ADD spaces
-    // (`a=1` → `a = 1`) and squeezing would still fire on them — FP is fatal here, while the symmetric FN
-    // (a whitespace change INSIDE a string literal reads inert) is a documented abstain-direction residual.
-    // A changed string literal still differs after normalization (strings are code, not comment) → fires.
-    // Legacy `text`-only mutations (pre-v1.1.1 fixtures, foreign callers) keep the old line-granular test —
-    // set-diffing was done at ledger build there, so their verdicts must not drift. NOT an on-disk
-    // checksum/snapshot: that shape was rejected as a trust downgrade (SECURITY.md — disk isn't a boundary);
-    // this stays inside the transcript-grounded ledger.
-    const normCodeSet = (s, mext) => { const st = { block: false, fence: false };
-      return new Set(String(s).split('\n').map(l => splitCodeComment(l, mext, st).code.replace(/\s+/g, '')).filter(Boolean)); };
-    const mutTouchesCode = (m) => { const mext = extOf(m.path);
-      if (m.added !== undefined || m.removed !== undefined) {
-        const a = normCodeSet(m.added ?? '', mext), r = normCodeSet(m.removed ?? '', mext);
-        return [...a].some(l => !r.has(l)) || [...r].some(l => !a.has(l));
-      }
-      const mst = { block: false, fence: false };
-      return String(m.text).split('\n').some(l => splitCodeComment(l, mext, mst).code.trim() !== ''); };
-    // Real transcripts record ABSOLUTE file_path (the Edit/Write tool schema requires it), but
-    // excludedScanPath was built for git-relative paths and reads ANY absolute path as out-of-tree — so
-    // without relativizing first, codeMuts was ALWAYS empty on the one path that supplies mutations (Stop)
-    // and stale-green shipped silently INERT: green unit tests (relative fixture paths), dead in production
-    // — the exact silent-inertness the charter calls the cardinal sin (verified against live transcripts).
-    // Relativize against cwd (slash-normalized + case-insensitive prefix, for Windows drives / macOS HFS);
-    // a path that STAYS absolute is genuinely out-of-repo (a scratchpad write) and is correctly excluded.
-    const relPath = (p) => { const s = String(p).replace(/\\/g, '/');
-      const root = String(cwd).replace(/\\/g, '/').replace(/\/+$/, '') + '/';
-      return s.toLowerCase().startsWith(root.toLowerCase()) ? s.slice(root.length) : s; };
-    const codeMuts = (Array.isArray(mutations) ? mutations : [])
-      .map(m => ({ ...m, path: relPath(m.path) }))
-      .filter(m => CODE_EXT_RE.test(m.path) && !excludedScanPath(m.path) && mutTouchesCode(m));
-    const lastMut = codeMuts.reduce((a, b) => (a && a.seq >= b.seq ? a : b), null);
-    const lastTestSeq = testEvents.reduce((a, b) => Math.max(a, b.seq), 0);
-    const staleGreen = !!(lastTestSeq > 0 && !testEvents.some(x => x.background) && lastMut && lastMut.seq > lastTestSeq);
-    // (3) FILTERED RUN — `npm test -- --grep foo` / `pytest -k billing` match TEST_BUILD_RE on their prefix,
-    // so a one-test run backed an "all tests pass" claim (the WEAK_CHECK_RE shape, one tier over). Provable
-    // scope only, two conjuncts: (a) the claim's OWN SENTENCE asserts universality with the quantifier
-    // ADJACENT ("all tests" / "entire|whole|full [test] suite" / "every test") — "all 12 billing tests pass"
-    // after `pytest -k billing` is HONEST, and adjacency is what keeps it silent; (b) EVERY test segment run
-    // this session carries an unambiguous narrowing flag. Short flags are RUNNER-SCOPED where they collide:
-    // `-k` is pytest's expression but `make -k` is keep-going; `-t` is jest's testNamePattern but `mocha -t`
-    // is a timeout; `-m` is dropped entirely (`python -m pytest` is a FULL run). A bare FILE arg
-    // (`pytest tests/test_billing.py`) is NOT detected: a one-file repo's whole suite IS one file (this
-    // repo's own `node hooks/groundtruth.test.mjs`) — documented ceiling, not a guess.
-    const UNIVERSAL_RE = /\ball(?:\s+(?:of\s+)?the)?\s+tests\b|\b(?:entire|whole|full)\s+(?:test\s+)?suite\b|\bevery\s+test\b/i;
-    const GENERIC_FILTER_RE = /\s(?:--grep|--test-?name-?patterns?)(?:[= ]\S|$)/i;
-    const RUNNER_FILTERS = [
-      [/\bpytest\b|\btox\b/, /\s-k[= ]\S/],
-      [/\bgo test\b/, /\s-run[= ]\S/],
-      [/\bjest\b|\bvitest\b/, /\s-t[= ]\S/],
-      [/\bmocha\b|\bplaywright\b|\bcypress\b/, /\s-g[= ]\S/],
-      [/\brspec\b/, /\s(?:-e|--example)[= ]\S/],
-      [/\bdotnet test\b/, /\s--filter[= ]\S/],
-    ];
-    const segFiltered = (s) => GENERIC_FILTER_RE.test(s) || RUNNER_FILTERS.some(([r, f]) => r.test(s) && f.test(s));
-    const filteredOnly = (c) => { const ts = famSegs(c); return ts.length > 0 && ts.every(segFiltered); };
-    // famHits, not testHits: an unfiltered `npm run lint` alongside `pytest -k billing` is not the full
-    // suite run — without the fence it defeated `.every(filteredOnly)` and the "all tests" overclaim slid
-    // through (laundering FN). And `.length > 0`: with ONLY lint run, every() over an empty set is true —
-    // a phantom "every run was filtered" verdict with no relevant run at all (abstain instead).
-    const famHits = testHits.filter(c => famSegs(c).length > 0);
-    // RED-DEFEATS-EVERY inversion (v1.2.2, exposed by scoping `failed` above): famHits grades COMMAND STRINGS
-    // with no outcome attached, so an unfiltered run defeated `.every(filteredOnly)` even when that run
-    // FAILED — red `npm test` → green `npm test -- --grep trivial` → "All tests pass." came out fully silent
-    // (the exit/substring sensors judge the green lastRun; onlyFiltered saw an unfiltered famHit and stood
-    // down). Net effect: adding a FAILING full run made the verdict CLEANER than the filtered run alone — an
-    // inversion, and a one-command laundering recipe (verified by probe). It was masked pre-v1.2.2 only
-    // because the session-wide substring sensor happened to fire on the red's stale text. Fix: when outcome
-    // data exists and is trustworthy — no unpaired and no background family run, the same abstain conditions
-    // the exit and stale-green sensors already hold (a lost or out-of-order result may have been the full
-    // green run; condemning past it would be deciding on missing data) — grade the GREEN COMPLETED runs
-    // instead: only a green unfiltered run can back an "all tests" claim, so only one defeats the check.
-    // Otherwise (no events / no green completed run / untrustworthy pairing or ordering) keep the legacy
-    // command-string grade verbatim — zero drift for --pre-commit / --diff-range / legacy callers, and the
-    // red-only session stays with the (stricter) legacy grade, where the earlier exit/substring branches of
-    // the else-if chain own the verdict anyway.
-    const greenRuns = completedRuns.filter(r => r.is_error === false);
-    const greensTrustable = greenRuns.length > 0 && !unpairedFg && !testEvents.some(x => x.background);
-    const onlyFiltered = ran && UNIVERSAL_RE.test(_passSentence) && (greensTrustable
-      ? greenRuns.every(r => filteredOnly(r.cmd))
-      : famHits.length > 0 && famHits.every(filteredOnly));
-    // sev:'warn', not 'block': the `ran` side is deterministic (recorded commands) but the CLAIM side is
-    // prose-parsing of natural language — a heuristic with a live-demonstrated FP class (quoting/echoing
-    // "tests pass"). A conjunction's severity is bounded by its weakest conjunct, and by this project's own
-    // "abstain outside the scope a check is provably correct in" rule a prose-grounded predicate may not sit
-    // in the block tier in-session. Rule: artifact-grounded classes (secret/SQL/env/diff) may block; a
-    // prose-grounded one may not — CI is where this class earns block severity. (Demoted from block after a
-    // silent block-loop fired on an agent merely quoting the phrase.)
-    if (!ran) findings.push({ cls: 1, sev: 'warn', msg: `claimed tests/build pass${ev}, but no test/build command ran this session` });
-    else if (/^tests?$/i.test(_passClaim[1]) && onlyWeak) findings.push({ cls: 1, sev: 'warn', msg: `claimed tests pass${ev}, but only a syntax/type check ran (${testHits[0].trim().slice(0, 40)}) — that is not a test run; verify in the runtime that ships` });
-    // else-if chain, most-grounded first: at most ONE core Class-1 finding per claim (a failed+stale run
-    // shouldn't stack two warns for the same lie). Exit status outranks the stdout substring sensor — the
-    // recorded exit is fact; the substring is a heuristic over noisy output. `!disclosesFailure` applies to
-    // BOTH failure branches: an honest "15/16 pass" naturally rides an exit-1 run.
-    else if (exitFailed && !disclosesFailure) findings.push({ cls: 1, sev: 'warn', msg: `claimed tests/build pass${ev}, but the last completed test/build command exited NON-ZERO (\`${lastRun.cmd.trim().slice(0, 40)}\`) — a crash/OOM/exit-1 with no recognizable failure line in its output is still a failed run` });
-    else if (failed && !disclosesFailure) findings.push({ cls: 1, sev: 'warn', msg: `claimed tests/build pass${ev}, but a test run looks like it reported failures — double-check` });
-    else if (staleGreen) findings.push({ cls: 1, sev: 'warn', msg: `claimed tests/build pass${ev}, but the last test/build run predates the last source edit (${lastMut.path.split('/').pop()}) — the green is STALE; re-run after the edit to confirm` });
-    else if (onlyFiltered) findings.push({ cls: 1, sev: 'warn', msg: `claimed ALL tests pass${ev}, but every test run this session was FILTERED to a subset (${testHits[0].trim().slice(0, 40)}) — a filtered run cannot back an "all tests" claim` });
-    // Anti-gaming: claimed green, but the ONLY files changed are tests → the test may have been
-    // weakened to pass instead of the code being fixed. Warn-only (heuristic) so a legit
-    // test-writing turn is never blocked. Fires only when the whole diff is test files.
-    const isTest = f => TEST_FILE_RE.test(f);
-    const testFiles = files.filter(isTest);
-    if (testFiles.length && files.every(isTest))
-      findings.push({ cls: 1, sev: 'warn', msg: `claimed pass, but the only files changed are tests (${testFiles.map(f => f.split('/').pop()).join(', ')}) — verify the test wasn't weakened instead of the code fixed` });
-  }
+  const added = diff.split('\n').filter(l => l[0] === '+' && !l.startsWith('+++'));   // used by the secret scanner (C1) below
 
   // AG-B — claimed success but the tests were SKIPPED/EXCLUDED or the coverage gate LOWERED (config/build
   // diff or a skip-flag on the command line), rather than the code fixed. Warn-only. Git-only diff (gDiff).
@@ -1150,6 +808,14 @@ export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], 
   findings.push(...testWeakeningFindings(claim, gDiff));
   // Vacuous test — claimed success but an ADDED JS/TS test makes no call/assertion → provably can't fail. Warn-only.
   findings.push(...vacuousTestFindings(claim, gDiff));
+  // Anti-gaming: claimed success but the ONLY files changed are tests → the test may have been weakened to
+  // pass instead of the code fixed. Warn-only. Re-gated on `claimsSuccess` (the same gate AG-B/AG-C use) now
+  // that the v1 class-1 prose scan that used to house it is retired — the v2 contract owns the tests_pass claim.
+  if (claimsSuccess(claim)) {
+    const testFiles = files.filter(f => TEST_FILE_RE.test(f));
+    if (testFiles.length && files.length && files.every(f => TEST_FILE_RE.test(f)))
+      findings.push({ cls: 1, sev: 'warn', msg: `claimed pass, but the only files changed are tests (${testFiles.map(f => f.split('/').pop()).join(', ')}) — verify the test wasn't weakened instead of the code fixed` });
+  }
   // Mojibake — encoding corruption. NOT claim-gated on purpose: corrupted bytes are corrupted whatever the
   // agent said, and pre-commit/CI pass claim:'' — gating it would make it inert at the very gate it exists
   // for (the real incident entered through a commit). Scans `diff` (the content-scan view, = the staged diff
@@ -1182,49 +848,6 @@ export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], 
   }
   if (stub) findings.push({ cls: 2, sev: 'warn', msg: `stub/placeholder in added code: ${stub.trim().slice(0, 60)}` });
 
-  // Class 3 — silent no-op: claim names a file in PAST-TENSE ACTION voice, but it's absent from
-  // the diff. Past-tense-verb gating (not every filename) is the precision fix — a file merely
-  // *read* for context is mentioned in prose and must NOT flag.
-  const seen = new Set();
-  let c3Body = null;   // ± content lines, built lazily once — only a path-miss needs it
-  // The `(?![\w])` after the extension group is load-bearing: JS alternation is leftmost-wins (not
-  // longest-match) and a shorter ext can prefix a longer one (`js`<`json`/`jsx`, `ts`<`tsx`, `c`<`cpp`),
-  // so without a trailing boundary a claim about `config.json` would capture `config.js` (truncated) and
-  // then false-flag it absent. The lookahead forbids mid-token truncation regardless of alternation order
-  // — which is what makes the broad SRC_EXT safe to interpolate here.
-  const C3_RE = new RegExp('\\b(?:created|added|updated|wrote|modified|changed|fixed|removed|deleted|renamed|refactored|extracted)\\b[^.\\n]*?([\\w./-]+\\.(?:' + SRC_EXT + '))(?![\\w])', 'gi');
-  for (const m of claim.matchAll(C3_RE)) {
-    const named = m[1];
-    if (seen.has(named)) continue;
-    seen.add(named);
-    // A tool-file / non-repo path (proposed-rules.json, .claude/groundtruth/*, tmp|scratch, …) is GITIGNORED
-    // or ephemeral, so it can NEVER appear in a git diff — a past-tense mention (common when the work IS on
-    // Groundtruth's own docs/commands that read these files) would then ALWAYS false-flag as a no-op. The
-    // Completeness path already excludes these via NONREPO_OR_TOOL; apply the same here. (Corpus FP, session 79e00f4c.)
-    if (NONREPO_OR_TOOL.test(named)) continue;
-    // basename match only — a bare `f.endsWith(named)` would let an unrelated `app/xconfig.js` satisfy a
-    // claim about `config.js` (suffix-substring with no path boundary) and SUPPRESS a real no-op.
-    // Case-insensitive: a claim about `schema.md` must match the repo's `SCHEMA.md` (else a false no-op).
-    const nl = named.toLowerCase();
-    const pathHit = files.some(f => { const fl = f.toLowerCase(); return fl === nl || fl.endsWith('/' + nl); });
-    // A named file is ALSO grounded when it appears in the diff's ± CONTENT lines (LIVE FP, real hindsight
-    // session f7df5ae9): "added the … parentheticals … on the bulk-backfill and admin.html [rules]" — the
-    // change was to CLAUDE.md's MENTION of admin.html, so the changed lines literally contain `admin.html`,
-    // but the path-only grounding read the claim as a phantom change to admin.html itself. The task ledger's
-    // grounds() has accepted diff CONTENT since Phase 6 for the same reason — Class 3 never got that fix.
-    // Boundaries: `(?<![\w.-])` so `myadmin.html`/`site-admin.html` can't ground a claim about `admin.html`
-    // (a `/` prefix still grounds — `public/admin.html` IS the same file, path-qualified); the trailing
-    // guard mirrors C3_RE's own anti-truncation lookahead. Accepted warn-tier FN (documented): a claim
-    // "fixed X" whose only trace is a changed line in ANOTHER file mentioning X is now suppressed — the
-    // trace requirement stays evidence-anchored, and a false "you did nothing" is the fatal direction here.
-    const contentHit = !pathHit && new RegExp('(?<![\\w.-])' + nl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![\\w])', 'i')
-      // `.slice(1)` strips the diff marker: a filename at COLUMN 0 of a deletion line (`-admin.html` in a
-      // .gitignore) had `-` as its preceding char — inside the lookbehind's exclusion class — so "removed X
-      // from the list" failed to ground while the `+` twin grounded (asymmetric FP, Fable review).
-      .test(c3Body ??= diff.split('\n').filter(l => (l[0] === '+' || l[0] === '-') && !l.startsWith('+++') && !l.startsWith('---')).map(l => l.slice(1)).join('\n'));
-    if (!pathHit && !contentHit)
-      findings.push({ cls: 3, sev: 'warn', msg: `claimed a change to ${named}, but it is absent from the diff` });
-  }
 
   // Class 4 — phantom ref (best-effort, WARN only): a NEW relative import whose target file is
   // absent from the working tree, resolved against the importing file's own directory. Bare/package
@@ -1606,9 +1229,10 @@ function renderAudit(findings) {
  * mutations = ordered Edit/Write/MultiEdit {path, seq, text(changed lines)}.
  */
 export function parseTranscript(jsonlText, { includeSidechain = false } = {}) {
-  const entries = (jsonlText || '').split('\n')
+  const allEntries = (jsonlText || '').split('\n')
     .map(s => { try { return JSON.parse(s); } catch { return null; } })
-    .filter(Boolean)
+    .filter(Boolean);
+  const entries = allEntries
     // Default OFF: on the MAIN transcript a sidechain entry is a subagent's — its "user" turns are the
     // orchestrator's task prompts, not human asks, and letting them into `asks` mints phantom deliverables.
     // But at SubagentStop the payload's transcript_path is the subagent's OWN file, where EVERY entry is
@@ -1616,6 +1240,19 @@ export function parseTranscript(jsonlText, { includeSidechain = false } = {}) {
     // payload field), so every honest test-running subagent hit `!ran` ("no test/build command ran"): a
     // structural FP, v1.1.1. That one caller opts in; every other caller keeps the filter.
     .filter(e => includeSidechain || e.isSidechain !== true);
+  // Bash commands the FILTERED sidechains ran (a Task subagent's, harness-recorded and unfakeable). We don't
+  // fold them into the main evidence (they're a delegated run, and the orchestrator's own path can't see their
+  // output), but the contract uses them to ABSTAIN rather than block: an orchestrator declaring `tests_pass`
+  // after a subagent genuinely ran the tests should not get a block-tier CA "no such command ran". (Fable adv FP-10.)
+  const sidechainCmds = [];
+  if (!includeSidechain) {
+    for (const e of allEntries) {
+      if (e.isSidechain !== true) continue;
+      const content = e.message?.content;
+      if (!Array.isArray(content)) continue;
+      for (const b of content) if (b?.type === 'tool_use' && b.name === 'Bash' && typeof b.input?.command === 'string') sidechainCmds.push(b.input.command);
+    }
+  }
 
   const textOf = (content) => {
     if (typeof content === 'string') return content;
@@ -1739,11 +1376,16 @@ export function parseTranscript(jsonlText, { includeSidechain = false } = {}) {
         // Pair the result back to its Bash call. Unmatched ids (a subagent's, a non-Bash tool's) just miss the
         // map — the flat `results` above keeps them for the legacy substring sensors.
         const ev = b.tool_use_id != null ? byToolId.get(b.tool_use_id) : undefined;
-        if (ev) { ev.is_error = b.is_error === true; ev.text = JSON.stringify(b.content || ''); }
+        // DECODE the paired run output (not JSON.stringify): the contract's failure-substring sensor reads
+        // `ev.text` and matches LINE-ANCHORED runner banners (jest `FAIL src/x`, pytest `FAILED …`, `not ok`).
+        // Stringified, real newlines become the 2 chars `\n` and every line-start banner is preceded by `"`/`n`
+        // → the whole banner tier was silently INERT on the production path (unit tests pass raw text, so they
+        // never saw it). Count-anchored alternatives ("Tests: 3 failed") survive either way. (Fable adv FN-4.)
+        if (ev) { ev.is_error = b.is_error === true; ev.text = textOf(b.content); }
       }
     }
   }
-  return { intent, asks, commandsInvoked, commandInvocations, bashCmds, mcpCmds, results, bashEvents, mutations, bgPending: bgLaunched > bgDone, toolDiff: toolDiffParts.join('\n'), mcpSql: mcpSqlParts.join('\n') };
+  return { intent, asks, commandsInvoked, commandInvocations, bashCmds, mcpCmds, results, bashEvents, mutations, sidechainCmds, bgPending: bgLaunched > bgDone, toolDiff: toolDiffParts.join('\n'), mcpSql: mcpSqlParts.join('\n') };
 }
 
 /**
@@ -1777,397 +1419,6 @@ function codeOnlyAdded(diff) {
     if (l[0] === '+' && !l.startsWith('+++') && cf) out += splitCodeComment(l.slice(1), ext, st).code + '\n';
   }
   return out;
-}
-
-export function openLoops(asks = [], diff = '') {
-  const changed = changedFiles(diff).join('\n') + '\n' + diff;
-  const changedLower = changed.toLowerCase();
-  const code = codeOnlyAdded(diff);
-  const open = [];
-  for (const a of asks) {
-    const named = namedDeliverables(a);                       // HARD deliverables only (nag-worthy)
-    if (!named.length) continue;                              // no gradeable HARD deliverable → don't nag
-    if (!named.some(n => grounds(n, changed, changedLower, code))) // named something, but it's absent from the diff
-      open.push({ ask: a.length > 90 ? a.slice(0, 90) + '…' : a, missing: named.slice(0, 3) });
-  }
-  return open;
-}
-
-// Things that look like a named token but CANNOT land in a git diff, so tracking them = guaranteed
-// false positive (the failure that trains agents to game the deferral hatch). Three buckets:
-//   • out-of-repo / temp paths — scratchpad work, /tmp artifacts, absolute paths outside the tree
-//   • the tool's own files — .claude/groundtruth/*, tasks.json (the circular self-reference)
-//   • convention docs read as REFERENCE — CLAUDE.md/README/SCHEMA/… are read targets, not deliverables,
-//     UNLESS a write verb explicitly targets them ("update CLAUDE.md"). "read CLAUDE.md" must abstain.
-const NONREPO_OR_TOOL = /(?:^\/|(?:^|\/)(?:tmp|temp|scratch|scratchpad)\/|\.claude\/groundtruth\/|^tasks\.json$|^(?:compiled|proposed|seed)-rules\.json$|^procedures\.json$)/i;
-const CONVENTION_DOC = /^(?:CLAUDE|AGENTS|README|SCHEMA|ARCHITECTURE|CONTRIBUTING|LICENSE|CHANGELOG|ROADMAP|HANDOFF)\.md$/i;
-
-// ── Request/non-request gate — kill the "conversational aside → open loop" false positive, deterministically ──
-// The ledger used to mint a task from ANY deliverable-looking token, even when the sentence was an OBSERVATION,
-// not a request ("I can see a 304 in `handleUpload`, it's fine, no fix needed"). That's the live FP: an aside
-// tracked as an undelivered deliverable, nagged every turn. No LLM — this is just the ledger's own "when
-// unsure, don't track" extended to the sentence's framing. A model in front of every stop would (a) void the
-// "deterministic, offline, no-LLM" positioning and (b) let a model SILENTLY SUPPRESS a real open-loop (an
-// invisible false-negative is worse than a visible over-nag), so the fix stays regex.
-const NON_REQUEST_RE = new RegExp([
-  // "X is fine / it's ok / that's expected / looks correct" — a bare copula counts, not just it's/that's,
-  // so "the 304 is fine" reads as an observation (a real request keeps its action verb after the strip).
-  "\\b(?:that'?s|it'?s|this is|which is|is|are|was|were|looks?|seems?|appears?)\\s+(?:fine|ok|okay|expected|intentional|correct|working|by design|working as intended)\\b",
-  "\\bno\\s+(?:fix|change|action|need)\\b",
-  "\\b(?:don'?t|do not|no need to)\\s+(?:worry|fix|touch|change|bother)\\b",
-  "\\b(?:ignore|leave|disregard)\\s+(?:the|that|this|it)\\b",
-  "\\bnot a (?:problem|bug|blocker)\\b|\\bexpected behaviou?r\\b",
-  "\\bi(?:'?m| am)?\\s+(?:can\\s+)?(?:see|seeing|noticed?|getting)\\b",
-  "\\b(?:looks?|seems?|appears?)\\s+(?:like|to be|fine|ok)\\b",
-  "\\b(?:fyi|just noting|for (?:reference|context|the record))\\b",
-].join("|"), "i");
-// A positive request signal — an imperative aimed at the codebase.
-const REQUEST_VERB_RE = /\b(?:add|create|implement|build|write|rewrite|fix|change|update|edit|modif\w+|refactor|rework|remove|delete|replace|wire|make|handle|support|migrate|rename|extract|revert|patch|correct|move|drop|split|port|convert|pull|hoist|swap|introduce|append|generate|optimi\w+|simplif\w+|improve|harden|upgrade|clean\s*up|resolve|dedup\w+|stabiliz\w+|tighten|normaliz\w+|memoiz(?:e|ing)|set\s+up|hook\s+up)\b/i;
-// A READ-intent ask ("look at / read / review / analyze X") names files as INPUTS to examine, not deliverables
-// to produce. classifyDeliverables uses this to DEMOTE such tokens to soft (surfaced once, auto-expires, never
-// a blocking open-loop) — never to DROP them (an invisible false-negative is worse than an over-nag). Only when
-// no REQUEST_VERB_RE co-occurs, so "review auth.js and add a guard" still tracks auth.js hard.
-const READ_INTENT_RE = /\b(?:look(?:ing|ed)?\s+(?:at|into|through)|read|review|analyz\w*|investigat\w*|examin\w*|inspect|audit(?:ing|ed)?|compare|understand|study|explore|trace|see\s+(?:if|whether|what|how|the)|go\s+through|walk\s+through)\b/i;
-// VERIFICATION intent — asks for a VERDICT, where "nothing needed changing" is a legitimate, SUCCESSFUL
-// outcome and the correct diff is EMPTY. Distinct from READ_INTENT (observation) and from a change request.
-// The ledger's assumption that every named file must land in the diff is false for these, so a HARD task
-// minted here can never close — it nags forever and escalates to BLOCK on work that was done correctly.
-// (Live FP: "[block] open loop — game.js not in the diff", where a clean game.js WAS the deliverable.)
-const VERIFY_INTENT_RE = /\b(?:check|verif\w+|confirm|ensure|validat\w+|make\s+(?:sure|certain)|double[-\s]?check|sanity[-\s]?check)\b/i;
-// A turn read as a QUESTION (interrogative) — a distinct FP class from the dismissals above ("is report.js
-// right?"), also answered in conversation with no diff.
-const QUESTION_RE = /\?\s*$|^\s*(?:why|what|whats?|how|is|are|was|were|does|do|did|should|shall|can|could|would|will|which|when|where|who|whom|whose)\b/i;
-// DECLARATIVE / EXISTENTIAL — the user stating a FACT about something that ALREADY EXISTS ("I do have
-// image_attributions.md on downloads folder", "there is a notes.md on my desktop"), not commissioning work.
-// LIVE FP (real hindsight session): the user saying they HAD a file minted it as a HARD deliverable — and the
-// file lived in ~/Downloads, OUTSIDE the repo, so it could never ground in a git diff, so the task could never
-// close: it nagged every turn and, under block mode, escalated to a BLOCK on a deliverable that was never
-// requested and cannot exist. That is the v1.0.5 phantom-deliverable / block-mode wedge arriving through a new
-// door (there: a pasted tool listing; here: a statement of possession). isTrackableRequest() could not catch it
-// because a declarative is neither a dismissal (NON_REQUEST_RE) nor a question (QUESTION_RE), so it fell through
-// its `!framed → track` fast path. Gated on NO co-occurring REQUEST_VERB_RE, so "I have a notes.md — add it to
-// the repo" and "I have a bug in parser.js, fix it" stay HARD; and it DEMOTES to soft (surfaced once,
-// auto-expires, never blocks) rather than dropping — the demote-never-drop invariant: if the user really did
-// mean it as an ask, it still surfaces.
-const DECLARATIVE_RE = /\b(?:i|we)\s+(?:do\s+|already\s+)?(?:have|had|has)\b|\b(?:i|we)['’]ve\s+(?:already\s+)?got\b|\bthere\s+(?:is|are|was|were|exists?)\b|\bexists?\s+(?:in|on|at|under)\b/i;
-// A declarative that reports a PROBLEM or a LACK is a commission in declarative clothing — "we have a bug:
-// cache.js returns stale data", "I've got a broken migration in schema.sql", "there is no error handling in
-// parser.js", "I have three files that need updating" are all real asks with no REQUEST_VERB in reach. The
-// first cut of the declarative gate demoted every one of them to soft (adversarial review of v1.2.1 — the FN
-// direction, the completeness backstop going quiet). This gate can only RESTORE pre-v1.2.1 hardness, never
-// create new hardness, so it cannot introduce a new FP; over-matching merely falls back to the old behavior.
-const PROBLEM_RE = /\b(?:bug|issue|problem|defect|error|fail(?:s|ed|ing|ure)?|broken|breaks?|crash\w*|flak(?:y|iness)|leak\w*|stale|race|regress\w*|vulnerab\w*|typos?|wrong|incorrect|missing|outdated|needs?|lack\w*|without)\b|\bno\s+\w+/i;
-// Anaphoric commission — the request verb lives in a DIFFERENT clause than the token, aimed back at it through
-// a pronoun: "I have a notes.md. Add it to the repo." splitClauses puts notes.md in the declarative clause and
-// `add` in a clause with no token of its own, so per-clause gating alone demoted the token and the ask's hard
-// set came out EMPTY — even for the fully explicit "…. Can you add it to the repo?" (adversarial review of
-// v1.2.1). A token-less trackable request clause whose object is a pronoun means the ask DID commission the
-// thing the declarative named → the demotion is void. Same restore-only safety property as PROBLEM_RE.
-const ANAPHORIC_PRONOUN_RE = /\b(?:it|that|this|them|those|these)\b/i;
-// A REQUEST_VERB in PASSIVE/PERFECT voice reports what ALREADY HAPPENED — it commands nothing. "Game.js has
-// been modified heavily" (live FP t7dep, real hindsight session) describes the file's state, but its
-// "modified" satisfied REQUEST_VERB_RE and helped mint game.js as a HARD deliverable in an ask that
-// commanded no change at all. Blank `<aux> (been) (adverb)* <participle>` before a REQUEST_VERB test; an
-// ACTIVE imperative elsewhere survives the blanking ("parser.js was refactored — now update docs.md" keeps
-// `update`). Used by the diagnosisOnly gate ONLY — the per-clause readsOnly/verifyOnly/declarative gates
-// keep their corpus-pinned raw-clause tests (widening them is a separate, deliberate change).
-// `recently` is NOT in the adverb alternation — `\w+ly` already matches it, and listing it twice made the
-// loop AMBIGUOUS: 2^n backtracking paths when the trailing participle fails. Adversarial review (Fable,
-// v1.3.2): 28 repeated "recently"s in one user ask took ~57 s — and dePassive runs on every CUMULATIVE ask
-// every Stop, so one poisoned paste would wedge the hook for the rest of the session (a hang is a silent
-// pass on every future turn — the cardinal sin). Every remaining branch is disjoint from `\w+ly`.
-const PASSIVE_VOICE_RE = /\b(?:has|have|had|was|were|is|are|been|being|gets?|got)\s+(?:been\s+)?(?:(?:\w+ly|already|just|since|also|never|not)\s+)*\w+(?:ed|en)\b/gi;
-const dePassive = (s) => String(s).replace(PASSIVE_VOICE_RE, ' ');
-// Trackable iff it is NOT (framed as observation/question with no surviving action verb). The verb test runs
-// on the text with the dismissal phrases STRIPPED — critical, because "no fix needed" itself contains the
-// verb "fix"; testing the raw string would let that negated "fix" mark the aside as a real request (the bug
-// in the naive `NON_REQUEST && !REQUEST_VERB` form). "…is fine but fix the 500 in retry.js" keeps a real,
-// un-stripped "fix" → still tracked. Exported for the self-check.
-export function isTrackableRequest(text) {
-  const s = String(text);
-  const framed = NON_REQUEST_RE.test(s) || QUESTION_RE.test(s);
-  if (!framed) return true;                                          // plain imperative → track
-  const stripped = s.replace(new RegExp(NON_REQUEST_RE.source, 'gi'), ' ');   // drop "no fix"/"it's fine"/… so their inner verbs don't count
-  return REQUEST_VERB_RE.test(stripped);                            // a real (non-negated) action verb survives → still a request
-}
-
-// Pure token extraction: a path/filename, a `backticked` token, or a camelCase symbol — MINUS the buckets
-// above (out-of-repo, tool-state, read-only convention docs). No framing gate here — the gate/tier decision
-// lives in classifyDeliverables so a questionable ask is DEMOTED (to soft), never silently dropped.
-function extractTokens(text) {
-  const t = String(text);
-  const writesADoc = /\b(?:write|update|edit|modif\w+|append|add(?:ing)?\s+to|rewrite|create|regenerate|fix|change|replace|remove|delete|correct|revise|adjust|patch)\b/i.test(t);
-  return (t.match(new RegExp('[\\w/-]+\\.(?:' + SRC_EXT + ')\\b|`[^`]+`|\\b[a-z]+[A-Z][a-zA-Z]+\\b', 'g')) || [])
-    .map(s => s.replace(/`/g, '')).filter(s => s.length > 3)
-    .filter(s => !NONREPO_OR_TOOL.test(s))                    // can't appear in a git diff → never a deliverable
-    .filter(s => !(CONVENTION_DOC.test(s.split('/').pop()) && !writesADoc));  // a doc is a read target unless written
-}
-
-// Clause boundaries — so a token binds to the framing of ITS OWN clause, not the whole turn. "handleUpload is
-// fine, but fix retry.js" must bind retry.js (its clause commands 'fix') apart from handleUpload (its clause
-// is 'is fine'). Split on sentence enders + contrastive conjunctions.
-function splitClauses(text) {
-  // A `.` is a sentence boundary ONLY when followed by whitespace/end — NOT the dot inside `compiler.mjs`
-  // or `3.14` (which a naive `[.;]` split would shred, destroying the filename token).
-  return String(text).split(/\.(?=\s|$)|[;\n]+|\bbut\b|\bhowever\b|\bthough\b|\bwhereas\b|\byet\b/i).map(s => s.trim()).filter(Boolean);
-}
-// A token is a REFERENCE (discussion), not a COMMISSION, when its only occurrence in the ask is inside a
-// PASTED artifact — a ``` fence, a `>`-quoted line, or a `file.js:line` stack-trace ref (paste-provenance,
-// the real `redirectionChainSiteScript.js` case). Reference tokens DEMOTE to soft (demote-don't-drop).
-// NOTE: token-novelty via prior AGENT text was REMOVED (Fable C2) — the agent's own reply is agent-influenceable
-// and demoted the very ask it was answering; an audited agent must never be able to shape its own verdict.
-// Paste-provenance stays because it's grounded in the USER's text, which the agent can't author.
-function pasteStripped(askText) {
-  return String(askText)
-    .replace(/```[\s\S]*?```/g, ' ')                 // fenced code blocks
-    .replace(/^\s*>.*$/gm, ' ')                       // quoted pasted lines
-    // UNFENCED tool-output / status listings — the way people actually paste (an MCP server list, a CLI
-    // table, Claude Code's own ⏺/⎿ output, a vitest ❯ line). These carry structural glyphs no human writes
-    // in a prose request, and they routinely NAME config files (`.mcp.json`, `package.json`) that the ledger
-    // then minted as HARD deliverables — a phantom task that can never close and ESCALATES TO BLOCK.
-    // Stripping the line makes its tokens paste-refs → soft (surfaced once, auto-expires, never blocks, still
-    // grounds to done) per the demote-never-drop invariant. Real session FP: an MCP listing became task [tjqyi].
-    // Whole-line strip is required, not glyph-onward: the motivating listing has `❯` MID-line, so anchoring
-    // would leave `.mcp.json` HARD and un-fix the bug. Deliberately EXCLUDES ▶/► — the only glyphs here a
-    // human writes in prose (`refactor parser.js ▶ tokenizer.js`), which they'd wrongly demote (Fable).
-    // Accepted trade: an imperative sharing a line with a TOOL glyph demotes to soft; restating it on a
-    // glyph-free line keeps it HARD. Known-narrow: glyph-less pastes (plain `ls`, ASCII `|` tables) still mint.
-    .replace(/^.*[❯⎿⏺│├└┌┐┘┴┬┼═║╔╗╚╝].*$/gm, ' ')
-    .replace(/[\w./-]+\.\w+:\d+/g, ' ');              // stack-trace file:line refs
-}
-
-// Classify an ask's deliverable tokens into HARD (an imperative request naming a fresh deliverable — nag-once,
-// can escalate to block) vs SOFT (named a deliverable but framed as observation/question, or a paste-reference
-// — surfaced once, never blocks, auto-expires). Paste-provenance is computed on the FULL ask ONCE, before
-// clause-splitting (splitClauses shreds a ``` fence into separate clauses, so a per-clause paste check was
-// structurally blind — Fable M2). Per-clause framing then binds each token; a token HARD in any clause stays hard.
-export function classifyDeliverables(text) {
-  const full = String(text);
-  const paste = pasteStripped(full);
-  const isRef = (tok) => { const b = tok.replace(/`/g, ''); return full.includes(b) && !paste.includes(b); };
-  const hard = new Set(), soft = new Set();
-  const clauses = splitClauses(full);
-  // Ask-wide anaphora scan, computed ONCE (like paste-provenance): does ANY clause command work on a pronoun
-  // while naming no token of its own ("Add it to the repo")? If so, the pronoun's referent is the token some
-  // OTHER (declarative) clause named — the declarative demotion below must not fire. See ANAPHORIC_PRONOUN_RE.
-  // NOTE: readsOnly shares this cross-clause blindness ("look at notes.md. Then add it.") but predates the
-  // declarative gate and the corpus is tuned to it — restoring hardness there is a separate, deliberate change.
-  const anaphoricReq = clauses.some(cl =>
-    REQUEST_VERB_RE.test(cl) && ANAPHORIC_PRONOUN_RE.test(cl) && extractTokens(cl).length === 0 && isTrackableRequest(cl));
-  // DIAGNOSIS-ONLY ask (ask-wide, like paste-provenance/anaphora): NO clause commands a change (REQUEST_VERB
-  // tested with passive phrases blanked — see PASSIVE_VOICE_RE) and at least one clause asks a question or
-  // asks to look/verify. "Staging game.js is the one we need. Game.js has been modified heavily… Can you see
-  // what is happening." (live FP t7dep, real hindsight session) asks for an EXPLANATION — its correct outcome
-  // may be an EMPTY diff (here the agent RESTORED the file: net-zero change WAS the success), so a
-  // diff-groundable deliverable does not exist, and minting one is the unclosable-HARD block-mode wedge —
-  // the FOURTH instance of the v1.0.5/v1.2.1/v1.3.1 root defect. Demote ALL tokens to soft (surfaced once,
-  // auto-expires, never blocks) — demote-never-drop. The question/read/verify-clause requirement keeps a
-  // verbless problem-report commission ("cache.js returns stale data") at its v1.2.1 hardness, and any live
-  // REQUEST_VERB anywhere in the ask ("…fix it") switches the gate off entirely.
-  // KNOWN CEILING (documented, not solved): a genuinely-commanded restore ("revert game.js") still can't
-  // CLOSE on its net-zero diff — grading absence-of-change is not diff-groundable; `defer <id>` is the out.
-  // A second ceiling (Fable, v1.3.2 review): the off-switch's verb list IS the scope boundary — a commission
-  // whose verb escapes both lists ("deploy X. does it work?") demotes to soft when a question co-occurs, as
-  // does the rare pseudo-cleft ("What you must do is harden auth.js" — dePassive reads `is harden` as
-  // aux+participle). Bounded: soft still surfaces once (demote-never-drop), and the FP direction is closed.
-  // Three probe-verified traps shape the implementation:
-  //   • a determiner-preceded REQUEST_VERB is a NOUN, not a command — "staging should have the keyboard
-  //     hiding fix" (t7dep itself) kept the gate off through noun-"fix"; blank `the/a/its… (word){0,2} fix`
-  //     before the verb test. Grammatically safe: a determiner never precedes an imperative.
-  //   • READ/VERIFY are tested with the clause's own TOKENS blanked — `validator.js` ⊂ validat\w+ satisfied
-  //     VERIFY from inside the filename and re-opened FN-2 ask-wide ("validator.js needs updating" demoted).
-  //   • QUESTION is tested on the RAW clause — token-blanking can make a clause START at its copula
-  //     (" is outdated" reads as interrogative `^is`), turning a problem-report into a fake question.
-  // `(?!to\b)` in the determiner gap: "auth.js is the file TO FIX" is an infinitive COMMISSION, not a noun
-  // phrase — without it deNoun blanked "the file to fix" and the whole ask demoted (Fable probe, v1.3.2).
-  const deNoun = (s) => s.replace(/\b(?:the|a|an|this|that|these|those|its|my|our|your|their|any|no)\s+(?:(?!to\b)[\w-]+\s+){0,2}(?:fix(?:es)?|changes?|updates?|edits?|patch(?:es)?|builds?|moves?|drops?|splits?|upgrades?|cleanups?|reworks?|refactors?|reverts?)\b/gi, ' ');
-  // Off-switch verbs BEYOND REQUEST_VERB_RE, scoped to THIS gate only: each can only DISABLE the new
-  // demotion (worst case = the pre-v1.3.2 behavior), so unlike widening REQUEST_VERB_RE itself — which
-  // feeds every hardness gate and could MINT new unclosable-HARD tasks ("the flag is disabled" would defeat
-  // readsOnly) — this list is strictly safe to grow. From the review's probes: "bump the version in
-  // package.json. does CI pass?" is a commission with a co-occurring question and must stay hard.
-  const EXTRA_REQUEST_VERB_RE = /\b(?:bump|install|uninstall|pin|disable|enable|configur\w+|deploy|apply|run|regenerate|restore|scaffold)\b/i;
-  const deVoiced = deNoun(dePassive(full));
-  const diagnosisOnly = !REQUEST_VERB_RE.test(deVoiced) && !EXTRA_REQUEST_VERB_RE.test(deVoiced)
-    && clauses.some(cl => {
-      let d = cl; for (const t of extractTokens(cl)) d = d.split(t).join(' ');
-      return QUESTION_RE.test(cl) || READ_INTENT_RE.test(d) || VERIFY_INTENT_RE.test(d);
-    });
-  for (const clause of clauses) {
-    const req = isTrackableRequest(clause);
-    // A read-intent clause with NO write/action verb names inputs, not deliverables → DEMOTE its tokens to soft
-    // (a one-time aside that auto-expires, never a blocking open-loop), never DROP them. Closes the "look at
-    // cluePrompts.js" false open-loop while keeping "review auth.js and add a guard" hard (add ∈ REQUEST_VERB).
-    const readsOnly = READ_INTENT_RE.test(clause) && !REQUEST_VERB_RE.test(clause);
-    // A VERIFICATION clause asks for a VERDICT, not a change — "verify game.js does not need updating",
-    // "make sure game.js is consistent", "check that game.js still works". Its CORRECT outcome may be an
-    // EMPTY diff: nothing was wrong, so nothing changed. The ledger's core assumption — every named file must
-    // land in the diff — is simply false here, so the task can NEVER close: it nags every turn and escalates
-    // to BLOCK on work that was completed successfully. LIVE FP (real hindsight session): "[block] open loop —
-    // game.js not in the diff", where a clean game.js WAS the deliverable.
-    // This is the THIRD instance of one root defect (v1.0.5 pasted listing, v1.2.1 declarative, now this):
-    // an unclosable HARD deliverable = the block-mode wedge. READ_INTENT_RE covers OBSERVATION verbs (look,
-    // read, review, inspect, audit) but not VERIFICATION verbs, which is the gap.
-    // `make sure` must be stripped before the REQUEST_VERB test or its own "make" (a construction verb)
-    // defeats the demotion. A real change verb elsewhere in the clause still wins: "check game.js and FIX it"
-    // stays HARD. Demote to soft — surfaced once, auto-expires, never blocks — never dropped.
-    // Two restore-only guards (each can only RESTORE pre-v1.3.1 hardness, so neither can mint a new FP —
-    // same safety property as the v1.2.1 declarative gates), both live FN holes in the first cut:
-    //   1. The verify verb must survive with the clause's own TOKENS blanked: a FILENAME satisfies
-    //      VERIFY_INTENT_RE by itself (`validator.js` ⊂ validat\w+, `check.js`/`verify.js` hit \bcheck\b /
-    //      verif\w+), so "validator.js needs updating" — a problem-report COMMISSION, the exact class
-    //      PROBLEM_RE restores for declaratives — silently demoted off the verb-in-the-token. Tokens are
-    //      blanked from the VERIFY side only; blanking the REQUEST side could only widen the demotion.
-    //   2. !anaphoricReq — "Check game.js. Then update it." puts the token in the verify clause and the
-    //      change verb on a pronoun in the next; without the ask-wide anaphora gate (added for declaratives
-    //      in v1.2.1 for this exact shape) the ledger stopped tracking a genuine deliverable.
-    const toks = extractTokens(clause);
-    let deTok = clause; for (const t of toks) deTok = deTok.split(t).join(' ');
-    const deMake = clause.replace(/\bmake\s+(?:sure|certain)\b/gi, ' ');
-    const verifyOnly = VERIFY_INTENT_RE.test(deTok) && !REQUEST_VERB_RE.test(deMake) && !anaphoricReq;
-    // A DECLARATIVE clause names a thing that ALREADY EXISTS ("I do have image_attributions.md on downloads
-    // folder"), not one to produce — see DECLARATIVE_RE. Same demotion as read-intent: soft, never dropped.
-    // NOT declarative when the clause reports a problem/lack (PROBLEM_RE — "we have a bug: cache.js…") or when
-    // another clause commands work on a pronoun referring back to it (anaphoricReq — "I have a notes.md. Add
-    // it."). Both gates only restore pre-v1.2.1 hardness, so they cannot mint a new false positive.
-    const declarative = DECLARATIVE_RE.test(clause) && !REQUEST_VERB_RE.test(clause)
-      && !PROBLEM_RE.test(clause) && !anaphoricReq;
-    for (const tok of toks)
-      (req && !readsOnly && !verifyOnly && !declarative && !diagnosisOnly && !isRef(tok) ? hard : soft).add(tok);
-  }
-  for (const t of hard) soft.delete(t);                                        // hard wins over soft
-  return { hard: [...hard], soft: [...soft] };
-}
-// Back-compat shim: the HARD deliverables of an ask (the nag-worthy ones). Used by openLoops.
-function namedDeliverables(text) { return classifyDeliverables(text).hard; }
-
-/**
- * Task ledger — the PERSISTENT contract memory, one task per user ask that names a deliverable. A task
- * is marked DONE only when its deliverable GROUNDS in the cumulative diff — NEVER by the agent's
- * acknowledgment, so "I'll do it" / "acknowledged" can't close it; only delivery (or a human setting
- * status:'deferred') can. That is the whole answer to "the agent acknowledges and moves on". Asks that
- * name no deliverable aren't tracked (abstain over false-nag). Pure + idempotent; preserves human-set
- * 'deferred'/'done'. The drive (block while pending) is applied by main(), not here.
- */
-export function updateTaskLedger(prior = [], asks = [], diff = '') {
-  const changed = changedFiles(diff).join('\n') + '\n' + diff;
-  const changedLower = changed.toLowerCase();
-  const code = codeOnlyAdded(diff);
-  const byKey = new Map(prior.map(t => [t.task, t]));
-  const reap = new Set(), minted = new Set();   // two-phase reap — see the collision note below
-  for (const a of asks) {
-    const { hard, soft } = classifyDeliverables(a);
-    // A task's deliverable = the tokens OF ITS OWN TIER. A HARD task must NOT be closed by a soft/reference
-    // token that happens to ground ("`handleUpload` is fine, but fix retry.js" → retry.js is the deliverable;
-    // handleUpload landing must not green it — Fable H1). A soft task closes on its own soft tokens.
-    const deliverable = hard.length ? hard : soft;
-    const tier = hard.length ? 'hard' : 'soft';               // hard = imperative request; soft = aside/reference
-    const task = a.length > 100 ? a.slice(0, 100) + '…' : a;
-    // Re-derive tier + deliverable from TODAY'S classifier EVERY turn — never trust the persisted values.
-    // The ledger OUTLIVES classifier fixes: t1d7d ("I do have image attirbutions.md…", real hindsight
-    // session) was minted HARD pre-v1.2.1 and kept nagging for 300+ turns AFTER the declarative fix
-    // shipped, because tier was only backfilled when null. Classification is deterministic over the ask
-    // text, so re-deriving is idempotent — and it makes every classifier fix retroactively heal live
-    // ledgers instead of leaving each closed FP class immortal in every session that minted it. The same
-    // logic reaps an ask that no longer yields ANY deliverable (it should never have minted); a persisted
-    // task whose ask is absent from the transcript is left untouched (fail-open, e.g. legacy truncation).
-    // The reap is TWO-PHASE (collected here, applied after the loop, minted keys win): the key is the ask
-    // TRUNCATED to 100 chars, so two DIFFERENT asks sharing a 100-char prefix (a templated preamble, a
-    // re-sent prompt edited past the cutoff) collide — and an inline delete let the no-deliverable ask
-    // silently reap the commissioning ask's LIVE task whenever it came later in the transcript (order-
-    // dependent loss of the exact contract memory the ledger exists to keep — Fable, v1.3.2 review).
-    // Collisions now resolve toward TRACKING (fail-toward-nag, order-independent).
-    if (!deliverable.length) { reap.add(task); continue; }
-    minted.add(task);
-    let t = byKey.get(task);
-    if (!t) { t = { id: taskId(task), task, status: 'pending' }; byKey.set(task, t); }
-    if (!t.id) t.id = taskId(t.task);                          // backfill id on tasks from older ledgers
-    t.tier = tier; t.deliverable = deliverable;
-    // Recompute status from the diff EVERY turn — NEVER trust a persisted 'done'. An agent can forge
-    // status:"done" straight into tasks.json (out of band, invisible to the tamper diff-scan), so 'done'
-    // must be re-derived: a task is done iff its deliverable still grounds (in CODE for a symbol — a comment
-    // mention doesn't close it) in the cumulative diff. 'deferred' is human-confirmed (applyConfirmedDeferrals).
-    if (t.status !== 'deferred') t.status = deliverable.some(n => grounds(n, changed, changedLower, code)) ? 'done' : 'pending';
-  }
-  for (const k of reap) if (!minted.has(k)) byKey.delete(k);
-  return [...byKey.values()];
-}
-
-// Stable short id for a task (deterministic over its text) so a human can name it unambiguously.
-export const taskId = (s) => { let h = 0; for (const c of String(s)) h = (Math.imul(h, 31) + c.charCodeAt(0)) | 0; return 't' + (h >>> 0).toString(36).slice(0, 4); };
-
-// The Phase-6 surfacing decision, PURE (main maps every task through it, then persists the returned task).
-// Fable's cost model: a wrong mint must be cheap, so a loop surfaces ONCE at mint then goes quiet — it
-// resurfaces only when the agent CLAIMS it done (the moment to re-check). Per-token done-match: a task
-// escalates to BLOCK only if the completion claim references THAT task's own deliverable token — a generic
-// "all done!" no longer flips every unrelated pending task to block. Tiers: hard → warn (block on matching
-// claim), quiet after; soft → a one-time info "aside" (never injected/blocking), auto-expires after softExpire
-// turns. Returns { task: next-state, finding: {…}|null }. Exported for the self-check.
-// A completion claim about THIS token counts only if the clause naming the token is not itself negated /
-// deferred ("upload.js still pending — will do next" is an HONEST disclosure, not a false "done" — Fable M3).
-// Strong deferral/negation signals only. `remaining`/`left` are deliberately EXCLUDED: they invert
-// ("nothing remaining", "items left: none") and became a dodge that demoted a real false-done to warn; a
-// genuine "X still remaining" is already caught by `still`. Biasing toward BLOCK on the backstop is correct
-// (a missed false-done is worse than a rare false-block — Fable's severity call).
-const CLAIM_NEG_RE = /\b(?:still|pending|not|todo|will|next|blocked|unfinished|incomplete|wip|isn'?t|won'?t|haven'?t|instead|yet)\b/i;
-function claimClosesToken(claimMsg, tok) {
-  const bare = String(tok).replace(/`/g, '');
-  if (!COMPLETION_RE.test(claimMsg) || !claimMsg.includes(bare)) return false;
-  // Decide on PROXIMITY to the token, not the whole clause (Fable pass-2, defect A+B): a whole-clause test
-  // both let a far-away "pending/will" (about OTHER work) dodge a real false-done, AND — reusing the
-  // ask-oriented splitClauses, which splits on `yet` — shredded "not yet done" into a false block. Test a
-  // tight word window around EACH occurrence: the token closes only when NONE describes it as deferred/negated.
-  // NOTE: fixed ±3-word window is the tuning knob — widen only if a real negation lands just outside it
-  //           (too wide re-admits the "nothing pending" dodge from 4 words away).
-  const words = String(claimMsg).split(/\s+/);
-  for (let i = 0; i < words.length; i++) {
-    if (!words[i].includes(bare)) continue;
-    if (!CLAIM_NEG_RE.test(words.slice(Math.max(0, i - 3), i + 4).join(' '))) return true;  // unqualified done here
-  }
-  return false;
-}
-export function surfaceOpenLoop(t, claimMsg = '', softExpire = 3) {
-  if (t.status !== 'pending')                                     // done → reset so a re-open nags again
-    return { task: t.status === 'done' ? { ...t, surfaced: false, age: 0 } : t, finding: null };
-  const age = (t.age || 0) + 1;
-  const claimed = (t.deliverable || []).some(tok => claimClosesToken(claimMsg, tok));   // per-token done-match, negation-aware
-  const missing = (t.deliverable || []).slice(0, 2).join(' / ');
-  if (t.tier === 'soft') {
-    // soft aside: surface ONCE as a quiet info note, then stay silent, and auto-expire — never blocks, never
-    // re-nags. It's low-stakes by construction, so quiet == fine here (it does not misreport completion).
-    if (age > softExpire) return { task: { ...t, age, status: 'stale' }, finding: null };
-    if (t.surfaced) return { task: { ...t, age }, finding: null };
-    return { task: { ...t, age, surfaced: true }, finding: { cls: 'openloop', sev: 'info',
-      msg: `unconfirmed aside [${t.id}] — "${t.task}" (named ${missing} but framed as an observation/question, not a request — set aside; restate as an instruction to track, or reply \`defer ${t.id}\`)` } };
-  }
-  // HARD task: ALWAYS emit a finding so the card + verdict honestly reflect the still-pending task (quiet != green
-  // — Fable H2). nag-once controls only INJECTION: after the first surface, the finding is marked `quiet` so
-  // main won't re-inject it into the agent's context, but the user still sees "N pending". A matching done-claim
-  // escalates to block (and re-injects); otherwise warn.
-  const quiet = !!t.surfaced && !claimed;
-  return { task: { ...t, age, surfaced: true }, finding: { cls: 'openloop', sev: claimed ? 'block' : 'warn', quiet,
-    msg: `pending task [${t.id}] — "${t.task}"${t.deferRequested
-      ? ` (agent tried to defer this — only you can, by replying \`defer ${t.id}\`)`
-      : claimed ? ` — you claimed it done, but ${missing} is not in the diff`
-      : ` (no ${missing} in the diff yet — or reply \`defer ${t.id}\` to set aside)`}` } };
-}
-
-// Anti-gaming, the ACTUAL lever removal. The previous version trusted a file (confirmed-deferrals.json),
-// but a file is agent-writable — the agent can forge its own confirmation, so that's no confirmation at
-// all. The ONLY input an agent cannot forge is the user's typed words: it cannot author a real user turn
-// (parseTranscript's structural filter guarantees this). So a deferral is honored only when the USER
-// typed `defer <id>` (the id is shown in the card). Read those ids from the real asks; everything else
-// stays pending. Writing 'deferred' anywhere — tasks.json OR a confirmations file — now buys nothing.
-export function humanDeferrals(asks = []) {
-  const ids = new Set();
-  for (const a of asks)
-    for (const m of String(a).matchAll(/\b(?:\/?groundtruth-defer|defer)\s+(t[0-9a-z]{2,6})\b/gi)) ids.add(m[1].toLowerCase());
-  return ids;
-}
-
-export function applyConfirmedDeferrals(tasks = [], confirmedIds = new Set()) {
-  return tasks.map(t => (t.status === 'deferred' && !confirmedIds.has(t.id || taskId(t.task)))
-    ? { ...t, status: 'pending', deferRequested: true } : t);
 }
 
 // ── §11 Referee-state tamper-evidence — the category above gaming a single check ──
@@ -2479,14 +1730,13 @@ export function renderCard(findings, { session = 'unknown', intent = '', blockEn
   const hasAsync = findings.some(f => f.cls === 'async_done');     // false-completion: claimed done, work unfinished
   const dot = hasBlock ? '🔴' : hasAsync ? '⏳' : (findings.length || ic.tier === 'thin') ? '🟡' : '🟢';
 
-  const isHonesty = f => [1, 2, 3, 4, 6, 9, 'async_done', 'test_exclusion', 'test_weakened'].includes(f.cls);   // false-claim / stub / no-op / phantom / dangling-ref / special-casing / false-completion / test-exclusion / test-weakened
+  const isHonesty = f => [1, 2, 3, 4, 6, 9, 'async_done', 'test_exclusion', 'test_weakened', 'NC', 'CA', 'UC'].includes(f.cls);   // false-claim / stub / no-op / phantom / dangling-ref / special-casing / false-completion / test-exclusion / test-weakened / (v2 contract) no-contract / claimed-but-absent / undeclared-change
   const sortF = a => [...a].sort((x, y) => (x.sev === 'block' ? 0 : 1) - (y.sev === 'block' ? 0 : 1));
   const sub = f => `       ${SEV[f.sev]} ${CLASS_NAME[f.cls] || f.cls}${f.rule ? ` [${f.rule}]` : ''} — ${f.msg}`;
   const hon = findings.filter(isHonesty);
-  const loops = findings.filter(f => f.cls === 'openloop');                  // contract memory: asked, not delivered
-  const deferred = findings.filter(f => f.cls === 'deferred');              // self-deferred: surfaced, never silent
+  const deferred = findings.filter(f => f.cls === 'deferred');              // declared deferral: surfaced, never silent
   const tamper = findings.filter(f => f.cls === 'tamper');                  // agent rewrote the referee's own state
-  const rule = findings.filter(f => !isHonesty(f) && !['openloop', 'deferred', 'tamper'].includes(f.cls));  // security B/C + compiled rules R
+  const rule = findings.filter(f => !isHonesty(f) && !['deferred', 'tamper'].includes(f.cls));  // security B/C + compiled rules R
 
   const verdict = (hasBlock ? 'ISSUES — blocked'
     : hasAsync ? 'IN PROGRESS — not done (deliverable not produced yet)'
@@ -2518,12 +1768,13 @@ export function renderCard(findings, { session = 'unknown', intent = '', blockEn
       : ic.tier === 'thin'
       ? `  🟡 Completeness — NOT verified: the ask named no file / deliverable / test, so there were no subtasks to check off`
       : `  🟢 Completeness — the ask was specific enough to map subtasks against`,
-    loops.length
-      ? `  ${loops.some(f => f.sev === 'block') ? '🔴' : '🟡'} Tasks — ${loops.length} pending (one per ask that named a deliverable; "done" only when it lands in the diff, never on the agent's say-so):`
-      : deferred.length
-      ? `  🟡 Tasks — 0 pending; ${deferred.length} human-confirmed deferral(s) below (set aside with sign-off, surfaced for transparency):`
-      : `  🟢 Tasks — every ask that named a deliverable is delivered`,
-    ...loops.map(f => `       ${f.sev === 'block' ? '🔴' : '🟡'} ${f.msg}`),
+    // Tasks (v2): the prose open-loop ledger is retired — completeness is now the contract's CA (a declared
+    // deliverable that never landed) and UC (a change never declared), both under Honesty above. This line
+    // surfaces only the agent's OWN declared deferrals; when there are none it stays neutral, never asserting
+    // an ungrounded "everything delivered" (the check that used to back that claim no longer exists).
+    deferred.length
+      ? `  🟡 Tasks — ${deferred.length} declared deferral(s) (the agent's own set-aside, surfaced for transparency):`
+      : `  🟢 Tasks — nothing deferred`,
     ...deferred.map(f => `       ⊘ ${f.msg}`),
     baseline
       ? `  ⚪ Debt — ${baseline.preExisting} pre-existing (already here at session start, not blamed) · ${baseline.introduced} introduced this turn`
@@ -2636,7 +1887,6 @@ const FIX = {
   C1: 'Remove the hardcoded secret; move it to an env var / secret store and rotate it.',
   C2: 'Remove the committed private key; rotate it.',
   ENV: 'Add the env file to .gitignore (and `git rm --cached` it if already tracked); rotate any secret it held.',
-  openloop: 'You claimed done, but this task is still pending. DELIVER the file/symbol it named — acknowledging it does NOT close it, and you cannot defer it yourself (an agent-written "deferred", in any file, is re-opened). Only the USER can set it aside, by typing `defer <id>`; do not type that for them.',
 };
 export function renderCorrective(blockFindings, attempts, cap = 2) {
   return `Groundtruth blocked this stop (attempt ${attempts}/${cap} before it escalates to a human). Resolve, then finish:\n`
@@ -2660,11 +1910,12 @@ export function renderCorrective(blockFindings, attempts, cap = 2) {
 const UNTRACKED_SCAN_CAP = 64 * 1024 * 1024;      // per file
 const UNTRACKED_TOTAL_CAP = 128 * 1024 * 1024;    // across all untracked files. Budget is checked BEFORE a read, so one file overshoots; the printable transform (`+`-prefix per line) can ~2× a file, so worst-case content ≈ total + 2×per-file = 128 + 2×64 = 256 MB — still safely < Node's ~512 MB string cap.
 export function untrackedAdded(cwd, skip = new Set(), perFileCap = UNTRACKED_SCAN_CAP, totalCap = UNTRACKED_TOTAL_CAP) {
-  let content = ''; const oversized = [];
+  let content = ''; const oversized = []; const paths = []; let gitOk = false;
   try {
     // maxBuffer: execSync defaults to 1 MiB stdout; a repo with >1 MiB of untracked FILENAMES would throw into
     // the outer catch and silently skip the WHOLE untracked scan (a coverage hole). 256 MiB covers any real tree.
     const porcelain = execSync('git status --porcelain=v1 --untracked-files=all', { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 });
+    gitOk = true;   // `git status` succeeded → `paths` is an AUTHORITATIVE (possibly empty) untracked list
     for (const ln of porcelain.split('\n').filter(Boolean)) {
       if (!ln.startsWith('??')) continue;                               // untracked only — tracked edits are in git diff
       const f = ln.slice(3).trim().replace(/^"(.*)"$/, '$1');
@@ -2673,6 +1924,10 @@ export function untrackedAdded(cwd, skip = new Set(), perFileCap = UNTRACKED_SCA
       // secret-SCANNED nor surfaced as `oversized`. Before this, an oversized tmp/ file (dropped from `content`)
       // still leaked its `oversized` entry into findings and fired the "too large to scan" warn every turn.
       if (skip.has(f) || excludedScanPath(f)) continue;
+      // Record the untracked PATH regardless of read outcome (binary / oversized / unreadable still EXIST on
+      // disk) — the contract's `created`-claim check gates its synthetic `A` on disk presence via this set, so
+      // it must be complete, not limited to files whose content we scanned. (Fable adversarial FP-5/FN-5/FP-8.)
+      paths.push(f);
       // Total budget spent → surface the rest WITHOUT reading (bounds consumer memory/time; never silent).
       if (content.length >= totalCap) { let sz = 0; try { sz = statSync(join(cwd, f)).size; } catch {} oversized.push(`${f}${sz ? ` (${sz} bytes)` : ''} — scan budget exhausted, review manually`); continue; }
       // Bounded partial read (open+read up to the cap) instead of readFileSync-the-whole-file: caps memory to
@@ -2697,7 +1952,11 @@ export function untrackedAdded(cwd, skip = new Set(), perFileCap = UNTRACKED_SCA
       if (size > off) oversized.push(`${f} (${size} bytes) — only the first ${Math.floor(perFileCap / (1024 * 1024))} MB scanned, review the remainder`);   // truncated at the per-file cap → surfaced, never silently trusted
     }
   } catch { /* no git → skip */ }
-  return { content, oversized };
+  // paths === null signals "untracked list UNKNOWN" (no-git / `git status` failed, e.g. a held index.lock) so
+  // the contract's synthetic-`A` mint falls back to the ledger instead of treating an EMPTY array as "nothing
+  // is untracked" — which would block every honest Write-created `created` claim on the fail-open path. An
+  // empty (but git-confirmed) list stays []. (Fable review D1.)
+  return { content, oversized, paths: gitOk ? paths : null };
 }
 
 // ── main: only when run directly, not when imported by the test ──
@@ -2787,6 +2046,19 @@ function main() {
     try { return execSync(`git ${args}`, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); }
     catch { return ''; }
   };
+  // Pin the diff PREFIX config on every `git diff` we parse. A user's gitconfig can set diff.mnemonicPrefix
+  // (emits `c/ w/i/ …` instead of `a/ b/`), diff.noprefix (no prefix at all), or custom diff.srcPrefix/
+  // dstPrefix — any of which makes `stripAB`/the header parser mis-read EVERY path, so an honest claim gets
+  // a block-tier CA "absent from the diff" and its file also shows as an undeclared UC. That silently poisons
+  // every verdict for a whole config population (Fable adversarial FP-3). Force the canonical a/ b/ form (and
+  // pin quotePath/color so decode + parse stay deterministic regardless of the ambient config).
+  const DIFF_CFG = '-c diff.mnemonicPrefix=false -c diff.noprefix=false -c diff.srcPrefix=a/ -c diff.dstPrefix=b/ -c core.quotePath=true -c color.diff=never';
+  // `--no-ext-diff` (a `git diff` OPTION, so it follows the subcommand — not a top-level `-c`) neutralizes a
+  // configured `diff.external` / `GIT_EXTERNAL_DIFF` (e.g. difftastic: `git config diff.external difft`), which
+  // otherwise replaces the whole diff with an external tool's output — no `diff --git` headers → filesFromDiff
+  // parses ZERO files → every honest claim is a block-tier CA. Same "poisons every verdict for a config
+  // population" failure as the prefix knobs, via a different knob. (Fable review D2.)
+  const gitDiffCfg = (rest, cwd) => git(`${DIFF_CFG} diff --no-ext-diff ${rest}`, cwd);
   // Shared searcher for the Class-6 dangling-ref check (used by BOTH the Stop path and the pre-commit
   // path). `-E` POSIX ERE (not `-P` — PCRE isn't guaranteed, and a `-P` error would throw → fail-open →
   // silently inert; the real receiver-gated classification is done in JS). It MUST distinguish `git grep`'s
@@ -2853,7 +2125,7 @@ function main() {
   // chat (no Stop hook ever fired for a manual paste), so the commit is where it gets caught.
   if (process.argv.includes('--pre-commit')) {
     const cwd = process.env.CLAUDE_PROJECT_DIR || process.cwd();
-    const diff = git('diff --cached', cwd);
+    const diff = gitDiffCfg('--cached', cwd);
     if (!diff.trim()) process.exit(0);
     const findings = analyze({ claim: '', diff, cwd }).concat(runCompiledRules(diff, loadCompiledRules(cwd)))
       .concat(collectEnv((a) => git(a, cwd)))
@@ -2899,7 +2171,7 @@ function main() {
         process.exit(2);
       }
     }
-    const diff = git(`diff ${dr.range}`, cwd);
+    const diff = gitDiffCfg(dr.range, cwd);
     const findings = analyze({ claim: '', diff, cwd }).concat(runCompiledRules(diff, loadCompiledRules(cwd)))
       .concat(checkDroppedSymbols({ claim: '', diff, asks: [], grepTree: mkGrepTree(cwd, { tree: dr.head }), requireClaim: false }));
     if (!findings.length) { process.stderr.write(`🟢 Groundtruth: ${dr.range} clean.\n`); process.exit(0); }
@@ -3092,7 +2364,7 @@ function main() {
     baseline = JSON.parse(readFileSync(join(cwd, '.claude', 'groundtruth', `${payload.session_id}.baseline.json`), 'utf8'));
   } catch { /* no baseline */ }
   const baseRef = baseline?.startRef || 'HEAD';
-  let diff = git(`diff ${baseRef}`, cwd);
+  let diff = gitDiffCfg(baseRef, cwd);
   const gitOnlyDiff = diff;   // capture BEFORE the tool-ledger/untracked merge — AG-B/AG-C need real -/+ pairing
 
   let parsed = { intent: '', bashCmds: [], results: [] };
@@ -3158,6 +2430,42 @@ function main() {
   // rewritten); a write ratified by the matching slash-command is legitimate. See refereeTamper.
   const envBlock = process.env.GROUNDTRUTH_BLOCK === '1';
   findings.push(...refereeTamper(diff, parsed.commandsInvoked || new Set(), envBlock));
+
+  // v2 claims contract — the honesty/completeness engine (v2.0.0: ON by default; opt OUT with
+  // GROUNDTRUTH_CONTRACT=0 for the legacy prose path, which is being retired). NC/CA/UC replace the prose
+  // class-1/class-3 claim detection and the prose task ledger. Reality is read from the AUTHORED `diff`
+  // (git + tool ledger, so untracked creates are seen) and the transcript's bash evidence; symbols are
+  // lexed per-file from scanDiff. Fully fail-open: the contract path must never break a turn.
+  if (process.env.GROUNDTRUTH_CONTRACT !== '0') {
+    try {
+      const reality = buildReality({
+        diff, cwd,
+        // pass bashEvents THROUGH (may be undefined on the fail-open / no-transcript path) so a truthful
+        // tests_pass claim ABSTAINS there instead of becoming a false CA; an empty array = a real "nothing ran".
+        bashEvents: parsed.bashEvents,
+        symbolsByFile: addedSymbolsByFile(scanDiff),
+        excluded: (p) => excludedScanPath(p),
+        // UC/NC are scoped to files the agent's Write/Edit tools actually authored (relativized in
+        // buildReality), so a dirty tree / manual edit / lockfile churn the agent can't declare is never a
+        // false UC. ACCEPTED BOUND (Fable re-review): a file the agent edits through the BASH channel
+        // (`sed -i`, `> f`, heredoc) is not in the Write/Edit ledger, so an undeclared Bash-channel change
+        // escapes UC/NC — the same tool-ledger blind spot the security scanners already accept (see the
+        // scanDiff note above); the CI/pre-merge `--diff-range` gate, which has the full diff and no ledger
+        // dependency, is the backstop. Chosen precision-first over the whole-diff scope's dirty-tree FPs.
+        authored: (parsed.mutations || []).map(m => m.path),
+        // the "last source edit" seq for the stale-green sensor (computed with the code-only/relativized gates).
+        lastEditSeq: lastCodeEditSeq(parsed.mutations || [], cwd),
+        // DISK-PRESENCE gate for the synthetic-`A` mint: the untracked (`??`) path set. Distinguishes a real
+        // new file (untracked-present) from an edit-then-revert (tracked, gone from the diff) and a Write-then-
+        // rm (absent), so a `created` claim verifies against what's actually on disk. (Fable adv FP-5/FN-5/FP-8.)
+        untracked: ut.paths,
+        // commands the filtered SIDECHAINS ran → a tests_pass claim backed only by a subagent's run ABSTAINS
+        // (not a block-tier "no such command ran"). (Fable adv FP-10.)
+        sidechainCmds: parsed.sidechainCmds,
+      });
+      findings.push(...contractFindings(payload.last_assistant_message || '', reality));
+    } catch { /* fail-open — v1 verdict stands */ }
+  }
   // D9: DEFENSE-IN-DEPTH for the indirect case (a sub-script writes a referee file, so no command names
   // it) — compare current hashes against the SessionStart snapshot. The TRANSCRIPT scan above is the
   // primary anchor; this catches the effect when the action was laundered through another file.
@@ -3197,27 +2505,10 @@ function main() {
     findings.push({ cls: 'tamper', sev: envBlock ? 'block' : 'warn',
       msg: 'no session baseline AND a commit ran this session — committed work is invisible to every check (the hook is diffing against HEAD); ensure the SessionStart hook ran, or restore the deleted baseline.json' });
 
-  // Task ledger — the PERSISTENT contract memory (one ledger per session). Accumulates a task per user
-  // ask that names a deliverable, marks it DONE only when the deliverable GROUNDS in the diff (never by
-  // the agent's say-so — an acknowledgment can't close it), and DRIVES the pending ones: if the agent
-  // CLAIMS completion while tasks are still pending, those flip to BLOCK so the remediation loop
-  // re-presents them (retry cap → escalate, so a crude false-pending can't wedge); otherwise warn,
-  // persistently visible. Answers "agent acknowledged and moved on" + "user wouldn't know what's done".
-  const taskFile = join(cwd, '.claude', 'groundtruth', `${payload.session_id || 'session'}.tasks.json`);
-  let priorTasks = []; try { priorTasks = JSON.parse(readFileSync(taskFile, 'utf8')); } catch {}
-  // Honor only deferrals the USER typed (`defer <id>` in a real turn) — an agent-written 'deferred',
-  // in tasks.json or anywhere, is re-opened to pending. The lever an agent could forge is gone.
-  const ledger = applyConfirmedDeferrals(updateTaskLedger(priorTasks, parsed.asks || [], diff), humanDeferrals(parsed.asks || []));
-  // Open-loop surfacing (Phase 6): nag-once + per-token done-match + tiers, via the pure surfaceOpenLoop.
-  const surfaced = ledger.map(t => surfaceOpenLoop(t, payload.last_assistant_message || ''));
-  const tasks = surfaced.map(s => s.task);                    // next-state to persist (surfaced/age/stale)
-  for (const s of surfaced) if (s.finding) findings.push(s.finding);
-  try { writeFileSync(taskFile, JSON.stringify(tasks, null, 2) + '\n'); } catch {}
-  // What remains 'deferred' here is human-confirmed (the agent can't reach this state), so it's a
-  // legitimate set-aside — surfaced for transparency at warn, never silent, never blocking.
-  for (const t of tasks.filter(x => x.status === 'deferred'))
-    findings.push({ cls: 'deferred', sev: 'warn',
-      msg: `deferred (human-confirmed) — "${t.task}"${t.note ? ` — "${String(t.note).slice(0, 70)}"` : ''}` });
+  // Completeness (v2): the prose task ledger is retired. The contract's own passes cover it deterministically
+  // — UC catches a change the agent didn't declare, CA catches a declared deliverable that never landed, and
+  // a `deferred` claim surfaces (above, via contractFindings) as the agent's declared set-aside. No prose
+  // extraction, no persisted tasks.json to forge — declaration replaces guessing (spec §6).
 
   // Procedural compliance: did the agent follow this project's declared step-procedures (required /
   // forbidden / ordered commands) over its tool calls? Grounded in the transcript order, no LLM.

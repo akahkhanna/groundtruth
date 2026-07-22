@@ -48,7 +48,21 @@ Then check each item and report `✓`/`✗`:
    - ✗ if absent → **"run `node \"<HOOKS>/groundtruth.mjs\" --install-pre-commit` — scans the STAGED diff on every commit (secrets · RLS · stubs · dropped-symbol dangling refs). It's fail-open (never blocks on its own breakage), won't clobber a non-Groundtruth hook, and `git commit --no-verify` bypasses once. Re-run it after a plugin update if the path moves."**
    - If a foreign `pre-commit` already exists, `--install-pre-commit` refuses and prints the one line to add manually.
 
-End with one summary line, e.g.: `Setup → rules: N clean unarmed (arm in warn?) · badge: ✗ · block: warn (on = enforce) · key: off (CI = real enforcement) · pre-commit: ✗ install.` (after arming: `rules: armed N (warn)`).
+6. **v2 claims contract** (**ON by default** — opt out with `GROUNDTRUTH_CONTRACT=0`). Instead of parsing the agent's prose, the agent ends each turn with one fenced `groundtruth-claims` block declaring exactly what it did; Groundtruth then checks that every claim exists in the diff (**CA** — claimed but absent) and every change it authored is declared (**UC** — undeclared change). A turn that authored changes but emits no block is **NC** (no contract); a pure Q&A/read-only turn abstains. Detect config with `printenv GROUNDTRUTH_CONTRACT`, and grep `CLAUDE.md` for a ` ```groundtruth-claims ` instruction.
+   - The engine is already on. The **one thing to set up** is teaching the agent the schema: an instruction in `CLAUDE.md` telling it to emit the block (otherwise every change-bearing turn is NC). It never *blocks* unless `GROUNDTRUTH_BLOCK` is also on and a CA fires. To disable the contract entirely, set `env.GROUNDTRUTH_CONTRACT = "0"` in `.claude/settings.local.json`.
+   - **Offer to append the contract instruction to `CLAUDE.md`** (their file — show it first, write on yes):
+     ````
+     ## Groundtruth claims contract
+     End every turn that changes code with ONE fenced block declaring what you did:
+     ```groundtruth-claims
+     { "v": 1, "task": "<one line>", "status": "complete|partial|blocked",
+       "claims": [ { "t": "created|modified|deleted|renamed|tests_pass|build_pass|deferred|no_change", "...": "..." } ] }
+     ```
+     Every claim must be true against the diff; declare every file you changed; status partial/blocked needs a `deferred` claim.
+     ````
+     `CLAUDE.md` is inside **Rule Zero's** tamper perimeter (`RULE_SRC_RE`), so an agent that later edits this instruction away trips the existing referee-tamper check — no new machinery. Note it's experimental: keep block off while you watch its precision on your real turns, exactly like any new check.
+
+End with one summary line, e.g.: `Setup → rules: N clean unarmed (arm in warn?) · badge: ✗ · block: warn (on = enforce) · key: off (CI = real enforcement) · pre-commit: ✗ install · contract: off (experimental).` (after arming: `rules: armed N (warn)`).
 
 Then **offer to do the `settings.local.json` parts yourself** (the user asked for this): *"Want me to set up `settings.local.json` now — deploy the status badge, and (optional) turn on block mode? I will NOT write a `GROUNDTRUTH_KEY` here — that belongs in a CI secret (item 4), where it's actually out of my reach."* If they say yes:
 1. Deploy the status-line wrapper (`cp "<HOOKS>/groundtruth-statusline.sh" "$HOME/.claude/groundtruth-statusline.sh" && chmod +x` it). Then read `.claude/settings.local.json` (create `{}` if absent), and **merge** (preserve existing keys): add the `statusLine` block pointing at the wrapper with the user's real absolute home path filled in (`bash "/abs/home/.claude/groundtruth-statusline.sh"`). If an old version-pinned statusLine exists, replace it. Write valid JSON.
