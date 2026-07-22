@@ -2787,9 +2787,15 @@ function main() {
   if (process.env.GROUNDTRUTH_CONTRACT !== '0') {
     try {
       const reality = buildReality({
-        diff, bashEvents: parsed.bashEvents || [],
+        diff, cwd,
+        // pass bashEvents THROUGH (may be undefined on the fail-open / no-transcript path) so a truthful
+        // tests_pass claim ABSTAINS there instead of becoming a false CA; an empty array = a real "nothing ran".
+        bashEvents: parsed.bashEvents,
         symbolsByFile: addedSymbolsByFile(scanDiff),
         excluded: (p) => excludedScanPath(p),
+        // UC is scoped to files the agent's Write/Edit tools actually authored (relativized in buildReality),
+        // so a dirty tree / manual edit / lockfile churn the agent can't declare is never a false UC.
+        authored: (parsed.mutations || []).map(m => m.path),
       });
       findings.push(...contractFindings(payload.last_assistant_message || '', reality));
     } catch { /* fail-open — v1 verdict stands */ }

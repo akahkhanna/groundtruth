@@ -216,11 +216,19 @@ const SEV_SOFT = 'warn';   // a claim that IS supported but mislabeled (right fi
 
 const norm = (p) => String(p == null ? '' : p).trim();
 
+// A command that merely MENTIONS a test cmd in a string/echo/grep is not a run of it — blessing `echo "npm
+// test would pass"` (exit 0) as evidence for `tests_pass:{cmd:"npm test"}` is a false green. (Fable finding 5.)
+const LOOKALIKE_RE = /^\s*(?:echo|printf|cat|grep|rg|ag|ls|head|tail|sed|awk|:|true|false|#)\b/;
+
 // Does a tests_pass/build_pass claim's cmd correspond to a command that actually ran? Match on exact cmd
-// or an executed command that CONTAINS it (tolerates wrapper flags: `npm test` vs `npm test -- --ci`).
+// or an executed command that CONTAINS it (tolerates wrapper flags: `npm test` vs `npm test -- --ci`),
+// excluding lookalikes (echo/grep/… that only quote the string).
 function commandRun(commands, cmd) {
   const want = norm(cmd);
-  return (commands || []).filter(e => { const c = norm(e.cmd); return c === want || c.includes(want); });
+  return (commands || []).filter(e => {
+    const c = norm(e.cmd);
+    return (c === want || c.includes(want)) && !LOOKALIKE_RE.test(c);
+  });
 }
 
 /**
@@ -272,22 +280,35 @@ export function verify(contract, reality = {}) {
       const asSplit = byPath.get(from) === 'D' && byPath.get(to) === 'A';
       if (!asR && !asSplit) findings.push({ cls: 'CA', sev: SEV_CA, from, to, msg: `claimed renamed ${from} → ${to}, but the diff does not support it` });
     } else if (c.t === 'tests_pass' || c.t === 'build_pass') {
-      if (reality.commands === undefined) continue;          // no transcript → abstain
+      if (reality.commands === undefined) continue;          // no transcript → abstain (never a false CA)
       const runs = commandRun(reality.commands, c.cmd);
-      if (runs.length === 0) findings.push({ cls: 'CA', sev: SEV_CA, cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but no such command ran this session` });
-      else if (!runs.some(r => r.ok)) findings.push({ cls: 'CA', sev: SEV_CA, cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but it exited non-zero` });
+      if (runs.length === 0) { findings.push({ cls: 'CA', sev: SEV_CA, cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but no such command ran this session` }); continue; }
+      const completed = runs.filter(r => r.ok !== null);    // ok===null = unpaired/in-flight → no verdict
+      if (completed.length === 0) continue;                  // matched only unpaired runs → abstain, don't call it a failure
+      // Order-aware: the LAST completed matching run is the verdict — a green re-run after edits counts,
+      // and a red run after an earlier green is NOT laundered into a pass (Fable finding 5, stale-green).
+      const last = completed.reduce((a, b) => (b.seq >= a.seq ? b : a), completed[0]);
+      if (last.ok !== true) findings.push({ cls: 'CA', sev: SEV_CA, cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but the last matching run exited non-zero` });
     }
     // deferred: recorded, never verified against the diff (feeds the Week-3 ledger).
     // no_change: contributes no claimed path; a non-empty diff surfaces precisely as UC below.
   }
 
   // ── PASS 2 — reality → claims (UC) ──
+  // Scope to files the AGENT authored this session (its Write/Edit ledger). A file the agent didn't touch —
+  // a tree dirty at session start, a manual edit, lockfile churn from `npm install` — is not something it
+  // could honestly declare, so flagging it as undeclared is a false positive. `authored === undefined`
+  // (no transcript) audits nothing here rather than everything. (Fable finding 7; tests pass `authored`
+  // undefined for the pure-unit path, which keeps auditing all — that's the explicit test-only contract.)
+  const authored = reality.authored;   // Set | undefined
+  const agentTouched = (p) => authored === undefined || authored.has(p);
   for (const f of files) {
     const path = norm(f.path);
     if (excluded(path)) continue;
     // A rename's old side (from) is covered by its rename claim even though it appears as its own D entry.
     if (claimedPaths.has(path)) continue;
     if (f.status === 'R' && claimedPaths.has(norm(f.from))) continue;
+    if (!agentTouched(path) && !(f.status === 'R' && agentTouched(norm(f.from)))) continue;
     findings.push({ cls: 'UC', sev: SEV_UC, file: path, status: f.status, msg: `undeclared change: ${path} (${f.status}) is in the diff but no claim covers it` });
   }
 
@@ -299,56 +320,109 @@ export function verify(contract, reality = {}) {
  * raw diff / bashEvents / symbol map and flips GROUNDTRUTH_CONTRACT=1).
  * ──────────────────────────────────────────────────────────────────────────────────────────────────── */
 
+// git quotes a path with special/non-ASCII bytes as "b/caf\303\251.js" (C-style octal escapes of the UTF-8
+// bytes, core.quotePath default). Decode so the parsed path matches the repo-relative claim; a non-quoted
+// path passes through unchanged. Without this, a non-ASCII filename fails the a/ b/ prefix test → the file
+// goes invisible → a CA block on an honest claim (and UC silently abstains). (Fable code-review finding 2.)
+function unquotePath(s) {
+  if (s.length < 2 || s[0] !== '"' || s[s.length - 1] !== '"') return s;
+  const inner = s.slice(1, -1), bytes = [], esc = { t: 9, n: 10, r: 13, '"': 34, '\\': 92 };
+  for (let i = 0; i < inner.length; i++) {
+    if (inner[i] !== '\\') { bytes.push(inner.charCodeAt(i)); continue; }
+    const oct = inner.slice(i + 1, i + 4);
+    if (/^[0-7]{3}$/.test(oct)) { bytes.push(parseInt(oct, 8)); i += 3; continue; }
+    const c = inner[i + 1];
+    if (c in esc) { bytes.push(esc[c]); i += 1; continue; }
+    bytes.push(inner.charCodeAt(i));
+  }
+  try { return new TextDecoder().decode(new Uint8Array(bytes)); } catch { return inner; }
+}
+const stripAB = (p) => (p.startsWith('a/') || p.startsWith('b/')) ? p.slice(2) : p;
+
 /**
- * Parse `reality.files` [{status,path,from?}] straight from a unified diff — the SAME authored diff the
- * engine already computes (git diff + the tool-ledger merge), so untracked files the agent just created
- * are visible without a second git call. Status is read from the diff's own structure:
- *   `--- /dev/null` → A  ·  `+++ /dev/null` → D  ·  `rename from/to` → R  ·  otherwise M.
- * A bare `+++ b/path` with no `--- ` header (a tool-ledger fragment for a new file) reads as A.
- * Gated on the a/ b/ /dev/null prefixes (git's convention, matching the engine's changedFiles) so a removed
- * CONTENT line that merely starts with dashes is never mistaken for a file header. Last status per path wins.
+ * Parse `reality.files` [{status,path,from?}] from a unified diff — the SAME authored diff the engine
+ * already computes (git diff + the tool-ledger merge), so untracked creates are visible without a second
+ * git call. Status is read from the diff's OWN STRUCTURE, anchored on the `diff --git` header so a stray
+ * content line that looks like a file header can't mint a phantom file (Fable finding 8):
+ *   `new file mode`/`--- /dev/null` → A · `deleted file mode`/`+++ /dev/null` → D · `rename from/to` → R ·
+ *   `Binary files … differ` and empty new/modified files (which emit NO ---/+++ hunk headers) → resolved
+ *   from the diff --git block, not from hunk lines — the fix for CA-block FPs on binaries and empty files.
+ * A bare `+++ b/path` with no `diff --git` (a tool-ledger fragment for a new file) still reads as A.
+ * Last status per path wins.
  */
 export function filesFromDiff(diff) {
   const byPath = new Map();          // path → status (A/M/D)
   const renames = [];                // {from,to}
-  const renamed = new Set();         // paths owned by a rename (skip A/M/D for them)
-  let minus = null, rFrom = null;
+  const renamed = new Set();
+  let cur = null;                    // current `diff --git` block
+  let inHunk = false;                // past the first `@@` → subsequent ---/+++ are CONTENT, not headers
+  const flush = () => {
+    if (!cur) return;
+    const b = cur; cur = null;
+    if (b.rFrom != null && b.rTo != null) { renames.push({ from: b.rFrom, to: b.rTo }); renamed.add(b.rFrom); renamed.add(b.rTo); return; }
+    const path = (b.deleted || b.plus === '/dev/null') ? (b.minus || b.aPath)
+      : (b.plus || b.bPath || b.aPath);
+    if (!path) return;
+    const status = (b.deleted || b.plus === '/dev/null') ? 'D'
+      : (b.added || b.minus === '/dev/null') ? 'A' : 'M';   // binary/empty fall through to A (if new) or M
+    byPath.set(path, status);
+  };
   for (const line of String(diff).split('\n')) {
-    if (line.startsWith('rename from ')) { rFrom = line.slice(12).trim(); continue; }
-    if (line.startsWith('rename to ')) {
-      const to = line.slice(10).trim();
-      if (rFrom != null) { renames.push({ from: rFrom, to }); renamed.add(rFrom); renamed.add(to); rFrom = null; }
+    const dg = line.match(/^diff --git (.+) (.+)$/);
+    if (dg) { flush(); cur = { aPath: stripAB(unquotePath(dg[1])), bPath: stripAB(unquotePath(dg[2])) }; inHunk = false; continue; }
+    if (line.startsWith('@@')) { inHunk = true; continue; }   // hunk body begins → ---/+++ below are content
+    if (!cur) {
+      // bare tool-ledger fragment (no diff --git header): `+++ b/path` → a new/authored file (status A).
+      if (!inHunk && line.startsWith('+++ ')) { const r = unquotePath(line.slice(4).trim()); if (r.startsWith('b/')) byPath.set(r.slice(2), byPath.get(r.slice(2)) || 'A'); }
       continue;
     }
-    if (line.startsWith('--- ')) {
-      const rest = line.slice(4).trim();
-      minus = rest === '/dev/null' ? '/dev/null' : (rest.startsWith('a/') ? rest.slice(2) : null);
-      continue;
-    }
-    if (line.startsWith('+++ ')) {
-      const rest = line.slice(4).trim();
-      const plus = rest === '/dev/null' ? '/dev/null' : (rest.startsWith('b/') ? rest.slice(2) : null);
-      if (plus === '/dev/null') { if (minus && minus !== '/dev/null') byPath.set(minus, 'D'); }
-      else if (plus) byPath.set(plus, (minus === '/dev/null' || minus === null) ? 'A' : 'M');
-      minus = null;
-      continue;
-    }
+    if (inHunk) continue;            // inside a hunk: never reinterpret a content line as a header
+    if (line.startsWith('new file mode')) { cur.added = true; continue; }
+    if (line.startsWith('deleted file mode')) { cur.deleted = true; continue; }
+    if (line.startsWith('rename from ')) { cur.rFrom = stripAB(unquotePath(line.slice(12).trim())); continue; }
+    if (line.startsWith('rename to ')) { cur.rTo = stripAB(unquotePath(line.slice(10).trim())); continue; }
+    if (line.startsWith('--- ')) { const r = unquotePath(line.slice(4).trim()); cur.minus = r === '/dev/null' ? '/dev/null' : (r.startsWith('a/') ? r.slice(2) : cur.minus); continue; }
+    if (line.startsWith('+++ ')) { const r = unquotePath(line.slice(4).trim()); cur.plus = r === '/dev/null' ? '/dev/null' : (r.startsWith('b/') ? r.slice(2) : cur.plus); continue; }
   }
+  flush();
   const files = [];
   for (const { from, to } of renames) files.push({ status: 'R', from, path: to });
   for (const [path, status] of byPath) if (!renamed.has(path)) files.push({ status, path });
   return files;
 }
 
+// Relativize a diff/ledger path against cwd (backslashes normalized). The tool-ledger records ABSOLUTE
+// Write/Edit file_paths (`+++ b//abs/path`), but a claim is repo-relative — without this they never
+// string-match and every honest `created` claim for a new file is a CA BLOCK. (Fable finding 1.)
+function relativize(p, cwd) {
+  let s = String(p == null ? '' : p).replace(/\\/g, '/');
+  const c = String(cwd || '').replace(/\\/g, '/').replace(/\/+$/, '');
+  if (c && s.startsWith(c + '/')) s = s.slice(c.length + 1);
+  return s;
+}
+
 /**
  * Assemble the normalized `reality` the verifier consumes, from raw engine inputs. Pure — the Stop hook
- * passes the real diff, transcript bashEvents, a lexed symbol map, and an exclusion predicate.
+ * passes the real diff, transcript bashEvents, a lexed symbol map, an exclusion predicate, cwd (to
+ * relativize tool-ledger paths), and the set of files the agent's Write/Edit tools authored (for UC scope).
+ *
+ * `bashEvents === undefined` (no/unparseable transcript) ⇒ `commands: undefined` ⇒ verify ABSTAINS on
+ * test/build claims. An empty array means a transcript with no commands (a real "nothing ran"). This
+ * distinction is why a truthful `tests_pass` on the fail-open path is no longer a false CA. (Fable finding 3.)
  */
-export function buildReality({ diff = '', bashEvents = [], symbolsByFile = undefined, excluded = () => false } = {}) {
-  const commands = (bashEvents || [])
-    .filter(e => e && typeof e.cmd === 'string' && e.background !== true)   // background runs have no final status
-    .map(e => ({ cmd: e.cmd, ok: e.is_error === false }));                  // ok ONLY on a recorded zero exit
-  return { files: filesFromDiff(diff), commands, symbolsByFile, excluded };
+export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile = undefined, excluded = () => false, cwd = '', authored = undefined } = {}) {
+  const commands = bashEvents === undefined ? undefined : (bashEvents || [])
+    .filter(e => e && typeof e.cmd === 'string')
+    .map(e => ({
+      cmd: e.cmd,
+      ok: e.is_error === false ? true : e.is_error === true ? false : null,   // tri-state; null = unpaired ⇒ abstain
+      background: e.background === true,
+      seq: typeof e.seq === 'number' ? e.seq : 0,
+    }));
+  const rel = (p) => relativize(p, cwd);
+  const files = filesFromDiff(diff).map(f => (f.from != null ? { ...f, path: rel(f.path), from: rel(f.from) } : { ...f, path: rel(f.path) }));
+  const authoredSet = authored === undefined ? undefined : new Set((authored || []).map(rel));
+  return { files, commands, symbolsByFile, excluded, authored: authoredSet };
 }
 
 // Contract-finding severities. NC is WARN by default (deliberately conservative — a repo touched by an

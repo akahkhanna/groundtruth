@@ -195,11 +195,14 @@ ok('deferred produces no verify finding (recorded, not audited here)', verify(co
   ok('filesFromDiff: rename → R with from', (() => { const r = get('ren.mjs'); return r?.status === 'R' && r.from === 'old.mjs'; })());
 }
 ok('filesFromDiff: bare +++ b/ (tool-ledger fragment, no --- header) → A', filesFromDiff('+++ b/created.mjs\n+line').find(f => f.path === 'created.mjs')?.status === 'A');
-ok('filesFromDiff: a removed content line starting with dashes is NOT a file header', (() => {
-  // `--- x` here is a REMOVED markdown rule inside a hunk (prefix `-` + `-- x`), not an `--- a/` header.
-  const files = filesFromDiff('--- a/doc.md\n+++ b/doc.md\n@@ -1 +1 @@\n---- section\n+kept');
+ok('filesFromDiff: a content line starting with dashes inside a hunk is NOT a file header', (() => {
+  // `---- section` is a REMOVED markdown rule inside the hunk (prefix `-` + `--- section`), not a header.
+  const files = filesFromDiff('diff --git a/doc.md b/doc.md\n--- a/doc.md\n+++ b/doc.md\n@@ -1 +1 @@\n---- section\n+kept');
   return files.length === 1 && files[0].path === 'doc.md' && files[0].status === 'M';
 })());
+ok('filesFromDiff: empty new file (no hunk headers) → A', filesFromDiff('diff --git a/pkg/__init__.py b/pkg/__init__.py\nnew file mode 100644\nindex 0000000..e69de29').find(f => f.path === 'pkg/__init__.py')?.status === 'A');
+ok('filesFromDiff: binary modify (no ---/+++ ) → M', filesFromDiff('diff --git a/logo.png b/logo.png\nindex a1..b2 100644\nBinary files a/logo.png and b/logo.png differ').find(f => f.path === 'logo.png')?.status === 'M');
+ok('filesFromDiff: quoted non-ASCII path is decoded', filesFromDiff('diff --git "a/caf\\303\\251.js" "b/caf\\303\\251.js"\nnew file mode 100644\n--- /dev/null\n+++ "b/caf\\303\\251.js"\n+x').some(f => f.path === 'café.js'));
 
 // ── buildReality: bashEvents → commands, files from diff, passthrough ──
 {
@@ -216,9 +219,25 @@ ok('filesFromDiff: a removed content line starting with dashes is NOT a file hea
   ok('buildReality: files parsed from diff', r.files.length === 1 && r.files[0].path === 'a.mjs');
   ok('buildReality: green run → ok:true', r.commands.some(c => c.cmd === 'npm test' && c.ok === true));
   ok('buildReality: red run → ok:false', r.commands.some(c => c.cmd === 'npm run flaky' && c.ok === false));
-  ok('buildReality: background command dropped (no final status)', !r.commands.some(c => c.cmd === 'sleep 99'));
+  ok('buildReality: background command is CARRIED with a flag (not dropped → no false "no such command ran")', r.commands.some(c => c.cmd === 'sleep 99' && c.background === true));
   ok('buildReality: symbolsByFile + excluded passed through', r.symbolsByFile['a.mjs'][0] === 'y' && r.excluded('skip'));
 }
+// buildReality — the FP fixes (Fable findings 1/3/7)
+ok('buildReality: absolute tool-ledger path is relativized against cwd (finding 1)', (() => {
+  const r = buildReality({ diff: '+++ b//home/u/repo/src/new.mjs\n+x', cwd: '/home/u/repo' });
+  return r.files.some(f => f.path === 'src/new.mjs');
+})());
+ok('buildReality: bashEvents undefined → commands undefined (abstain, not empty) (finding 3)', buildReality({ diff: '' }).commands === undefined);
+ok('buildReality: unpaired run (is_error null) → ok null, tri-state (finding 3)', buildReality({ diff: '', bashEvents: [{ cmd: 'npm test', is_error: null }] }).commands[0].ok === null);
+ok('buildReality: authored set relativized for UC scope (finding 7)', buildReality({ diff: '', cwd: '/r', authored: ['/r/a.mjs', 'b.mjs'] }).authored.has('a.mjs'));
+// verify — the FP fixes
+ok('verify: truthful tests_pass with NO transcript (commands undefined) → abstain, never CA', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [] }).ok);
+ok('verify: tests_pass matched only by an unpaired run → abstain (not a false "exited non-zero")', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: null }] }).ok);
+ok('verify: stale green — green(seq1) then red re-run(seq2) → CA (last run wins, no laundering)', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, seq: 1 }, { cmd: 'npm test', ok: false, seq: 2 }] }), 'CA', 'last matching run'));
+ok('verify: green re-run after edits (seq2 green) → clean', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: false, seq: 1 }, { cmd: 'npm test', ok: true, seq: 2 }] }).ok);
+ok('verify: a lookalike (echo "npm test") does NOT bless tests_pass → CA no-run', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'echo "npm test would pass"', ok: true }] }), 'CA', 'no such command ran'));
+ok('verify: UC scoped to agent-authored files — an undeclared HUMAN/dirty change is NOT flagged (finding 7)', verify(contract([{ t: 'modified', file: 'a.mjs' }]), { files: [{ status: 'M', path: 'a.mjs' }, { status: 'M', path: 'human.mjs' }], authored: new Set(['a.mjs']) }).ok);
+ok('verify: UC still fires on an undeclared AGENT-authored change', has(verify(contract([{ t: 'modified', file: 'a.mjs' }]), { files: [{ status: 'M', path: 'a.mjs' }, { status: 'M', path: 'sneaky.mjs' }], authored: new Set(['a.mjs', 'sneaky.mjs']) }), 'UC', 'sneaky.mjs'));
 
 // ── contractFindings: the engine-shaped ({cls,sev,msg}) entry the Stop hook calls ──
 ok('contractFindings: no block → single NC finding', (() => {
