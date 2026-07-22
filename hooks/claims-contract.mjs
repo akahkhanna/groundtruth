@@ -245,22 +245,28 @@ const RUNNER_FILTERS = [
 const weakOnly = (cmd) => { const ts = String(cmd).split(SHELL_SEG_RE).filter(s => TEST_BUILD_RE.test(s)); return ts.length > 0 && ts.every(s => WEAK_CHECK_RE.test(s)); };
 const segFiltered = (cmd) => GENERIC_FILTER_RE.test(cmd) || RUNNER_FILTERS.some(([r, f]) => r.test(cmd) && f.test(cmd));
 
+// Token-boundary-aware "does `hay` contain the command `want`": `want` must sit on TOKEN boundaries so a
+// `npm test` claim is NOT blessed by `npm test:watch` / `npm testx` / `npm test-all` — a DIFFERENT command
+// that merely has the claim as a prefix (a false green found in the adversarial pass). A boundary is start/
+// end or any char outside [\w:.-] (so `:`/`-`/`.` bind the token: test:watch, test-all, test.js don't match).
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const containsCmd = (hay, want) => new RegExp('(?:^|[^\\w:.-])' + escapeRe(want) + '(?:[^\\w:.-]|$)').test(hay);
 function commandRun(commands, cmd) {
   const want = norm(cmd);
   return (commands || []).filter(e => {
     const raw = String(e.cmd);
     const masked = raw.replace(/"[^"]*"|'[^']*'/g, (m) => ' '.repeat(m.length));   // quotes → same-length spaces
-    // A — whole-command match: `want` appears UNQUOTED and the command is not a lookalike. Handles a COMPOUND
-    // declared cmd (`tsc && npm test`) that the segment split can't (no segment equals the whole), and an
-    // exact simple run; the lookalike + mask guards exclude `grep "…npm test…" f` and `echo "npm test"`.
-    if (norm(masked).includes(want) && !LOOKALIKE_RE.test(norm(masked))) return true;
+    // A — whole-command match: `want` appears UNQUOTED (on token boundaries) and the command is not a
+    // lookalike. Handles a COMPOUND declared cmd (`tsc && npm test`) the segment split can't, and an exact
+    // simple run; the lookalike + mask guards exclude `grep "…npm test…" f` and `echo "npm test"`.
+    if (containsCmd(norm(masked), want) && !LOOKALIKE_RE.test(norm(masked))) return true;
     // B — segment match: a simple declared cmd invoked inside a compound run whose other segments are lookalikes
     // (`echo start && npm test`) or a real invocation INSIDE quotes (`bash -c "npm test"`). Split at the UNQUOTED
     // operators (found in `masked`), then test each segment's ORIGINAL text so a quoted real run isn't erased.
     const segs = []; let start = 0, m; SPLIT_OP.lastIndex = 0;
     while ((m = SPLIT_OP.exec(masked)) !== null) { segs.push(raw.slice(start, m.index)); start = m.index + m[0].length; }
     segs.push(raw.slice(start));
-    return segs.some(seg => { const s = norm(seg); return s.includes(want) && !LOOKALIKE_RE.test(s); });
+    return segs.some(seg => { const s = norm(seg); return containsCmd(s, want) && !LOOKALIKE_RE.test(s); });
   });
 }
 
@@ -288,14 +294,21 @@ export function verify(contract, reality = {}) {
     if (c.t === 'created' || c.t === 'modified' || c.t === 'deleted') {
       claimedPaths.add(file);
       const st = byPath.get(file);
-      if (st === undefined) {
+      // A rename decomposes into (delete FROM) + (create TO): a `deleted <rename-source>` or a
+      // `created <rename-target>` claim is TRUE even though the source path isn't in byPath and the target
+      // reads as R — so accept those before calling anything absent/mislabeled. (Adversarial pass: a rename
+      // declared as delete+create was a block-tier CA "absent".)
+      const isRenameFrom = renamePairs.some(p => p.from === file);
+      const isRenameTo = renamePairs.some(p => p.to === file);
+      if (st === undefined && !isRenameFrom && !isRenameTo) {
         findings.push({ cls: 'CA', sev: SEV_CA, file, msg: `claimed ${c.t} ${file}, but it is absent from the diff` });
         continue;
       }
       // File changed, but the verb disagrees with git's status → softer mislabel signal (modified is the
       // lenient catch-all: any change status satisfies it, so it never mislabels).
-      if (c.t === 'created' && st !== 'A') findings.push({ cls: 'CA', sev: SEV_SOFT, file, status: st, msg: `claimed created ${file}, but the diff shows it ${st === 'M' ? 'modified' : st === 'D' ? 'deleted' : st}` });
-      if (c.t === 'deleted' && st !== 'D') findings.push({ cls: 'CA', sev: SEV_SOFT, file, status: st, msg: `claimed deleted ${file}, but the diff shows it ${st === 'A' ? 'added' : st === 'M' ? 'modified' : st}` });
+      const stWord = (s) => ({ A: 'added', M: 'modified', D: 'deleted', R: 'renamed' }[s] || s);
+      if (c.t === 'created' && st !== 'A' && !isRenameTo) findings.push({ cls: 'CA', sev: SEV_SOFT, file, status: st, msg: `claimed created ${file}, but the diff shows it ${stWord(st)}` });
+      if (c.t === 'deleted' && st !== 'D' && !isRenameFrom) findings.push({ cls: 'CA', sev: SEV_SOFT, file, status: st, msg: `claimed deleted ${file}, but the diff shows it ${st === undefined ? 'renamed' : stWord(st)}` });
       // Symbols — verify on CREATED only. A `created` file's symbols are all newly-added, so a lexed miss is
       // real. A `modified` file's named symbol may be a PRE-EXISTING function the agent edited (not newly
       // defined), so checking it against added-defs-only would false-CA whenever some other def was added

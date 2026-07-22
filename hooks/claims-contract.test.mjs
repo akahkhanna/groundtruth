@@ -143,6 +143,10 @@ ok('modified is the lenient catch-all: file added satisfies it (no mislabel)', (
 ok('renamed as an R pair → clean', verify(contract([{ t: 'renamed', from: 'old.mjs', to: 'new.mjs' }]), { files: [{ status: 'R', from: 'old.mjs', path: 'new.mjs' }] }).ok);
 ok('renamed rendered as D+A (below git similarity) → clean', verify(contract([{ t: 'renamed', from: 'old.mjs', to: 'new.mjs' }]), { files: [{ status: 'D', path: 'old.mjs' }, { status: 'A', path: 'new.mjs' }] }).ok);
 ok('CA: renamed unsupported by diff → block', has(verify(contract([{ t: 'renamed', from: 'old.mjs', to: 'new.mjs' }]), { files: [{ status: 'M', path: 'unrelated.mjs' }] }), 'CA', 'does not support'));
+// adversarial: a rename decomposed as delete-source + create-target is TRUE — not a block-tier "absent" CA
+ok('a rename declared as `deleted <source>` is clean (rename removes it at that path)', verify(contract([{ t: 'deleted', file: 'old.mjs' }]), { files: [{ status: 'R', from: 'old.mjs', path: 'new.mjs' }] }).ok);
+ok('a rename declared as `created <target>` is clean (rename creates it at that path)', verify(contract([{ t: 'created', file: 'new.mjs' }]), { files: [{ status: 'R', from: 'old.mjs', path: 'new.mjs' }] }).ok);
+ok('but a genuinely absent `deleted` claim STILL fires (rename acceptance is narrow)', has(verify(contract([{ t: 'deleted', file: 'ghost.mjs' }]), { files: [] }), 'CA', 'absent'));
 
 // ── CA: tests_pass / build_pass against transcript bash evidence ──
 ok('tests_pass matched to a green run → clean', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true }] }).ok);
@@ -261,6 +265,9 @@ ok('verify: `echo "run npm test to verify"` alone does NOT bless tests_pass → 
 ok('verify: a claim cmd WITH quotes, run exactly, matches — `pytest -k "not slow"`', verify(contract([{ t: 'tests_pass', cmd: 'pytest -k "not slow"' }]), { files: [], commands: [{ cmd: 'pytest -k "not slow"', ok: true }] }).ok);
 ok('verify: a quoted wrapper run — `bash -c "npm test"` (green) — matches an `npm test` claim', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'timeout 60 bash -c "npm test"', ok: true }] }).ok);
 ok('verify: `sh -c \'npm test\'` (green) matches an npm test claim', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: "sh -c 'npm test'", ok: true }] }).ok);
+// adversarial: a DIFFERENT command that merely has the claim as a token PREFIX must NOT bless (false green)
+ok('verify: `npm test` claim is NOT blessed by running `npm test:watch` (token boundary, not substring)', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test:watch', ok: true }] }), 'CA', 'no such command ran'));
+ok('verify: `npm test` claim is NOT blessed by `npm testx` / `npm test-all`', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm testx', ok: true }, { cmd: 'npm test-all', ok: true }] }), 'CA', 'no such command ran'));
 // ── Stage 3: the 4 ported tests_pass sensors (green-run refinements, warn/info, abstain when input absent) ──
 ok('sensor only-weak: tests_pass cmd `tsc` (green) → warn (a type check is not a test run)', has(verify(contract([{ t: 'tests_pass', cmd: 'tsc' }]), { files: [], commands: [{ cmd: 'tsc', ok: true }] }), 'CA', 'syntax/type check'));
 ok('sensor only-weak abstains: `tsc && npm test` has a real test → NOT weak', verify(contract([{ t: 'tests_pass', cmd: 'tsc && npm test' }]), { files: [], commands: [{ cmd: 'tsc && npm test', ok: true }] }).ok);

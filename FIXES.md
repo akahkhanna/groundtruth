@@ -470,3 +470,12 @@ Contract self-check **88 → 118**; red-team **20 → 22**; engine `analyze()` s
 - **Silent coverage loss (new in 3b prune):** `lastCodeEditSeq` (the stale anchor, with the four v1 mutation gates) and the re-gated "only files changed are tests" finding had ZERO tests after the prune — including the absolute-path case that pins the "stale-green silently inert in production" cardinal-sin bug. Direct tests added for all four gates + the absolute-path relativization, and a fire/abstain pair for the re-gated finding.
 
 Engine self-check **440**; contract **132**; red-team **22/22**.
+
+### C-6 · Adversarial pass (self-run): two real defects the six review rounds missed
+- **False green — `commandRun` substring match (new in the Phase-A quote fix):** a `tests_pass:{cmd:"npm test"}` claim was blessed by running a DIFFERENT command that merely had the claim as a token prefix — `npm test:watch`, `npm testx`, `npm test-all`. Fixed with a token-boundary-aware match (`want` must sit on `[^\w:.-]` boundaries), so `:`/`-`/`.` bind the token; honest forms (`npm test --coverage`, `bash -c "npm test"`, `echo x && npm test`, `cd f; npm test`) still match.
+- **False positive — block-tier CA on a rename declared as delete+create:** an agent that renamed `o.js → n.js` and declared it as `{deleted o.js}` + `{created n.js}` (a valid decomposition) got a block-tier `CA "claimed deleted o.js, but it is absent from the diff"` — the rename SOURCE path isn't in the diff's byPath map. Fixed: a `deleted <rename-source>` / `created <rename-target>` claim is accepted; a genuinely-absent delete still fires. Verified end-to-end through the real Stop hook (honest rename → clean green).
+- Polish: the created/deleted status-mismatch message now says "renamed" instead of a raw "R".
+
+Known, documented residuals (warn-tier, not blockers): stale-green's normalized-set mutation diff misses a pure LINE REORDER and a non-`CODE_EXT_RE` edit (Makefile/.env) — FN direction, warn-tier; a `groundtruth-claims` block shown as an EXAMPLE in prose (inside an outer fence) is parsed as the real contract if it is the LAST block — narrow, and an honest turn's real block is always last.
+
+Contract self-check **132 → 137**; engine **440**; red-team **22/22**.
