@@ -248,6 +248,18 @@ ok('buildReality: an absolute authored create is relativized against cwd and add
 ok('buildReality: bashEvents undefined → commands undefined (abstain, not empty) (finding 3)', buildReality({ diff: '' }).commands === undefined);
 ok('buildReality: unpaired run (is_error null) → ok null, tri-state (finding 3)', buildReality({ diff: '', bashEvents: [{ cmd: 'npm test', is_error: null }] }).commands[0].ok === null);
 ok('buildReality: authored set relativized for UC scope (finding 7)', buildReality({ diff: '', cwd: '/r', authored: ['/r/a.mjs', 'b.mjs'] }).authored.has('a.mjs'));
+// C-8 (Fable adv FP-5/FN-5/FP-8): the synthetic `A` is DISK-PRESENCE gated on the untracked set, not the ledger.
+ok('buildReality: with untracked given, an edit-then-REVERT (authored, NOT untracked) mints NO phantom A', (() => {
+  const r = buildReality({ diff: '', cwd: '/r', authored: ['/r/src/app.js'], untracked: [] });
+  return !r.files.some(f => f.path === 'src/app.js');   // net-zero diff + not untracked → nothing changed
+})());
+ok('buildReality: a Write-then-rm file (authored, NOT untracked) mints NO A (created claim will CA)', !buildReality({ diff: '', cwd: '/r', authored: ['/r/ghost.md'], untracked: [] }).files.some(f => f.path === 'ghost.md'));
+ok('buildReality: a heredoc create (untracked-present, NOT in ledger) IS surfaced as A', buildReality({ diff: '', cwd: '/r', authored: [], untracked: ['tools/gen.py'] }).files.some(f => f.path === 'tools/gen.py' && f.status === 'A'));
+ok('buildReality: with untracked UNKNOWN (no-git fallback) the ledger mint still applies', buildReality({ diff: '', cwd: '/r', authored: ['/r/src/new.mjs'] }).files.some(f => f.path === 'src/new.mjs' && f.status === 'A'));
+ok('verify: honest no_change after edit-then-revert (untracked:[]) → clean (FP-5)', verify(contract([{ t: 'no_change' }]), buildReality({ diff: '', cwd: '/r', authored: ['/r/src/app.js'], untracked: [] })).ok);
+ok('verify: Write-then-rm `created ghost.md` (untracked:[]) → CA, not blessed (FN-5)', has(verify(contract([{ t: 'created', file: 'ghost.md' }]), buildReality({ diff: '', cwd: '/r', authored: ['/r/ghost.md'], untracked: [] })), 'CA', 'absent from the diff'));
+ok('verify: honest heredoc `created tools/gen.py` (untracked-present) → clean (FP-8)', verify(contract([{ t: 'created', file: 'tools/gen.py' }]), buildReality({ diff: '', cwd: '/r', authored: [], untracked: ['tools/gen.py'] })).ok);
+ok('verify: an UNDECLARED authored untracked create still fires UC (no regression)', has(verify(contract([{ t: 'no_change' }]), buildReality({ diff: '', cwd: '/r', authored: ['/r/src/sneaky.js'], untracked: ['src/sneaky.js'] })), 'UC', 'undeclared change'));
 // verify — the FP fixes
 ok('verify: truthful tests_pass with NO transcript (commands undefined) → abstain, never CA', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [] }).ok);
 ok('verify: tests_pass matched only by an unpaired run → abstain (not a false "exited non-zero")', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: null }] }).ok);
@@ -261,6 +273,16 @@ ok('verify: `grep "lint && npm test" f` (exit 1) does NOT false-CA an honest tes
   return r.ok;   // the real green npm test stands; the grep's quoted mention is masked out, not counted as a red run
 })());
 ok('verify: `echo "run npm test to verify"` alone does NOT bless tests_pass → CA no-run (round 3, Issue 1 mirror)', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'echo "run npm test to verify"', ok: true }] }), 'CA', 'no such command ran'));
+// C-8 (Fable adv FP-10): a tests_pass backed ONLY by a filtered SIDECHAIN (Task subagent) run → ABSTAIN, not block.
+ok('verify: tests_pass with the matching run only in a sidechain → abstain (no CA block)', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [], sidechainCmds: ['npm test'] }).ok);
+ok('verify: sidechain abstain is cmd-specific — a DIFFERENT sidechain cmd does NOT rescue → CA', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [], sidechainCmds: ['npm run lint'] }), 'CA', 'no such command ran'));
+ok('verify: genuinely nothing ran (no main, no sidechain) → CA block stands', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [], sidechainCmds: [] }), 'CA', 'no such command ran'));
+// C-8 (Fable adv FN-2): a green whose exit was FORCE-succeeded (`|| true` / `; true`) is a manufactured pass → warn.
+ok('sensor swallowed-exit: `npm test >/dev/null 2>&1 || true` (green) → warn (exit force-succeeded)', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test >/dev/null 2>&1 || true', ok: true }] }), 'CA', 'force-succeeded'));
+ok('sensor swallowed-exit: `npm test || :` → warn', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test || :', ok: true }] }), 'CA', 'force-succeeded'));
+ok('sensor swallowed-exit ABSTAINS on a legit `|| <retry>` fallback (not a forcer)', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test || npm run test:retry', ok: true }] }).ok);
+ok('sensor swallowed-exit ABSTAINS on `|| exit 1` (propagates failure, not masked)', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test || exit 1', ok: true }] }).ok);
+ok('sensor swallowed-exit ABSTAINS on a plain redirect (exit still real)', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test >/dev/null 2>&1', ok: true }] }).ok);
 // round-3-verify: masking must NOT erase a REAL invocation inside quotes (that was a false CA block)
 ok('verify: a claim cmd WITH quotes, run exactly, matches — `pytest -k "not slow"`', verify(contract([{ t: 'tests_pass', cmd: 'pytest -k "not slow"' }]), { files: [], commands: [{ cmd: 'pytest -k "not slow"', ok: true }] }).ok);
 ok('verify: a quoted wrapper run — `bash -c "npm test"` (green) — matches an `npm test` claim', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'timeout 60 bash -c "npm test"', ok: true }] }).ok);
@@ -338,6 +360,17 @@ ok('contractFindings: valid contract, clean reality → no findings', contractFi
   const map = addedSymbolsByFile('--- /dev/null\n+++ b/a.mjs\n+export function foo(){}\n+const bar = 1\n+++ b/b.mjs\n+export function baz(){}');
   ok('addedSymbolsByFile: binds symbols to the file that added them', (map['a.mjs'] || []).includes('foo') && (map['b.mjs'] || []).includes('baz'));
   ok('addedSymbolsByFile: does not leak a symbol across files', !(map['b.mjs'] || []).includes('foo'));
+  // C-8 (Fable adv FP-6): NON-function declarations register too (class/enum/interface/type/const), so a
+  // `created` file's `symbols:["UserModel"]` claim isn't falsely flagged "not defined" when only its methods lex.
+  const cm = addedSymbolsByFile('--- /dev/null\n+++ b/models.js\n+export class UserModel {\n+  save(d){ return d; }\n+}\n+export const CONFIG = { port: 3000 }');
+  ok('addedSymbolsByFile: a class NAME registers (not only its methods)', (cm['models.js'] || []).includes('UserModel') && (cm['models.js'] || []).includes('save'));
+  ok('addedSymbolsByFile: a const-object NAME registers', (cm['models.js'] || []).includes('CONFIG'));
+  const py = addedSymbolsByFile('--- /dev/null\n+++ b/conf.py\n+class Config:\n+    DEBUG = True');
+  ok('addedSymbolsByFile: python class registers', (py['conf.py'] || []).includes('Config'));
+  const rs = addedSymbolsByFile('--- /dev/null\n+++ b/lib.rs\n+pub struct User { id: u32 }\n+pub enum State { On }');
+  ok('addedSymbolsByFile: rust struct/enum register', (rs['lib.rs'] || []).includes('User') && (rs['lib.rs'] || []).includes('State'));
+  // end-to-end: the honest class-symbol claim is CLEAN
+  ok('verify: created class file, symbols:["UserModel"] → clean (FP-6)', verify(contract([{ t: 'created', file: 'models.js', symbols: ['UserModel'] }]), { files: [{ status: 'A', path: 'models.js' }], symbolsByFile: cm }).ok);
 }
 
 console.log(`\n${pass} checks passed.`);

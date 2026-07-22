@@ -212,6 +212,20 @@ ok('claimsSuccess: plain claim true; hedged/negated false; quoted false',
     ok('paired run text is DECODED (real newline present, not the 2 chars backslash-n)', bt.includes('\n') && !bt.includes('\\n'));
     ok('a line-START runner banner is reachable in the decoded text (production sensor can match it)', /(?:^|\n)FAILED\b/.test(bt));
   }
+  // C-8 (Fable adv FP-10): a FILTERED sidechain's Bash commands are surfaced separately (for the contract's
+  // abstain gate) while staying OUT of the main bashEvents/asks.
+  {
+    const S = [
+      JSON.stringify({ type: 'assistant', isSidechain: true, message: { content: [{ type: 'tool_use', id: 's1', name: 'Bash', input: { command: 'npm test' } }] } }),
+      JSON.stringify({ type: 'user', isSidechain: true, message: { content: [{ type: 'tool_result', tool_use_id: 's1', is_error: false, content: [{ type: 'text', text: '627 passing' }] }] } }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'm1', name: 'Bash', input: { command: 'git status' } }] } }),
+    ].join('\n');
+    const ps = parseTranscript(S);
+    ok('sidechainCmds captures the subagent Bash cmd; it stays OUT of the main bashEvents',
+      ps.sidechainCmds.includes('npm test') && !ps.bashEvents.some(e => e.cmd === 'npm test') && ps.bashEvents.some(e => e.cmd === 'git status'));
+    ok('with includeSidechain (SubagentStop path), sidechainCmds is empty (evidence folds into the main run)',
+      parseTranscript(S, { includeSidechain: true }).sidechainCmds.length === 0);
+  }
   // (v1 class-1 stale-green/exit-attribution end-to-end assertions on this transcript retired with class-1;
   // the stale-green sensor now lives in the contract — see claims-contract.test.mjs.)
   ok('transcript WITHOUT ids (predates v1.1.0 / foreign harness): events stay UNPAIRED (is_error:null) → checks abstain',

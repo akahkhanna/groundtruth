@@ -1229,9 +1229,10 @@ function renderAudit(findings) {
  * mutations = ordered Edit/Write/MultiEdit {path, seq, text(changed lines)}.
  */
 export function parseTranscript(jsonlText, { includeSidechain = false } = {}) {
-  const entries = (jsonlText || '').split('\n')
+  const allEntries = (jsonlText || '').split('\n')
     .map(s => { try { return JSON.parse(s); } catch { return null; } })
-    .filter(Boolean)
+    .filter(Boolean);
+  const entries = allEntries
     // Default OFF: on the MAIN transcript a sidechain entry is a subagent's — its "user" turns are the
     // orchestrator's task prompts, not human asks, and letting them into `asks` mints phantom deliverables.
     // But at SubagentStop the payload's transcript_path is the subagent's OWN file, where EVERY entry is
@@ -1239,6 +1240,19 @@ export function parseTranscript(jsonlText, { includeSidechain = false } = {}) {
     // payload field), so every honest test-running subagent hit `!ran` ("no test/build command ran"): a
     // structural FP, v1.1.1. That one caller opts in; every other caller keeps the filter.
     .filter(e => includeSidechain || e.isSidechain !== true);
+  // Bash commands the FILTERED sidechains ran (a Task subagent's, harness-recorded and unfakeable). We don't
+  // fold them into the main evidence (they're a delegated run, and the orchestrator's own path can't see their
+  // output), but the contract uses them to ABSTAIN rather than block: an orchestrator declaring `tests_pass`
+  // after a subagent genuinely ran the tests should not get a block-tier CA "no such command ran". (Fable adv FP-10.)
+  const sidechainCmds = [];
+  if (!includeSidechain) {
+    for (const e of allEntries) {
+      if (e.isSidechain !== true) continue;
+      const content = e.message?.content;
+      if (!Array.isArray(content)) continue;
+      for (const b of content) if (b?.type === 'tool_use' && b.name === 'Bash' && typeof b.input?.command === 'string') sidechainCmds.push(b.input.command);
+    }
+  }
 
   const textOf = (content) => {
     if (typeof content === 'string') return content;
@@ -1371,7 +1385,7 @@ export function parseTranscript(jsonlText, { includeSidechain = false } = {}) {
       }
     }
   }
-  return { intent, asks, commandsInvoked, commandInvocations, bashCmds, mcpCmds, results, bashEvents, mutations, bgPending: bgLaunched > bgDone, toolDiff: toolDiffParts.join('\n'), mcpSql: mcpSqlParts.join('\n') };
+  return { intent, asks, commandsInvoked, commandInvocations, bashCmds, mcpCmds, results, bashEvents, mutations, sidechainCmds, bgPending: bgLaunched > bgDone, toolDiff: toolDiffParts.join('\n'), mcpSql: mcpSqlParts.join('\n') };
 }
 
 /**
@@ -1896,7 +1910,7 @@ export function renderCorrective(blockFindings, attempts, cap = 2) {
 const UNTRACKED_SCAN_CAP = 64 * 1024 * 1024;      // per file
 const UNTRACKED_TOTAL_CAP = 128 * 1024 * 1024;    // across all untracked files. Budget is checked BEFORE a read, so one file overshoots; the printable transform (`+`-prefix per line) can ~2× a file, so worst-case content ≈ total + 2×per-file = 128 + 2×64 = 256 MB — still safely < Node's ~512 MB string cap.
 export function untrackedAdded(cwd, skip = new Set(), perFileCap = UNTRACKED_SCAN_CAP, totalCap = UNTRACKED_TOTAL_CAP) {
-  let content = ''; const oversized = [];
+  let content = ''; const oversized = []; const paths = [];
   try {
     // maxBuffer: execSync defaults to 1 MiB stdout; a repo with >1 MiB of untracked FILENAMES would throw into
     // the outer catch and silently skip the WHOLE untracked scan (a coverage hole). 256 MiB covers any real tree.
@@ -1909,6 +1923,10 @@ export function untrackedAdded(cwd, skip = new Set(), perFileCap = UNTRACKED_SCA
       // secret-SCANNED nor surfaced as `oversized`. Before this, an oversized tmp/ file (dropped from `content`)
       // still leaked its `oversized` entry into findings and fired the "too large to scan" warn every turn.
       if (skip.has(f) || excludedScanPath(f)) continue;
+      // Record the untracked PATH regardless of read outcome (binary / oversized / unreadable still EXIST on
+      // disk) — the contract's `created`-claim check gates its synthetic `A` on disk presence via this set, so
+      // it must be complete, not limited to files whose content we scanned. (Fable adversarial FP-5/FN-5/FP-8.)
+      paths.push(f);
       // Total budget spent → surface the rest WITHOUT reading (bounds consumer memory/time; never silent).
       if (content.length >= totalCap) { let sz = 0; try { sz = statSync(join(cwd, f)).size; } catch {} oversized.push(`${f}${sz ? ` (${sz} bytes)` : ''} — scan budget exhausted, review manually`); continue; }
       // Bounded partial read (open+read up to the cap) instead of readFileSync-the-whole-file: caps memory to
@@ -1933,7 +1951,7 @@ export function untrackedAdded(cwd, skip = new Set(), perFileCap = UNTRACKED_SCA
       if (size > off) oversized.push(`${f} (${size} bytes) — only the first ${Math.floor(perFileCap / (1024 * 1024))} MB scanned, review the remainder`);   // truncated at the per-file cap → surfaced, never silently trusted
     }
   } catch { /* no git → skip */ }
-  return { content, oversized };
+  return { content, oversized, paths };
 }
 
 // ── main: only when run directly, not when imported by the test ──
@@ -2427,6 +2445,13 @@ function main() {
         authored: (parsed.mutations || []).map(m => m.path),
         // the "last source edit" seq for the stale-green sensor (computed with the code-only/relativized gates).
         lastEditSeq: lastCodeEditSeq(parsed.mutations || [], cwd),
+        // DISK-PRESENCE gate for the synthetic-`A` mint: the untracked (`??`) path set. Distinguishes a real
+        // new file (untracked-present) from an edit-then-revert (tracked, gone from the diff) and a Write-then-
+        // rm (absent), so a `created` claim verifies against what's actually on disk. (Fable adv FP-5/FN-5/FP-8.)
+        untracked: ut.paths,
+        // commands the filtered SIDECHAINS ran → a tests_pass claim backed only by a subagent's run ABSTAINS
+        // (not a block-tier "no such command ran"). (Fable adv FP-10.)
+        sidechainCmds: parsed.sidechainCmds,
       });
       findings.push(...contractFindings(payload.last_assistant_message || '', reality));
     } catch { /* fail-open — v1 verdict stands */ }

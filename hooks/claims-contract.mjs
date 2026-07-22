@@ -258,6 +258,11 @@ const TEST_FAIL_RE = /\b[1-9]\d*\s+(?:failing|failed|failures?)\b|\b[1-9]\d*\s+t
 // "FAILED to connect (now fixed)" or an app log "request FAILED (expected)" echoed in green output must NOT
 // fire. Requires the decoded (real-newline) run text from parseTranscript. (Fable adversarial FP-7.)
 const TEST_FAIL_BANNER_RE = /(?:^|\n)FAIL(?:ED)?\b/;
+// A trailing success-FORCER that masks the real exit of the command before it: `npm test || true`, `… || :`,
+// `… || exit 0`, `… ; true`. The run then reports ok:true no matter how the tests actually exited, so a green
+// on such a command doesn't confirm a pass. (A `|| <real retry cmd>` is a legit fallback and is NOT matched —
+// only the unconditional force-success forms.) (Fable adversarial FN-2.)
+const SWALLOW_RE = /\|\|\s*(?:true|:|exit\s+0|return\s+0)\s*(?:$|[;&|])|;\s*(?:true|:)\s*$/;
 const GENERIC_FILTER_RE = /\s(?:--grep|--test-?name-?patterns?)(?:[= ]\S|$)/i;
 const RUNNER_FILTERS = [
   [/\bpytest\b|\btox\b/, /\s-k[= ]\S/], [/\bgo test\b/, /\s-run[= ]\S/], [/\bjest\b|\bvitest\b/, /\s-t[= ]\S/],
@@ -365,7 +370,14 @@ export function verify(contract, reality = {}) {
     } else if (c.t === 'tests_pass' || c.t === 'build_pass') {
       if (reality.commands === undefined) continue;          // no transcript → abstain (never a false CA)
       const runs = commandRun(reality.commands, c.cmd);
-      if (runs.length === 0) { findings.push({ cls: 'CA', sev: SEV_CA, cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but no such command ran this session` }); continue; }
+      if (runs.length === 0) {
+        // A matching run in a FILTERED sidechain (a Task subagent's, harness-recorded) means the command DID
+        // run this turn — just where the main path can't read its result. Neither bless it (we can't see the
+        // outcome) nor block it (an honest orchestrator that delegated the run isn't lying): ABSTAIN. (FP-10.)
+        const sc = Array.isArray(reality.sidechainCmds) ? reality.sidechainCmds.map(cmd => ({ cmd, ok: null })) : [];
+        if (sc.length && commandRun(sc, c.cmd).length > 0) continue;
+        findings.push({ cls: 'CA', sev: SEV_CA, cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but no such command ran this session` }); continue;
+      }
       const completed = runs.filter(r => r.ok !== null);    // ok===null = unpaired/in-flight → no verdict
       if (completed.length === 0) continue;                  // matched only unpaired runs → abstain, don't call it a failure
       // Order-aware: the LAST completed matching run is the verdict — a green re-run after edits counts,
@@ -384,7 +396,9 @@ export function verify(contract, reality = {}) {
       // possible later full/fresh run. v1 gated the SESSION this way; `!last.background` alone was dead code
       // (buildReality maps background → ok:null, so `last` is never background). (Fable final review, Issue 1.)
       const ambiguousRun = runs.some(r => r.background || r.ok === null);
-      if (c.t === 'tests_pass' && weakOnly(c.cmd))
+      if (SWALLOW_RE.test(last.cmd))
+        findings.push({ cls: 'CA', sev: 'warn', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but the run's exit was force-succeeded (\`|| true\` / \`; true\`) — a zero exit there is manufactured, not a real pass` });
+      else if (c.t === 'tests_pass' && weakOnly(c.cmd))
         findings.push({ cls: 'CA', sev: 'warn', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but that is a syntax/type check, not a test run — verify in the runtime that ships` });
       else if (last.text && (TEST_FAIL_RE.test(last.text) || TEST_FAIL_BANNER_RE.test(last.text)))
         findings.push({ cls: 'CA', sev: 'warn', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but its output reports failures despite a zero exit — a runner that prints failures and still exits 0 is not a pass` });
@@ -539,7 +553,7 @@ function relativize(p, cwd) {
  * test/build claims. An empty array means a transcript with no commands (a real "nothing ran"). This
  * distinction is why a truthful `tests_pass` on the fail-open path is no longer a false CA. (Fable finding 3.)
  */
-export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile = undefined, excluded = () => false, cwd = '', authored = undefined, lastEditSeq = undefined } = {}) {
+export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile = undefined, excluded = () => false, cwd = '', authored = undefined, lastEditSeq = undefined, untracked = undefined, sidechainCmds = undefined } = {}) {
   const commands = bashEvents === undefined ? undefined : (bashEvents || [])
     .filter(e => e && typeof e.cmd === 'string')
     .map(e => ({
@@ -558,12 +572,23 @@ export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile 
   // AUTHORITATIVE ledger — NOT by parsing `+++ b/` fragments out of the diff, whose paths are agent-controllable
   // content a planted `++ b/ghost.js` line could forge to launder a false `created` claim. (Fable round 3, Issue 2.)
   const files = [...gitFiles];
-  if (authoredSet) {
-    const seen = new Set();
-    for (const f of gitFiles) { seen.add(f.path); if (f.from != null) seen.add(f.from); }   // a rename's OLD path too, so an authored edit-then-`git mv` doesn't re-add a phantom A
+  const seen = new Set();
+  for (const f of gitFiles) { seen.add(f.path); if (f.from != null) seen.add(f.from); }   // a rename's OLD path too, so an authored edit-then-`git mv` doesn't re-add a phantom A
+  // Synthetic `A` for a NEW file `git diff <ref>` misses because it's UNTRACKED. The authoritative signal is
+  // DISK PRESENCE — the untracked set (git `??` entries). Gating on it kills three defects the old ledger-only
+  // mint caused: an edit-then-REVERT (tracked, no net diff → not untracked → no phantom A, so `no_change` is
+  // clean — FP-5); a Write-then-`rm` (gone → not untracked → a `created` claim correctly finds nothing — FN-5);
+  // and a heredoc/scaffolder create (untracked-present but NOT in the Write/Edit ledger → now surfaced, so an
+  // honest `created` claim doesn't block — FP-8). When `untracked` is unknown (unit tests / no-git fail-open),
+  // fall back to the ledger mint so `created` claims still verify off-transcript. UC stays authored-scoped, so
+  // a non-ledger untracked file surfaced here never becomes a false UC.
+  const untrackedSet = untracked === undefined ? undefined : new Set((untracked || []).map(rel));
+  if (untrackedSet) {
+    for (const p of untrackedSet) if (p && !seen.has(p)) { files.push({ status: 'A', path: p }); seen.add(p); }
+  } else if (authoredSet) {
     for (const p of authoredSet) if (p && !seen.has(p)) files.push({ status: 'A', path: p });
   }
-  return { files, commands, symbolsByFile, excluded, authored: authoredSet, lastEditSeq };
+  return { files, commands, symbolsByFile, excluded, authored: authoredSet, lastEditSeq, sidechainCmds };
 }
 
 // Contract-finding severities. NC is WARN by default (deliberately conservative — a repo touched by an

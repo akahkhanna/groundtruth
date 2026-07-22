@@ -219,6 +219,28 @@ try {
     [userln('bump + add'), writeln(join(repo, 'real.js'), 'export const v = 9;\n'), writeln(join(repo, 'honest.js'), 'export const ok = 1;\n')]);
   check('contract: honest declaration of a tracked edit + a new untracked file is CLEAN (no CA block)', !CONTRACT_HIT.test(k7b), k7b.slice(0, 300));
   kreset();
+
+  // K8 — HOSTILE gitconfig (diff.mnemonicPrefix): the user's config makes `git diff` emit `c/ w/` instead of
+  // `a/ b/`. An honest tracked edit + honest `modified` claim must stay CLEAN — the hook forces the canonical
+  // prefixes on its own diff, so the config can't turn every file claim into a block-tier CA. (Fable adv FP-3.)
+  git(['config', 'diff.mnemonicPrefix', 'true']); git(['config', 'diff.noprefix', 'true']);
+  writeFileSync(join(repo, 'real.js'), 'export const v = 10;\n');
+  const k8 = driveClean('k8', 'Done.\n' + kblock({ v: 1, task: 'x', status: 'complete', claims: [{ t: 'modified', file: 'real.js' }] }),
+    [userln('bump real.js'), writeln(join(repo, 'real.js'), 'export const v = 10;\n')]);
+  check('contract: an honest modified claim under diff.mnemonicPrefix=true is CLEAN (no CA block)', !CONTRACT_HIT.test(k8), k8.slice(0, 300));
+  git(['config', '--unset', 'diff.mnemonicPrefix']); git(['config', '--unset', 'diff.noprefix']);
+  kreset();
+
+  // K9 — a file CREATED via the BASH channel (heredoc/scaffolder): untracked-present on disk but NOT in the
+  // Write/Edit ledger. An honest `created` claim must be CLEAN (verified against disk presence), not a block-
+  // tier CA "absent from the diff". (Fable adv FP-8.)
+  const bashln = (cmd) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: cmd } }] } });
+  writeFileSync(join(repo, 'gen.py'), 'print(1)\n');   // exists on disk, untracked, never git-added
+  const k9 = driveClean('k9', 'Done.\n' + kblock({ v: 1, task: 'x', status: 'complete', claims: [{ t: 'created', file: 'gen.py' }] }),
+    [userln('scaffold gen.py'), bashln("cat > gen.py <<'EOF'\nprint(1)\nEOF")]);
+  check('contract: an honest bash-heredoc `created` claim (untracked, not in ledger) is CLEAN (no CA block)', !CONTRACT_HIT.test(k9), k9.slice(0, 300));
+  kreset();
+
   delete process.env.GROUNDTRUTH_CONTRACT;
 } finally { rmSync(repo, { recursive: true, force: true }); }
 

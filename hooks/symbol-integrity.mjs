@@ -111,6 +111,36 @@ function defsOn(code, fam) {
   return out;
 }
 
+// NON-FUNCTION declaration names (class / enum / interface / type / struct / trait / const-object). Used ONLY
+// by addedSymbolsByFile (the contract's `created`-symbol check) — NOT by Class-6's DEF_RES, whose function-only
+// semantics the dangling-ref check depends on. Broadening the "defined" set here can only make the symbol check
+// MORE lenient (fewer false CAs), which is the abstain-favoring direction: a `created` file declaring
+// `export class UserModel {…}` and claiming `symbols:["UserModel"]` was falsely flagged "not defined in the
+// added code" because the lexer only saw the class's METHODS. (Fable adversarial FP-6.)
+const DECL_RES = {
+  js: [
+    /^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/,
+    /^\s*(?:export\s+)?(?:const\s+)?enum\s+([A-Za-z_$][\w$]*)/,
+    /^\s*(?:export\s+)?interface\s+([A-Za-z_$][\w$]*)/,
+    /^\s*(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*[=<]/,
+    /^\s*(?:export\s+)?(?:default\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)/,   // any value (CONFIG object, model)
+  ],
+  py:  [/^\s*class\s+([A-Za-z_]\w*)/, /^([A-Za-z_]\w*)\s*(?::[^=]+)?=/],           // class + module-level (col-0) binding
+  go:  [/^\s*type\s+([A-Za-z_]\w*)/, /^\s*(?:var|const)\s+([A-Za-z_]\w*)/],
+  rs:  [/^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait|type|const|static|mod|union)\s+([A-Za-z_]\w*)/],
+  rb:  [/^\s*(?:class|module)\s+([A-Za-z_]\w*)/, /^\s*([A-Z]\w*)\s*=/],
+  jvm: [/\b(?:class|interface|enum|struct|object|trait|protocol|record)\s+([A-Za-z_]\w*)/],
+};
+function declsOn(code, fam) {
+  const c = blankStrings(code);
+  const out = [];
+  for (const re of (DECL_RES[fam] || [])) {
+    const m = c.match(re);
+    if (m && m[1] && !KW.has(m[1].toLowerCase())) out.push(m[1]);
+  }
+  return out;
+}
+
 /**
  * Walk a unified diff → { removed: Map<name,{file}>, added: Set<name> }. Removed defs are keyed off the
  * OLD-file header `--- a/…` (NOT `+++ b/…`), because the primary case — "3 classes → 1" — DELETES files,
@@ -170,6 +200,7 @@ export function addedSymbolsByFile(diff) {
     const st = (addState[newFile] ||= { block: false, fence: false });
     const { code } = splitCodeComment(line.slice(1), extOf(newFile), st);
     for (const name of defsOn(code, fam)) (byFile[newFile] ||= []).push(name);
+    for (const name of declsOn(code, fam)) (byFile[newFile] ||= []).push(name);   // class/enum/type/const (FP-6)
   }
   for (const f of Object.keys(byFile)) byFile[f] = [...new Set(byFile[f])];
   return byFile;
