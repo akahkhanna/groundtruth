@@ -1,20 +1,19 @@
 <h1 align="center">Groundtruth</h1>
 
 <p align="center">
-  <strong>Every other tool tries to make your AI agent do the work right.<br>
-  Groundtruth assumes it won't — and catches the moment &ldquo;done&rdquo; doesn't match the diff.</strong>
+  <strong>Your agent signs its work. Groundtruth notarises it.</strong>
 </p>
 
 <p align="center">
-  No workflow to adopt. No LLM reviewer to argue out of a verdict.<br>
-  Just your agent's claim, checked against the <code>git diff</code>, deterministically.
+  Every code-changing turn ends with a short manifest of what the agent claims it did.<br>
+  Groundtruth checks that manifest against the real <code>git diff</code>, deterministically — line by line.
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/deterministic-no%20LLM%20%C2%B7%20no%20network%20%C2%B7%20no%20API%20key-111111?style=flat-square" alt="Deterministic: no LLM, no network, no API key">
   <img src="https://img.shields.io/badge/runs%20on-Claude%20Code-111111?style=flat-square" alt="Runs on Claude Code">
   <img src="https://img.shields.io/github/v/release/akahkhanna/groundtruth?style=flat-square&color=111111&label=release" alt="Release">
-  <img src="https://img.shields.io/badge/self--checks-509%20%C2%B7%20red--team%2014%2F14-111111?style=flat-square" alt="509 self-checks, red-team 14/14">
+  <img src="https://img.shields.io/badge/self--checks-445%20%2B%20177%20%C2%B7%20red--team%2025%2F25-111111?style=flat-square" alt="622 self-checks (445 engine + 177 contract), red-team 25/25">
   <img src="https://img.shields.io/badge/license-MIT-111111?style=flat-square" alt="MIT license">
 </p>
 
@@ -22,49 +21,113 @@
   <img src="assets/groundtruth-nerd.svg" alt="Groundtruth pushes his reading glasses down and opens the diff." width="480">
 </p>
 
-A **Claude Code plugin** that catches the false &ldquo;Done.&rdquo; Your agent reports success; Groundtruth reads the *same* turn from the outside — the request, what the agent claimed, the real `git diff`, and your project's rules — and renders a one-screen verdict before the turn can end.
+A **Claude Code plugin** that catches the false &ldquo;Done.&rdquo; Your agent finishes a turn and declares what it did; Groundtruth reads the declaration and the reality — the real `git diff`, the harness's own record of what actually ran — and renders a one-screen verdict before the turn can end.
 
 It doesn't change how you work and it doesn't ask another model to grade the code. It's a **deterministic local hook: no model calls, no network, no API key.** Nothing reads the work, so nothing can be talked out of the verdict.
 
 > **&ldquo;Isn't this like the pipeline / multi-agent-review tools?&rdquo;** No. Those make your agent follow a process, and lean on LLM reviewers that can be reasoned out of a call. Groundtruth touches neither — it treats &ldquo;done&rdquo; as a claim and the diff as the evidence. One is a process you adopt; this is a truth-check you bolt on.
 
+## The idea: stop parsing English, start auditing paperwork
+
+v1 of this tool read the agent's closing essay and *guessed* what it had promised, then checked the guess against the code. Guessing from free prose is an unbounded problem — you cannot enumerate a natural language with patterns, so every fix just moved the failure to the next phrasing.
+
+**v2 inverts it.** The agent ends every code-changing turn with one small, fixed **claims block** — a manifest, in a grammar Groundtruth wrote. Then two bounded checks: everything on the manifest must exist in reality, and everything in reality must be on the manifest. Lying on the form is mechanically detectable; refusing to fill in the form is itself the finding. You stop parsing an infinite language and start **validating a grammar you wrote.**
+
+We call the engine **declare-then-verify**, and the two directions of the check form a **pincer** — more on that below.
+
+## The claims block
+
+One fenced block, JSON — so `JSON.parse` is the whole parser:
+
+````
+```groundtruth-claims
+{
+  "v": 1,
+  "task": "add auth middleware and wire it into the router",
+  "status": "complete",
+  "claims": [
+    { "t": "created",  "file": "src/auth.mjs", "symbols": ["requireAuth"] },
+    { "t": "modified", "file": "src/app.mjs" },
+    { "t": "tests_pass", "cmd": "npm test" },
+    { "t": "deferred", "what": "e2e coverage", "why": "needs staging env" }
+  ]
+}
+```
+````
+
+A **closed set of eight claim types**: `created` · `modified` · `deleted` · `renamed` · `tests_pass` · `build_pass` · `deferred` · `no_change`. `status` is `complete | partial | blocked` — and `partial`/`blocked` must name what's outstanding with a `deferred` entry, so &ldquo;mostly done&rdquo; can't be left conveniently vague.
+
+`/groundtruth-setup` writes the one-line instruction that teaches your agent this form into your `CLAUDE.md` — inside Rule Zero's tamper perimeter, so the agent can't quietly edit the requirement away.
+
+## The three findings
+
+Groundtruth reads the manifest, then reality (the `git diff`, the transcript's command evidence, the symbols the diff actually added), and emits at most three kinds of finding — or nothing:
+
+| Finding | Means | Severity | The evasion it closes |
+|---|---|---|---|
+| **NC** — no contract | the block is missing, malformed, or schema-invalid on a turn that changed code | warn | dodging the form entirely |
+| **CA** — claimed but absent | a claim reality doesn't support: a file not in the diff, a `tests_pass` that never ran or ran red, a symbol not defined in the added code | **block-tier** | inventing work to look productive |
+| **UC** — undeclared change | a changed file no claim covers | warn | hiding sloppy work by omission |
+
+The two directions are the **pincer**: omit a claim → `UC`. Invent one → `CA`. Dodge the form → `NC`. Bury a lie in the surrounding prose → *irrelevant*, because prose is no longer audited. The only path through is to declare exactly what you did — and to have done it.
+
+Even a green `tests_pass` gets sniffed before it's blessed: a run whose exit was force-succeeded (`npm test || true`), a syntax/type check posing as a test run, output that prints failures despite a zero exit, a green that predates the last source edit, a run filtered to a subset — each earns a bounded warn- or info-tier note, never a quiet pass.
+
 ## See it catch a lie
 
 Your agent finishes and reports:
 
-> **&ldquo;Done — added retry with exponential backoff, tests pass, and created `src/upload.test.js`.&rdquo;**
+> **&ldquo;Done — added retry with exponential backoff to the S3 client, wrote the test, and the suite is green.&rdquo;**
 
-Four confident sentences. Groundtruth renders this before the turn is allowed to end:
+````
+```groundtruth-claims
+{
+  "v": 1,
+  "task": "add retry with backoff to the S3 client, plus a test",
+  "status": "complete",
+  "claims": [
+    { "t": "modified", "file": "src/upload.js" },
+    { "t": "created",  "file": "src/upload.test.js" },
+    { "t": "tests_pass", "cmd": "npm test" }
+  ]
+}
+```
+````
+
+Confident prose, tidy manifest. Groundtruth compares it to reality — `src/upload.test.js` is nowhere in the diff, no test command appears in the session's command record, and `src/config.js` was quietly edited too — and renders this (illustrative card; the finding text is what the engine actually emits):
 
 ```
-GROUNDTRUTH · Tier-1
-  ASK  Add retry with backoff to the S3 client in src/upload.js, and a test in src/upload.test.js.
+GROUNDTRUTH · claims contract
+  TASK  add retry with backoff to the S3 client, plus a test
 
-  🔴 Honesty — claims don't match what it did:
-       🔴 false test/build claim — "tests pass", but no test command ran this session
-       🟡 stub/placeholder in added code: // TODO: real backoff — single attempt for now
-       🟡 silent no-op — claimed src/upload.test.js, but it is absent from the diff
-  🔴 Rules — a security rule was broken in the diff:
-       🔴 hardcoded secret — AWS access key in added code
-  🟡 Tasks — 1 pending (surfaced once; closes only when it lands in code)
+  🔴 CA  claimed created src/upload.test.js, but it is absent from the diff
+  🔴 CA  claimed `npm test` passed, but no such command ran this session
+  🟡 UC  undeclared change: src/config.js (M) is in the diff but no claim covers it
 
-  VERDICT  🔴 ISSUES — blocked        (GROUNDTRUTH_BLOCK=1 to halt)
-  ⚪ Deterministic verdict (no LLM). Your "done" is a claim; the diff is the evidence.
+  VERDICT  🔴 ISSUES — 2 block-tier · 1 warn      (warn mode: recorded, not enforced)
+  ⚪ Deterministic (no LLM). The manifest is the claim; the diff is the evidence.
 ```
 
-Four things that weren't true — caught **deterministically**, with file/line evidence on every finding.
+Notice why the verdict is unarguable. The first finding is a set-membership test: the declared path against the files `git` says changed. The second is a lookup in the harness's own command ledger — a record the agent can't author. The third is the same membership test run in reverse. No judgment calls, no model, nothing to argue with. Just the form, and the facts.
 
-## Why
+## What v2 buys over v1
 
-AI agents suffer from the *hallucination of completeness*: they'll confidently tell you a feature is shipped and tested when they left placeholders and never ran the test runner. Failures sort into three causes:
+- **`UC` is new capability, not a refinement.** v1 could only check what it managed to extract from prose. v2 audits the **whole diff** by construction — a file the agent quietly touched and never mentioned cannot slip through.
+- **`CA` is exact.** &ldquo;claimed `created src/upload.test.js`, absent from the diff&rdquo; is a declared path compared to a git-computed file list — not a regex-guessed noun phrase. The false-positive treadmill of prose parsing is gone.
+- **Precision is structural.** An honest, complete manifest produces zero findings. That's not a tuning outcome; it's what the design leaves possible.
 
-| Bucket | What happened | How Groundtruth catches it |
-|---|---|---|
-| **Told & Done** ✓ | instruction satisfied | nothing to do |
-| **Told & Missed** ⚠ | part of the task was silently dropped | every named subtask must map to a real change |
-| **Told & Ignored** ✗ | a rule in context got overridden anyway | independent rule audit, with no stake in the work |
+## What stays exactly as it was
 
-The third is the one nothing else catches — not forgetting, but *rationalising past* a rule the agent could see. The auditor never did the work, so it never inherits the framing (&ldquo;this is just a small addition&rdquo;) that let the rule slip.
+Everything that reads the **diff** — the code-facing half — is unchanged, because code is a formal language and those checks were always sound: hardcoded secrets, RLS-off tables, a committed `.env`, stub/placeholder markers, dropped-symbol dangling refs (a &ldquo;refactor, everything preserved&rdquo; that left a caller pointing at nothing), test exclusion/weakening, rules compiled from your own docs behind a human approval gate, and Rule Zero tamper-evidence. The claims contract replaced only the language-facing half.
+
+## Abstain over guess
+
+The founding rule, now structural: **a false positive is treated as fatal**, so any check that can't be decided from the reality it was given emits *nothing* rather than a wrong finding.
+
+- No transcript → `tests_pass`/`build_pass` claims abstain (never a false &ldquo;that never ran&rdquo;).
+- A file whose language can't be lexed → symbol claims abstain.
+- Excluded paths (lockfiles, generated artifacts, out-of-repo scratch) → no `UC`, no `NC` nag.
+- A pure Q&A turn that changed nothing → no contract required, no finding.
 
 ## Install
 
@@ -75,36 +138,22 @@ From inside Claude Code:
 /plugin install groundtruth@groundtruth
 ```
 
-Restart Claude Code so the hooks register. That's it — **every agent turn now gets a warn-only verdict card** (honesty, completeness, security), no further config.
+Restart Claude Code so the hooks register, then run `/groundtruth-setup` — it writes the one-line contract instruction into your `CLAUDE.md`, inside Rule Zero's tamper perimeter. **Requires:** Claude Code, `node` ≥ 18, and a git repo (reality = the git-computed diff).
 
-Prefer to try without installing?
+Prefer the v1 prose engine, or want the contract off? `GROUNDTRUTH_CONTRACT=0` opts out entirely.
 
-```
-git clone https://github.com/akahkhanna/groundtruth && claude --plugin-dir ./groundtruth
-```
+The full walkthrough — arming rules, the status badge, warn → block, updating — lives in the **[Getting Started guide](GETTING-STARTED.md)**.
 
-**Requires:** Claude Code, `node` ≥ 18, and a git repo (reality = `git diff HEAD`).
+## Warn vs block
 
-From there you arm your project rules and turn on blocking in three optional stages — **audit → arm rules → block**. The full walkthrough, the status badge, and the update steps live in the **[Getting Started guide](GETTING-STARTED.md)**.
+- **Default: WARN.** Every verdict is recorded; the turn is never disrupted. Build trust first.
+- **Opt-in: BLOCK** — `/groundtruth-block on` (or `GROUNDTRUTH_BLOCK=1`). A `CA` then refuses the stop and hands the gap back to the agent, re-checks on the next stop — **capped at 2 attempts**, then escalates to a human. Editing the tests, this checker, or the ledger to satisfy a catch is flagged as gaming, and the block *holds* rather than releasing.
 
-## What it checks
-
-One deterministic `Stop` hook — no LLM, no network, always runs, ~free. It reads the claim from the Stop payload, intent + Bash evidence from the transcript, and reality from `git diff HEAD`:
-
-- **Honesty** — false test/build claim (&ldquo;tests pass&rdquo; with no run) · stub/placeholder (`TODO`/`FIXME`/`NotImplemented`/Rust `todo!()`/Go `panic()`…) · silent no-op (claimed a file that's absent from the diff) · phantom ref (new import whose target doesn't exist) · dropped symbol (a removed function still *called* — a dangling reference under a &ldquo;refactor, everything preserved&rdquo; claim) · special-casing (code that branches on test/CI/the auditor) · **test-gaming** (a green reached by *skipping/excluding* the tests or *weakening* an existing assertion, not by fixing the code).
-- **Completeness** — a named deliverable in the ask that never lands in the diff. Deliberately crude: it abstains when the ask names nothing, and when the turn is an observation rather than a request (&ldquo;the 304 is fine, no fix needed&rdquo;) so an aside is never minted into a phantom open loop.
-- **Rules** *(the differentiator)* — your standing rules, **compiled from your own docs into deterministic predicates**. The doc literally says ``use `X` not `Y` `` or ``never `Z` ``, so a violation is a regex match, not a judgment call. Auto-discovered, grounded against your tree, and **proposed** — never auto-armed.
-- **Security** — hardcoded secrets, an RLS-off / anon-readable new table (Postgres/Supabase), a committed `.env`.
-
-A **semantic layer** — richer ask↔delivery matching, spec-substitution, regression detection, judging when an agent *rationalised past* a rule — needs an LLM and is **roadmap, not shipped**. The per-turn engine stays fully deterministic and offline.
+Run in warn until precision is proven on your real sessions, *then* flip. Every finding carries its evidence, so a wrong call is auditable, not mysterious.
 
 ## Three enforcement rungs, one engine
 
-Each rung catches what the last can't:
-
-**Stop** (per-turn card, warn) → **pre-commit** (any author, incl. code pasted from a chat no Stop hook saw → warn at `git commit`) → **CI** (`--diff-range origin/main..HEAD`, bypass-proof → **block** the PR).
-
-A copy-paste hook installer and a ready [GitHub Action](.github/workflows/groundtruth.yml) make the outer two one command each.
+**Stop** (per-turn card) → **pre-commit** (`--install-pre-commit`: catches any author, including code pasted from a chat no Stop hook ever saw) → **CI** (`--diff-range origin/main..HEAD`, exits non-zero on a block finding — the rung an in-session agent can't reach). A ready [GitHub Action](.github/workflows/groundtruth.yml) makes the last one one commit.
 
 ## Commands
 
@@ -112,72 +161,49 @@ A copy-paste hook installer and a ready [GitHub Action](.github/workflows/ground
 |---|---|
 | `/groundtruth` | Show the latest verdict card for this session. |
 | `/groundtruth-audit` | Scan the whole repo for agent debt — stubs, TODOs, phantom imports. Inventory, not a verdict. |
-| `/groundtruth-rules` | Review + approve rules compiled from your docs — **the permission gate**. `approve-all` arms every clean rule; `unarm <id>` silences one firing wrongly. |
-| `/groundtruth-rules-ai` | **Opt-in, off by default.** A model pass reads your docs in prose and proposes rules the literal extractor missed — routed through the same grounding + approval gate. The one place a model ever touches Groundtruth. |
-| `/groundtruth-block on｜off` | Opt into blocking (default is warn). Shows an itemized, fire-count-backed confirmation before it flips. |
-| `/groundtruth-setup` | One-shot installer: detects what's configured, arms clean rules on consent, hands you the rest (badge, env). |
+| `/groundtruth-rules` | Review + approve rules compiled from your docs — **the permission gate**. Nothing arms without you. |
+| `/groundtruth-rules-ai` | **Opt-in, off by default.** A model pass proposes rules the literal extractor missed — routed through the same grounding + approval gate. The one place a model ever touches Groundtruth. |
+| `/groundtruth-block on｜off` | Opt into (or out of) blocking. Default is warn. |
+| `/groundtruth-setup` | One-shot installer: writes the contract instruction, arms clean rules on consent, hands you the rest. |
+| `/groundtruth-help` | Quick reference for the commands and the verdict card. |
 
-CLI (no install): `node hooks/groundtruth.mjs --audit` runs the repo audit · `--latest` prints the last verdict · `--install-pre-commit` wires a staged-diff scan · `--diff-range origin/main..HEAD` is the CI gate (exits non-zero on a block-severity finding).
+CLI, no install: `node hooks/groundtruth.mjs --audit` · `--latest` · `--install-pre-commit` · `--diff-range origin/main..HEAD`.
 
-## Warn vs block
+## Hardened in public
 
-- **Default: WARN.** The verdict is recorded; the turn is never disrupted. Build trust first.
-- **Opt-in: BLOCK.** A block-severity finding refuses the stop and hands back a corrective payload, then re-checks the fix on the next stop — a loop **capped at 2 attempts**, then escalates to a human. Editing the tests / this checker / the ledger to satisfy a catch is flagged as gaming: the block *holds* rather than releasing. Purely **prose-grounded honesty heuristics** (e.g. a "tests pass" claim with no test run) and the test-gaming heuristics (skip/exclude, assertion-weakening) are **warn-only** — they never hard-block, because their trigger is a natural-language claim rather than a diff artifact, and a false block on that basis is the failure this tool exists to avoid. CI is the rung where such checks could later be made blocking, since there a false positive is a visible red check a human can override.
+A verifier is only worth trusting if it documents its own misses. The contract engine was hardened across **repeated adversarial and code-review passes before it became the default** — every finding a false positive on honest work or a silent false green, every fix locked with a regression test, all catalogued C-1 through C-9 in [FIXES.md](FIXES.md). A sample of what got killed:
 
-> **Block visibility (honest scope).** A block always reaches the model (the corrective payload) and is recorded to the verdict file + history. An **escalated or held** block is also recorded to the verdict file + history and, on your **next prompt**, re-surfaced as a loud `🔴 BLOCKED / ESCALATED` banner in the injected Groundtruth note — so an unresolved block is not silently dropped between turns. (A block the agent *self-resolves* within the retry loop is recorded in history but, being fixed, isn't re-surfaced.) *Live, in-the-moment* surfacing is **best-effort**: in the VS Code extension the hook's `systemMessage` is not rendered (upstream limitation), so Groundtruth additionally tries to open the verdict file in your editor (Remote-safe) or fire a desktop notification — neither is guaranteed (headless/remote sessions have no desktop; Do-Not-Disturb and notification permissions apply). Net: *an unresolved block can no longer be silently lost — it may still not be seen the instant it fires.* One more reason the hard enforcement boundary is CI, not the in-session hook.
+- An absolute-vs-relative path mismatch that turned *every honest `created`* into a block. *(C-1)*
+- A planted `++ b/ghost.js` content line that laundered a phantom file into a green — closed by parsing hunks by their declared line counts, so agent-controlled content can never mint a file. *(C-2)*
+- `echo "npm test"` blessing a `tests_pass` that never ran; a red re-run laundered by an earlier green. *(C-3)*
+- A gitconfig with nonstandard diff prefixes silently poisoning every path on every turn. *(C-8)*
 
-> **False positives are fatal.** Run in WARN until precision is proven on your real sessions, *then* flip block. Every verdict carries file/line evidence, so a wrong call is auditable, not mysterious.
-
-## Measured honestly
-
-A verifier is only worth trusting if it's honest about its own misses.
-
-- **Precision was rebuilt against real data, not intuition.** We read every finding Groundtruth emitted across 15 of its own sessions — 23 findings, **74% false positives** — froze them into a labeled [corpus](hooks/corpus.fixture.json), then killed them: self-match false positives in the engine went to **0**, phantom-import FPs **3 → 0**, self-checks **242 → 509**, red-team **14/14**. Independent adversarial passes then tried to break the fixes and wrote their own test cases.
-- **Every fix is catalogued** — symptom → root cause → fix → regression test — in [FIXES.md](FIXES.md), including the two *critical* holes review found and the deterministic-NL limits it does **not** close.
-- **Still pending, named not hidden:** a live before/after false-positive rate across a week of real sessions. Groundtruth ships an append-only history log + a `gt-harvest` reader so you can measure it on *your* repo. That number ships next — published the same way, with its misses.
+Current standing: **445 engine checks + 177 contract checks** (622 self-checks total), and a live sandboxed adversarial harness at **red-team 25/25** — a throwaway repo, a genuinely hostile scripted agent, the real hook.
 
 The through-line: *abstain or degrade to a bounded warn outside the domain a check is provably correct in — never a clean green — and never let the audited agent shape its own verdict.*
 
-## Languages
-
-Mechanics, not syntax — most checks are language-general.
-
-- **General:** false-&ldquo;tests pass&rdquo; (Go/Rust/Ruby/Java/.NET/Python/JS runners), stub/placeholder, silent no-op, completeness, directive-override, secrets, env exposure.
-- **JS/TS + Ruby only:** phantom relative-import resolution — it resolves by file existence. Package-qualified languages (Python/Go/Rust/Java/C#) **abstain** rather than false-flag.
-- **Postgres/Supabase only:** the RLS checks — they fire solely on added `.sql` lines.
-
 ## Trust model — honest scope
 
-Groundtruth runs in the **same trust domain as the agent it audits**: same filesystem, same environment. So no on-disk artifact it creates is a real security boundary — an adversarial agent can rewrite any of them. Against an agent with shell access, Groundtruth is **tamper-evident, not tamper-proof**.
-
-What makes it trustworthy is anchoring on the two inputs the agent *can't* author: the **transcript** (the harness's own record of tool calls) and the **git-computed diff** of the working tree. In-session tamper-evidence is reliable with `GROUNDTRUTH_KEY` set and held outside the agent's shell env; to upgrade *evidence → prevention*, run the hook in a separate trust domain (a pre-merge CI gate).
-
-The full adversarial analysis — three red-team passes, the laundered-helper evasion, the fixes and their limits — is in **[SECURITY.md](SECURITY.md)** and [FIXES.md](FIXES.md).
+Groundtruth runs in the **same trust domain as the agent it audits**, so no on-disk artifact it writes is a security boundary — in-session it is **tamper-evident, not tamper-proof**. What makes it trustworthy is anchoring on the two inputs the agent *can't* author: the **transcript** (the harness's own record of tool calls) and the **git-computed diff**. To upgrade evidence into prevention, run the same engine as a pre-merge CI gate — a trust domain the agent's shell can't reach. The full adversarial analysis is in **[SECURITY.md](SECURITY.md)**.
 
 ## Tests
 
 ```bash
-node hooks/groundtruth.test.mjs   # 509 assert-based unit checks, no deps
-node hooks/redteam.mjs            # live adversarial harness (10 scenarios, 14 checks), sandboxed
+node hooks/groundtruth.test.mjs   # assert-based unit checks — no deps, no framework
+node hooks/redteam.mjs            # live adversarial harness, sandboxed throwaway repos
 ```
-
-The red-team harness is the *proven* counterpart: it spins up a throwaway repo, hands the real hook a transcript where a smart agent actively neuters the rails — disarms rules, flips config to `{block:false}`, commits a fake AWS key, claims &ldquo;0 pending, done&rdquo; — and confirms the pre-commit halts the secret, a config-only block is genuinely *defeated* (the exposure, demonstrated), and an **env-anchored** block **holds**. Blast radius is contained: fake key, temp repo, auto-removed.
-
-## Status
-
-Shipped (**v1.0.0**): audit mode + per-turn verify-on-Stop, all deterministic — honesty, completeness, doc-compiled rule enforcement behind an approval gate, the remediation loop + anti-gaming, test-gaming detectors (skip/exclude + assertion-weakening), security checks, and never-silently-lost block visibility with a best-effort live pop. The auditor's own code is sealed into the integrity snapshot. The semantic/LLM layer is roadmap. See [ROADMAP.md](ROADMAP.md).
 
 ## Contributing
 
-The bar is precision-first: a check earns its place only if it's provably correct in a defined scope, and a false positive is treated as fatal. Run `node hooks/groundtruth.test.mjs` and `node hooks/redteam.mjs` before opening a PR, and see **[CONTRIBUTING.md](CONTRIBUTING.md)** for the design principles, the fixture/regression expectations, and how to propose a new finding class.
+The bar is precision-first: a check earns its place only if it's provably correct in a defined scope, and a false positive is treated as fatal. Run both suites before opening a PR, and see **[CONTRIBUTING.md](CONTRIBUTING.md)** for the design principles and how to propose a new finding class.
 
 ## Documentation
 
-- **[Getting Started](GETTING-STARTED.md)** — install, arming rules, warn → block, status badge, updating, troubleshooting
+- **[Getting Started](GETTING-STARTED.md)** — install, arming rules, warn → block, status badge, troubleshooting
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — design principles and how to add a check
 - **[FIXES.md](FIXES.md)** — every fix: symptom → root cause → fix → regression test
 - **[SECURITY.md](SECURITY.md)** — the adversarial trust model and how to report privately
-- **[ROADMAP.md](ROADMAP.md)** — what's next: the semantic/LLM layer and the v2 dashboard
+- **[ROADMAP.md](ROADMAP.md)** — what's next
 
 ## License
 
