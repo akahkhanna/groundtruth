@@ -238,13 +238,18 @@ ok('verify: green re-run after edits (seq2 green) → clean', verify(contract([{
 ok('verify: a lookalike (echo "npm test") does NOT bless tests_pass → CA no-run', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'echo "npm test would pass"', ok: true }] }), 'CA', 'no such command ran'));
 ok('verify: UC scoped to agent-authored files — an undeclared HUMAN/dirty change is NOT flagged (finding 7)', verify(contract([{ t: 'modified', file: 'a.mjs' }]), { files: [{ status: 'M', path: 'a.mjs' }, { status: 'M', path: 'human.mjs' }], authored: new Set(['a.mjs']) }).ok);
 ok('verify: UC still fires on an undeclared AGENT-authored change', has(verify(contract([{ t: 'modified', file: 'a.mjs' }]), { files: [{ status: 'M', path: 'a.mjs' }, { status: 'M', path: 'sneaky.mjs' }], authored: new Set(['a.mjs', 'sneaky.mjs']) }), 'UC', 'sneaky.mjs'));
+ok('verify: a claim written ./src/x.mjs matches the git-relative src/x.mjs (finding 8, path literalism)', verify(contract([{ t: 'created', file: './src/x.mjs' }]), { files: [{ status: 'A', path: 'src/x.mjs' }], commands: [] }).ok);
+ok('verify: modified + symbols does NOT false-CA on a pre-existing edited fn (finding 8)', verify(contract([{ t: 'modified', file: 'a.mjs', symbols: ['existingFn'] }]), { files: [{ status: 'M', path: 'a.mjs' }], symbolsByFile: { 'a.mjs': ['newlyAdded'] }, commands: [] }).ok);
+ok('verify: created + symbols still CA when the symbol is not in the added code', has(verify(contract([{ t: 'created', file: 'a.mjs', symbols: ['ghost'] }]), { files: [{ status: 'A', path: 'a.mjs' }], symbolsByFile: { 'a.mjs': ['real'] }, commands: [] }), 'CA', 'ghost'));
 
 // ── contractFindings: the engine-shaped ({cls,sev,msg}) entry the Stop hook calls ──
-ok('contractFindings: no block → single NC finding', (() => {
-  const f = contractFindings('just prose, no fence', {});
+const authoredReality = (paths) => ({ files: paths.map(p => ({ status: 'A', path: p })), authored: new Set(paths) });
+ok('contractFindings: no block but the agent AUTHORED changes → single NC finding', (() => {
+  const f = contractFindings('just prose, no fence', authoredReality(['x.mjs']));
   return f.length === 1 && f[0].cls === 'NC' && f[0].sev === 'warn' && f[0].msg.includes(FENCE_TAG);
 })());
-ok('contractFindings: malformed JSON → NC', contractFindings(block('{ bad json }'), {}).some(f => f.cls === 'NC'));
+ok('contractFindings: malformed JSON (with authored work) → NC', contractFindings(block('{ bad json }'), authoredReality(['x.mjs'])).some(f => f.cls === 'NC'));
+ok('contractFindings: no block AND no authored change → ABSTAIN, no NC (kills the default-on nag storm)', contractFindings('just chatting, read-only turn', { files: [], authored: new Set() }).length === 0);
 ok('contractFindings: valid contract, clean reality → no findings', contractFindings(block(good()), { files: [{ status: 'A', path: 'src/auth.mjs' }], commands: [] }).length === 0);
 {
   // the pincer through the engine seam: invented file → CA(block), undeclared file → UC(warn)

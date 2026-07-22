@@ -214,7 +214,9 @@ const SEV_CA = 'block';
 const SEV_UC = 'warn';
 const SEV_SOFT = 'warn';   // a claim that IS supported but mislabeled (right file, wrong verb) — softer.
 
-const norm = (p) => String(p == null ? '' : p).trim();
+// Normalize a path for comparison: trim, backslashes → '/', drop a leading './'. Without this, an honest
+// claim written `./src/x.mjs` or (Windows) `src\x.mjs` never matches the git-relative diff path → CA block. (Fable finding 8.)
+const norm = (p) => String(p == null ? '' : p).trim().replace(/\\/g, '/').replace(/^\.\//, '');
 
 // A command that merely MENTIONS a test cmd in a string/echo/grep is not a run of it — blessing `echo "npm
 // test would pass"` (exit 0) as evidence for `tests_pass:{cmd:"npm test"}` is a false green. (Fable finding 5.)
@@ -263,8 +265,11 @@ export function verify(contract, reality = {}) {
       // lenient catch-all: any change status satisfies it, so it never mislabels).
       if (c.t === 'created' && st !== 'A') findings.push({ cls: 'CA', sev: SEV_SOFT, file, status: st, msg: `claimed created ${file}, but the diff shows it ${st === 'M' ? 'modified' : st === 'D' ? 'deleted' : st}` });
       if (c.t === 'deleted' && st !== 'D') findings.push({ cls: 'CA', sev: SEV_SOFT, file, status: st, msg: `claimed deleted ${file}, but the diff shows it ${st === 'A' ? 'added' : st === 'M' ? 'modified' : st}` });
-      // Symbols (created/modified only) — abstain unless we were handed a lexed map for this file.
-      if ((c.t === 'created' || c.t === 'modified') && Array.isArray(c.symbols) && reality.symbolsByFile) {
+      // Symbols — verify on CREATED only. A `created` file's symbols are all newly-added, so a lexed miss is
+      // real. A `modified` file's named symbol may be a PRE-EXISTING function the agent edited (not newly
+      // defined), so checking it against added-defs-only would false-CA whenever some other def was added
+      // (Fable finding 8). Abstain on modified-symbols, and on any file we couldn't lex.
+      if (c.t === 'created' && Array.isArray(c.symbols) && reality.symbolsByFile) {
         const defined = reality.symbolsByFile[file];
         if (Array.isArray(defined)) {
           for (const s of c.symbols) if (!defined.includes(s)) {
@@ -441,6 +446,15 @@ const SEV_NC = 'warn';
 export function contractFindings(message, reality = {}) {
   const a = analyze(message);
   if (!a.ok) {
+    // Only NC when the agent AUTHORED changes it should have declared. A turn that changed nothing the agent
+    // touched — pure Q&A, an observation, a read-only turn — needs no contract, so a missing block abstains
+    // rather than warning. Without this, contract-default nags EVERY block-less turn = training-to-ignore
+    // (Fable finding 6). Scope matches UC: authored files if we have the ledger, else the whole diff.
+    const files = Array.isArray(reality.files) ? reality.files : [];
+    const authored = reality.authored;   // Set | undefined
+    const declarable = authored === undefined ? files
+      : files.filter(f => authored.has(norm(f.path)) || (f.status === 'R' && authored.has(norm(f.from))));
+    if (declarable.length === 0) return [];
     // NC: surface the first concrete reason (not the whole SCHEMA_HELP block — that goes to the block handback).
     return [{ cls: 'NC', sev: SEV_NC, msg: `no valid ${FENCE_TAG} block — ${a.errors[0] || 'missing'}` }];
   }

@@ -43,7 +43,7 @@ const CLASS_NAME = { 1: 'false test/build claim', 2: 'stub/placeholder', 3: 'sil
   6: 'dropped symbol (dangling ref)', 9: 'special-casing / overfit', async_done: 'false completion (async)',
   B1: 'RLS off on new table', B3: 'permissive policy (anon-readable)', B4: 'unscoped UPDATE/DELETE (no WHERE)',
   C1: 'hardcoded secret', C2: 'private key',
-  R: 'compiled rule (from your docs)', openloop: 'open loop (asked, not delivered)', P: 'procedure (step skipped / out of order)',
+  R: 'compiled rule (from your docs)', P: 'procedure (step skipped / out of order)',
   ENV: 'env file not gitignored (secret-leak risk)', test_exclusion: 'test excluded/skipped to pass',
   test_weakened: 'test weakened/disabled to pass', mojibake: 'encoding corruption (mojibake)',
   agent: 'subagent cannot load (silently inert)',
@@ -2103,8 +2103,7 @@ export function renderCard(findings, { session = 'unknown', intent = '', blockEn
   const sortF = a => [...a].sort((x, y) => (x.sev === 'block' ? 0 : 1) - (y.sev === 'block' ? 0 : 1));
   const sub = f => `       ${SEV[f.sev]} ${CLASS_NAME[f.cls] || f.cls}${f.rule ? ` [${f.rule}]` : ''} — ${f.msg}`;
   const hon = findings.filter(isHonesty);
-  const loops = findings.filter(f => f.cls === 'openloop');                  // contract memory: asked, not delivered
-  const deferred = findings.filter(f => f.cls === 'deferred');              // self-deferred: surfaced, never silent
+  const deferred = findings.filter(f => f.cls === 'deferred');              // declared deferral: surfaced, never silent
   const tamper = findings.filter(f => f.cls === 'tamper');                  // agent rewrote the referee's own state
   const rule = findings.filter(f => !isHonesty(f) && !['openloop', 'deferred', 'tamper'].includes(f.cls));  // security B/C + compiled rules R
 
@@ -2138,12 +2137,13 @@ export function renderCard(findings, { session = 'unknown', intent = '', blockEn
       : ic.tier === 'thin'
       ? `  🟡 Completeness — NOT verified: the ask named no file / deliverable / test, so there were no subtasks to check off`
       : `  🟢 Completeness — the ask was specific enough to map subtasks against`,
-    loops.length
-      ? `  ${loops.some(f => f.sev === 'block') ? '🔴' : '🟡'} Tasks — ${loops.length} pending (one per ask that named a deliverable; "done" only when it lands in the diff, never on the agent's say-so):`
-      : deferred.length
-      ? `  🟡 Tasks — 0 pending; ${deferred.length} human-confirmed deferral(s) below (set aside with sign-off, surfaced for transparency):`
-      : `  🟢 Tasks — every ask that named a deliverable is delivered`,
-    ...loops.map(f => `       ${f.sev === 'block' ? '🔴' : '🟡'} ${f.msg}`),
+    // Tasks (v2): the prose open-loop ledger is retired — completeness is now the contract's CA (a declared
+    // deliverable that never landed) and UC (a change never declared), both under Honesty above. This line
+    // surfaces only the agent's OWN declared deferrals; when there are none it stays neutral, never asserting
+    // an ungrounded "everything delivered" (the check that used to back that claim no longer exists).
+    deferred.length
+      ? `  🟡 Tasks — ${deferred.length} declared deferral(s) (the agent's own set-aside, surfaced for transparency):`
+      : `  🟢 Tasks — nothing deferred`,
     ...deferred.map(f => `       ⊘ ${f.msg}`),
     baseline
       ? `  ⚪ Debt — ${baseline.preExisting} pre-existing (already here at session start, not blamed) · ${baseline.introduced} introduced this turn`

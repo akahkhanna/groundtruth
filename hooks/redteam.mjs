@@ -167,10 +167,10 @@ try {
   const kreset = () => { git(['checkout', '-q', '--', '.']); git(['clean', '-fdq']); };
   const CONTRACT_HIT = /no claims contract|claimed but absent|undeclared change/i;   // any contract finding label
 
-  // K1 — dodge the form entirely (no block) → NC
+  // K1 — dodge the form entirely (no block) on an AUTHORED change → NC
   writeFileSync(join(repo, 'real.js'), 'export const v = 2;\n');
-  const k1 = driveClean('k1', 'Done — tidied it up.', [userln('tidy real.js')]);
-  check('contract: dodging the form (no claims block) → NC', /no claims contract/i.test(k1), k1.slice(0, 200));
+  const k1 = driveClean('k1', 'Done — tidied it up.', [userln('tidy real.js'), writeln(join(repo, 'real.js'), 'export const v = 2;\n')]);
+  check('contract: dodging the form on an authored change → NC', /no claims contract/i.test(k1), k1.slice(0, 200));
   kreset();
 
   // K2 — invent a claim (created a file that does not exist) → CA
