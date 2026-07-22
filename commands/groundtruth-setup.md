@@ -60,9 +60,9 @@ Then check each item and report `✓`/`✗`:
      ```
      Every claim must be true against the diff; declare every file you changed; status partial/blocked needs a `deferred` claim.
      ````
-     `CLAUDE.md` is inside **Rule Zero's** tamper perimeter (`RULE_SRC_RE`), so an agent that later edits this instruction away trips the existing referee-tamper check — no new machinery. Note it's experimental: keep block off while you watch its precision on your real turns, exactly like any new check.
+     Once the instruction is in `CLAUDE.md` the session is **contract-aware**: an omitted manifest on a code turn becomes block-eligible. Awareness is anchored on the **session baseline** (not the live worktree), so an agent can't strip the instruction mid-turn to downgrade the block — the strip is surfaced as its own finding. The contract is the **default engine** as of v2.0.0 (opt out with `GROUNDTRUTH_CONTRACT=0`); it runs in **warn** until you turn block on, so keep block off while you watch its precision on your real turns.
 
-End with one summary line, e.g.: `Setup → rules: N clean unarmed (arm in warn?) · badge: ✗ · block: warn (on = enforce) · key: off (CI = real enforcement) · pre-commit: ✗ install · contract: off (experimental).` (after arming: `rules: armed N (warn)`).
+End with one summary line, e.g.: `Setup → rules: N clean unarmed (arm in warn?) · badge: ✗ · block: warn (on = enforce) · key: off (CI = real enforcement) · pre-commit: ✗ install · contract: on (default; instruction written).` (after arming: `rules: armed N (warn)`).
 
 Then **offer to do the `settings.local.json` parts yourself** (the user asked for this): *"Want me to set up `settings.local.json` now — deploy the status badge, and (optional) turn on block mode? I will NOT write a `GROUNDTRUTH_KEY` here — that belongs in a CI secret (item 4), where it's actually out of my reach."* If they say yes:
 1. Deploy the status-line wrapper (`cp "<HOOKS>/groundtruth-statusline.sh" "$HOME/.claude/groundtruth-statusline.sh" && chmod +x` it). Then read `.claude/settings.local.json` (create `{}` if absent), and **merge** (preserve existing keys): add the `statusLine` block pointing at the wrapper with the user's real absolute home path filled in (`bash "/abs/home/.claude/groundtruth-statusline.sh"`). If an old version-pinned statusLine exists, replace it. Write valid JSON.

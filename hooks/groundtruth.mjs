@@ -35,9 +35,10 @@ import { fileURLToPath } from 'node:url';   // NOT `new URL(...).pathname` — t
 // (symbol-integrity.mjs re-imports the pure lexers below) — safe because every cross-reference is at
 // call time, never at module-eval time.
 import { checkDroppedSymbols, addedSymbolsByFile } from './symbol-integrity.mjs';
-// v2 claims contract (opt-in, GROUNDTRUTH_CONTRACT=1). Pure module — parse + validate + verify the agent's
-// end-of-turn claims block against reality. Off by default; v1 is the fallback during soak.
-import { buildReality, contractFindings, analyze as analyzeContract, openDeferrals } from './claims-contract.mjs';
+// v2 claims contract — the DEFAULT honesty engine as of v2.0.0 (disable with GROUNDTRUTH_CONTRACT=0; the
+// diff-facing checks still run, but the retired v1 prose honesty layer is NOT restored). Pure module —
+// parse + validate + verify the agent's end-of-turn claims block against reality.
+import { buildReality, contractFindings, analyze as analyzeContract, openDeferrals, FENCE_TAG, SCHEMA_HELP } from './claims-contract.mjs';
 
 const CLASS_NAME = { 1: 'false test/build claim', 2: 'stub/placeholder', 3: 'silent no-op', 4: 'phantom ref',
   6: 'dropped symbol (dangling ref)', 9: 'special-casing / overfit', async_done: 'false completion (async)',
@@ -47,8 +48,8 @@ const CLASS_NAME = { 1: 'false test/build claim', 2: 'stub/placeholder', 3: 'sil
   ENV: 'env file not gitignored (secret-leak risk)', test_exclusion: 'test excluded/skipped to pass',
   test_weakened: 'test weakened/disabled to pass', mojibake: 'encoding corruption (mojibake)',
   agent: 'subagent cannot load (silently inert)',
-  // v2 claims contract (GROUNDTRUTH_CONTRACT=1): NC = no valid claims block, CA = claim unsupported by the
-  // diff/transcript, UC = a changed file no claim covers.
+  // v2 claims contract (default; disable with GROUNDTRUTH_CONTRACT=0): NC = no valid claims block, CA = claim
+  // unsupported by the diff/transcript, UC = a changed file no claim covers.
   NC: 'no claims contract', CA: 'claimed but absent (contract)', UC: 'undeclared change (contract)' };
 const CLASS_BUCKET = { 1: 'Ignored', 2: 'Missed→Ignored', 3: 'Ignored', 4: 'Missed', 6: 'Missed→Ignored', async_done: 'Ignored',
   B1: 'Ignored', B3: 'Ignored', B4: 'Ignored', C1: 'Ignored', C2: 'Ignored', R: 'Ignored' };
@@ -72,6 +73,28 @@ const COMPLETION_STAMP_RE = /(^|\n)[\s>#*-]*(?:🟢\s*|✓\s*)?(?:all\s+|told\s*
 // Rule-source files the compiler reads (and the --watch-rules trigger fires on). Declared, versioned
 // sources only (§10) — never freeform memory.
 const RULE_SRC_RE = /(^|\/)(CLAUDE|AGENTS|SCHEMA)\.md$|(^|\/)ARCHITECTURE\.md$|\.claude\/skills\/[^/]+\/SKILL\.md$|\.claude\/agents\/[^/]+\.md$|(^|\/)docs\/[^/]+\.md$|\.(cursor|windsurf)rules$/i;
+
+// A session is CONTRACT-AWARE when an agent-INSTRUCTION doc carries the FENCED `groundtruth-claims` block that
+// `/groundtruth-setup` writes — the signal that the agent was actually TOLD to declare a manifest. Its presence
+// escalates NC from warn → block-eligible (closes the "just don't declare" evasion).
+//   · Matched as a code FENCE (```groundtruth-claims), NOT a bare inline mention, so a doc that only *discusses*
+//     the format (e.g. Groundtruth's own CLAUDE.md) doesn't count.
+//   · Scoped to CONTEXT-LOADED instruction files (CLAUDE.md / AGENTS.md / .cursor|windsurfrules) — NOT the whole
+//     RULE_SRC_RE set. `docs/*.md`, `SCHEMA.md`, `SKILL.md` aren't loaded into the agent's prompt and often
+//     QUOTE the block as an EXAMPLE, so treating a fence there as "the agent was told to declare" would
+//     block-tier an honest turn — the fatal FP. (Fable PR #2 review, Defect B.)
+// Injectable (files + reader) so it's unit-testable, and the reader is baseline-anchored by the caller so a
+// same-turn strip of the instruction can't downgrade awareness (Defect A).
+const INSTRUCTION_DOC_RE = /(^|\/)(CLAUDE|AGENTS)\.md$|(^|\/)\.(cursor|windsurf)rules$/i;
+const CONTRACT_INSTRUCTION_RE = new RegExp('(^|\\n)`{3,}[ \\t]*' + FENCE_TAG + '\\b');
+export function contractInstructionPresent(files, readFile) {
+  for (const f of (files || [])) {
+    if (!INSTRUCTION_DOC_RE.test(f)) continue;
+    let txt = ''; try { txt = String(readFile(f) || '').slice(0, 512 * 1024); } catch { continue; }   // bounded read
+    if (CONTRACT_INSTRUCTION_RE.test(txt)) return true;
+  }
+  return false;
+}
 
 // Shared classifiers — used by both Verify (analyze, on a diff) and Audit (scanContent, on whole files).
 // Markers are UPPERCASE-only by convention: that avoids matching `xxx` in a URL or a `todo` variable
@@ -1892,6 +1915,9 @@ const FIX = {
   C1: 'Remove the hardcoded secret; move it to an env var / secret store and rotate it.',
   C2: 'Remove the committed private key; rotate it.',
   ENV: 'Add the env file to .gitignore (and `git rm --cached` it if already tracked); rotate any secret it held.',
+  // NC = no valid claims manifest on a code-changing turn. The corrective must TEACH the schema, else a blocked
+  // agent that never saw it has to guess and burns its attempts. (Fable PR #2 review, Defect C.)
+  NC: `End the turn with a valid ${FENCE_TAG} manifest declaring what you changed.\n\n${SCHEMA_HELP}`,
 };
 export function renderCorrective(blockFindings, attempts, cap = 2) {
   return `Groundtruth blocked this stop (attempt ${attempts}/${cap} before it escalates to a human). Resolve, then finish:\n`
@@ -2436,13 +2462,35 @@ function main() {
   const envBlock = process.env.GROUNDTRUTH_BLOCK === '1';
   findings.push(...refereeTamper(diff, parsed.commandsInvoked || new Set(), envBlock));
 
-  // v2 claims contract — the honesty/completeness engine (v2.0.0: ON by default; opt OUT with
-  // GROUNDTRUTH_CONTRACT=0 for the legacy prose path, which is being retired). NC/CA/UC replace the prose
+  // v2 claims contract — the honesty/completeness engine (v2.0.0: ON by default; disable with
+  // GROUNDTRUTH_CONTRACT=0 — the diff-facing checks still run, but the v1 prose honesty layer is retired,
+  // not restored). NC/CA/UC replace the prose
   // class-1/class-3 claim detection and the prose task ledger. Reality is read from the AUTHORED `diff`
   // (git + tool ledger, so untracked creates are seen) and the transcript's bash evidence; symbols are
   // lexed per-file from scanDiff. Fully fail-open: the contract path must never break a turn.
   if (process.env.GROUNDTRUTH_CONTRACT !== '0') {
     try {
+      // CONTRACT-AWARE? — an instruction doc (CLAUDE.md/AGENTS.md/.cursor|windsurfrules) carries the fenced
+      // `groundtruth-claims` block. Anchored on the SESSION BASELINE (baseRef) — both its FILE TREE and its
+      // content — as well as the worktree, so no same-turn strip downgrades awareness: an in-place edit, a full
+      // `git rm`, and an index-removal `git rm --cached` all leave the doc present at the baseline, so NC still
+      // blocks (the dodge Fable proved — a Write, or an untrack, had turned the NC block into a warn). The
+      // instruction is NOT in the tamper snapshot (that covers only `.claude/groundtruth/*` + hook code), so
+      // baseline-anchoring — not a tamper claim — is what makes it robust; an actual content removal
+      // (baseline-present / worktree-absent) is SURFACED below (never silent). (Fable PR #2 review, Defect A/B.)
+      // UNION the current index with the BASELINE tree: `git rm --cached CLAUDE.md` (or a full `git rm`) drops
+      // the doc from `git ls-files`, so a list built from the index alone would never query the baseline and the
+      // strip dodge would survive via index-removal (a same-turn, less-conspicuous variant). Taking the union
+      // means a doc present at the baseline is ALWAYS considered; the INSTRUCTION_DOC_RE filter still runs after,
+      // so no `docs/*.md` re-enters. (Fable PR #2 re-review: index-removal strip variant.)
+      const instrDocs = [...new Set([
+        ...git('ls-files', cwd).split('\n'),
+        ...git(`ls-tree -r --name-only ${baseRef}`, cwd).split('\n'),
+      ])].filter(f => f && INSTRUCTION_DOC_RE.test(f));
+      const awareBase = contractInstructionPresent(instrDocs, (f) => git(`show ${baseRef}:${f}`, cwd));
+      const awareWork = contractInstructionPresent(instrDocs, (f) => readFileSync(join(cwd, f), 'utf8'));
+      const contractInstruction = awareBase || awareWork;
+      const instructionStripped = awareBase && !awareWork;
       const reality = buildReality({
         diff, cwd,
         // pass bashEvents THROUGH (may be undefined on the fail-open / no-transcript path) so a truthful
@@ -2477,8 +2525,14 @@ function main() {
           const contracts = texts.map(t => analyzeContract(t)).filter(a => a && a.ok).map(a => a.contract);
           return openDeferrals(contracts);
         })(),
+        // CONTRACT-AWARE? (baseline-anchored, computed above) → NC becomes BLOCK-eligible, closing the
+        // "just don't declare" dodge. (Fable PR #2 review, Defect A.)
+        contractInstruction,
       });
       findings.push(...contractFindings(payload.last_assistant_message || '', reality));
+      // The instruction was present at the session baseline but is GONE from the worktree → stripped this
+      // session. Awareness already held (NC still blocks), but surface the strip so the dodge is never silent.
+      if (instructionStripped) findings.push({ cls: 'NC', sev: 'warn', msg: `the ${FENCE_TAG} instruction was removed from an instruction doc this session — the manifest requirement still applies (awareness is anchored on the session baseline)` });
     } catch { /* fail-open — v1 verdict stands */ }
   }
   // D9: DEFENSE-IN-DEPTH for the indirect case (a sub-script writes a referee file, so no command names

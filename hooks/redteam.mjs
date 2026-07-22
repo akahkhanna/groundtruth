@@ -254,6 +254,44 @@ try {
   git(['config', '--unset', 'diff.external']);
   kreset();
 
+  // K11 — NC asymmetry follow-up: in a CONTRACT-AWARE repo (CLAUDE.md carries the FENCED instruction), an
+  // authored change with NO manifest is a BLOCK-eligible NC, not a warn — closing the "just don't declare"
+  // dodge. Warn mode still shows it (the card carries the "GROUNDTRUTH_BLOCK=1 to halt" marker) without halting.
+  writeFileSync(join(repo, 'CLAUDE.md'), '# Project rules\n\nEnd every code-changing turn with one fenced block:\n\n```groundtruth-claims\n{ "v": 1, "task": "<one line>", "status": "complete", "claims": [] }\n```\n');
+  git(['add', 'CLAUDE.md']); git(['commit', '-qm', 'add contract instruction']);
+  writeFileSync(join(repo, 'real.js'), 'export const v = 12;\n');
+  const k11 = driveClean('k11', 'Done — no manifest this turn.', [userln('bump real.js'), writeln(join(repo, 'real.js'), 'export const v = 12;\n')]);
+  check('contract: NC in a contract-aware repo (CLAUDE.md has the fenced instruction) is BLOCK-eligible, not warn',
+    /no claims contract/i.test(k11) && /GROUNDTRUTH_BLOCK=1 to halt/.test(k11), k11.slice(0, 400));
+  git(['rm', '-q', 'CLAUDE.md']); git(['commit', '-qm', 'drop']); kreset();
+
+  // K13 — the STRIP dodge (Fable PR #2 review, Defect A): an agent that removes the instruction from CLAUDE.md
+  // THIS turn to downgrade NC to warn does NOT succeed. Awareness is anchored on the SESSION BASELINE (HEAD),
+  // so a same-turn strip can't flip block→warn — and the strip is itself surfaced, never silent.
+  const instr = '# Rules\n\n```groundtruth-claims\n{ "v": 1, "task": "x", "status": "complete", "claims": [] }\n```\n';
+  const stripped = '# Rules\n\n(the contract instruction was removed)\n';
+  writeFileSync(join(repo, 'CLAUDE.md'), instr);
+  git(['add', 'CLAUDE.md']); git(['commit', '-qm', 'contract instruction at baseline']);
+  writeFileSync(join(repo, 'CLAUDE.md'), stripped);           // STRIP it on disk this turn
+  writeFileSync(join(repo, 'real.js'), 'export const v = 13;\n');
+  const k13 = driveClean('k13', 'Done — no manifest.', [userln('bump real.js'), writeln(join(repo, 'CLAUDE.md'), stripped), writeln(join(repo, 'real.js'), 'export const v = 13;\n')]);
+  check('contract: stripping the instruction this turn does NOT downgrade NC (baseline-anchored) and the strip is surfaced',
+    /GROUNDTRUTH_BLOCK=1 to halt/.test(k13) && /removed from an instruction doc/i.test(k13), k13.slice(0, 500));
+  git(['checkout', '-q', '--', '.']); git(['rm', '-q', '--ignore-unmatch', 'CLAUDE.md']); git(['commit', '-qm', 'drop']); kreset();
+
+  // K14 — the INDEX-REMOVAL strip variant (Fable PR #2 re-review): `git rm --cached CLAUDE.md` untracks the doc
+  // (dropping it from `git ls-files`) but leaves it physically in the worktree with the instruction intact. The
+  // awareness file list UNIONS the baseline tree, so the doc is still considered → NC STILL blocks; the dodge
+  // fails. (No strip is surfaced here — the content wasn't removed, only untracked.)
+  writeFileSync(join(repo, 'CLAUDE.md'), instr);
+  git(['add', 'CLAUDE.md']); git(['commit', '-qm', 'contract instruction at baseline (k14)']);
+  git(['rm', '--cached', '-q', 'CLAUDE.md']);                 // untrack — worktree file + instruction stay
+  writeFileSync(join(repo, 'real.js'), 'export const v = 14;\n');
+  const k14 = driveClean('k14', 'Done — no manifest.', [userln('bump real.js'), writeln(join(repo, 'real.js'), 'export const v = 14;\n')]);
+  check('contract: an index-removal strip (`git rm --cached`) does NOT dodge NC (awareness unions the baseline tree)',
+    /GROUNDTRUTH_BLOCK=1 to halt/.test(k14), k14.slice(0, 400));
+  git(['add', 'CLAUDE.md']); git(['rm', '-q', '--ignore-unmatch', 'CLAUDE.md']); git(['commit', '-qm', 'drop']); kreset();
+
   // K12 — §6 multi-turn deferrals: a deferral declared on an EARLIER turn STAYS on the later turn's card even
   // when that turn's manifest omits it — it can no longer silently vanish. Reconstructed from the transcript
   // (the unforgeable record), not a forgeable ledger.

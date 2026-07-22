@@ -1,6 +1,8 @@
 # v2 prose-layer retirement — the deletion plan
 
-**Status:** staged, held for soak. This is the "understand the tests before you delete them" map for physically removing the v1 prose layer once the claims contract is the default. Nothing here is cut yet — each stage below lands as its own commit with **green tests at every step** (never "delete the ones that fail").
+> **STATUS: COMPLETE (shipped in v2.0.0, merged in #3).** Every stage below landed — the prose layer is retired, the claims contract is the default engine, and the README was swapped. Kept as the historical migration record; the per-fix detail is in [FIXES.md](../FIXES.md) (C-1…C-9). The stage markers and "do not flip until" note below are the point-in-time plan, not current state.
+
+**Original status (point-in-time):** staged, held for soak. This is the "understand the tests before you delete them" map for physically removing the v1 prose layer once the claims contract is the default. Each stage below lands as its own commit with **green tests at every step** (never "delete the ones that fail").
 
 ## Principle
 
@@ -57,7 +59,7 @@ The v2 replacement coverage already exists: `claims-contract.test.mjs` (87 check
 3. ⏸ **Cut subsystem A** (class 1/3 prose) — **BLOCKED on the Stage-3 decision above** (the `claimsSuccess`/`stripQuotedForClaim` entanglement + the stale-green/filtered/only-weak capability loss). Not a mechanical cut.
 4. **Delete the orphaned subsystem-B functions** (`openLoops`, `classifyDeliverables`, `splitClauses`, `extractTokens`, `pasteStripped`, `updateTaskLedger`, `claimClosesToken`, `surfaceOpenLoop`, `namedDeliverables`) + prune their imports and the Task-ledger test section (`l.1649–2260`). These are now unreferenced by `main()`; safe to delete once confirmed nothing else calls them.
 5. **Demote to advisory** — `async_done`, `claimsSuccess`, completion/deferral stamps become an info-only footer (spec §7), not deleted.
-6. **Swap the README** — `docs/README.v2-draft.md` → `README.md`; bump to `2.0.0`.
+6. ✅ **Swap the README** — the v2 draft became the live `README.md`; the draft file was removed. *(Done.)*
 
 **Progress: stages 1, 2, 4 DONE and green (engine 3331 → 2950). Stage 3 is the last piece — designed below.**
 
