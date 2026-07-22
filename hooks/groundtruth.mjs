@@ -3165,12 +3165,12 @@ function main() {
   const envBlock = process.env.GROUNDTRUTH_BLOCK === '1';
   findings.push(...refereeTamper(diff, parsed.commandsInvoked || new Set(), envBlock));
 
-  // v2 claims contract (opt-in, GROUNDTRUTH_CONTRACT=1). ADD the contract's NC/CA/UC findings alongside
-  // v1's — v1 stays the fallback during soak, so both render and you can compare precision before the v1
-  // prose layer is retired. Reality is read from the AUTHORED `diff` (git + tool ledger, so untracked
-  // creates are seen) and the transcript's bash evidence; symbols are lexed per-file from scanDiff. Fully
-  // fail-open: the contract path must never break a turn, so any error yields no contract findings.
-  if (process.env.GROUNDTRUTH_CONTRACT === '1') {
+  // v2 claims contract — the honesty/completeness engine (v2.0.0: ON by default; opt OUT with
+  // GROUNDTRUTH_CONTRACT=0 for the legacy prose path, which is being retired). NC/CA/UC replace the prose
+  // class-1/class-3 claim detection and the prose task ledger. Reality is read from the AUTHORED `diff`
+  // (git + tool ledger, so untracked creates are seen) and the transcript's bash evidence; symbols are
+  // lexed per-file from scanDiff. Fully fail-open: the contract path must never break a turn.
+  if (process.env.GROUNDTRUTH_CONTRACT !== '0') {
     try {
       const reality = buildReality({
         diff, bashEvents: parsed.bashEvents || [],
