@@ -38,6 +38,15 @@ ok('CRLF line endings parse', analyze(block(good()).replace(/\n/g, '\r\n')).ok);
   const r = analyze(two);
   ok('multiple blocks: count reflects both', r.count === 2);
   ok('multiple blocks: last block wins', r.ok && r.contract.task === 'SECOND');
+  // C-8 (Fable adv FP-9): the last block that VALIDATES wins — a real contract followed by an INVALID quoted
+  // example (a schema-help snippet, an echoed handback) must not be superseded into NC.
+  const realThenExample = block(good({ task: 'REAL' })) + '\n\nFor reference, the format is:\n\n' + block('{ "v": 1, "task": "<desc>", "status": "<complete|partial|blocked>", "claims": [] }');
+  const re = analyze(realThenExample);
+  ok('multiple blocks: a valid contract + a trailing INVALID example → the valid one wins (not NC)', re.ok && re.contract.task === 'REAL');
+  // but two VALID blocks still resolve to the last (authoritative end-of-turn declaration)
+  ok('multiple blocks: two valid blocks still → last wins', analyze(two).contract.task === 'SECOND');
+  // and if the ONLY block is invalid, it is still NC (no false rescue)
+  ok('single invalid block → still NC', !analyze(block('{ "v": 1, "task": "x", "status": "nope", "claims": [] }')).ok);
 }
 
 // ── malformed vs schema-invalid are distinguishable ──

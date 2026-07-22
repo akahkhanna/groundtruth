@@ -91,11 +91,17 @@ function isNonEmptyStr(v) {
  * fenced block (null if none), count is how many were found (for tests / diagnostics).
  */
 export function findClaimsBlock(message) {
-  if (typeof message !== 'string' || message.length === 0) return { raw: null, count: 0 };
+  const { raws, count } = findClaimsBlocks(message);
+  return { raw: raws.length ? raws[raws.length - 1] : null, count };
+}
+
+/** All fenced claims blocks, in document order. Returns { raws:[innerText…], count }. */
+export function findClaimsBlocks(message) {
+  if (typeof message !== 'string' || message.length === 0) return { raws: [], count: 0 };
   FENCE_RE.lastIndex = 0;
-  let m, last = null, count = 0;
-  while ((m = FENCE_RE.exec(message)) !== null) { last = m[1]; count++; }
-  return { raw: last, count };
+  const raws = []; let m;
+  while ((m = FENCE_RE.exec(message)) !== null) raws.push(m[1]);
+  return { raws, count: raws.length };
 }
 
 /**
@@ -176,13 +182,22 @@ export function analyze(message) {
     reason: `${errors.join('; ')}\n\n${SCHEMA_HELP}`, count,
   });
 
-  const parsed = parseContract(message);
-  if (!parsed.ok) return nc([parsed.error], parsed.count);
-
-  const v = validateContract(parsed.value);
-  if (!v.ok) return nc(v.errors, parsed.count);
-
-  return { ok: true, code: null, reason: null, contract: v.contract, errors: [], count: parsed.count };
+  const { raws, count } = findClaimsBlocks(message);
+  if (count === 0) return nc(['no groundtruth-claims block found'], 0);
+  // Prefer the LAST block that PARSES and VALIDATES. A real contract followed by a quoted SCHEMA_HELP example,
+  // an echoed NC handback, or a block being discussed in docs must not be superseded into NC by that trailing
+  // invalid block — NC fires only when NO block validates. Residual: a second, fully-VALID example block that
+  // comes last still wins (inherent ambiguity), but an honest turn's real block is normally last. (Fable FP-9.)
+  let lastErr = ['no groundtruth-claims block found'];
+  for (let i = raws.length - 1; i >= 0; i--) {
+    let obj;
+    try { obj = JSON.parse(raws[i]); }
+    catch (e) { if (i === raws.length - 1) lastErr = [`malformed JSON in claims block: ${e.message}`]; continue; }
+    const v = validateContract(obj);
+    if (v.ok) return { ok: true, code: null, reason: null, contract: v.contract, errors: [], count };
+    if (i === raws.length - 1) lastErr = v.errors;
+  }
+  return nc(lastErr, count);
 }
 
 /* ────────────────────────────────────────────────────────────────────────────────────────────────────

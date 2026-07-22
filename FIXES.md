@@ -506,3 +506,8 @@ Contract self-check **144 → 147**; engine **440 → 442**; red-team **22/22**.
 New end-to-end redteam scenarios: **K8** (honest claim under `diff.mnemonicPrefix=true` → clean) and **K9** (honest bash-heredoc `created` → clean).
 
 Contract self-check **147 → 168**; engine **442 → 444**; red-team **22 → 24**.
+
+### C-8 · addendum — FP-9 (last-VALID-block wins)
+The final harness case: a real, valid contract followed by a quoted SCHEMA_HELP example (or an echoed NC handback) was superseded into NC because `analyze` took the LAST fenced block unconditionally, and the trailing example is schema-invalid. Fixed: `analyze` now scans blocks last→first and takes the last that PARSES + VALIDATES; NC fires only when none validate. Two valid blocks still resolve to the last (authoritative). Residual: a second, fully-valid example block that comes last still wins — inherent ambiguity, but an honest turn's real block is normally last. Contract **168 → 171**.
+
+All 18 Fable-adversarial-round-2 findings are now resolved (5 block-tier FPs, 4 warn-tier FPs, 1 sensor-encoding fix, 4 FN/gaming vectors, + the last-valid-block fix).
