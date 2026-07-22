@@ -99,6 +99,12 @@ ok('partial without deferred rejected', rejects({ v: 1, task: 't', status: 'part
 ok('blocked without deferred rejected', rejects({ v: 1, task: 't', status: 'blocked', claims: [] }, 'requires at least one "deferred"'));
 ok('blocked WITH deferred accepted', validateContract({ v: 1, task: 't', status: 'blocked', claims: [{ t: 'deferred', what: 'x', why: 'y' }] }).ok);
 
+// ── cross-field: no_change is EXCLUSIVE — it cannot coexist with any change-asserting claim (Change 2a) ──
+ok('no_change + a modified claim rejected (self-contradiction)', rejects({ v: 1, task: 't', status: 'complete', claims: [{ t: 'no_change' }, { t: 'modified', file: 'a.mjs' }] }, 'no_change" must be the only claim'));
+ok('no_change + a deferred claim rejected too', rejects({ v: 1, task: 't', status: 'partial', claims: [{ t: 'no_change' }, { t: 'deferred', what: 'x', why: 'y' }] }, 'no_change" must be the only claim'));
+ok('no_change ALONE still valid', validateContract({ v: 1, task: 't', status: 'complete', claims: [{ t: 'no_change' }] }).ok);
+ok('SCHEMA_HELP documents the no_change exclusivity rule', SCHEMA_HELP.includes('no_change') && /only claim/i.test(SCHEMA_HELP));
+
 // ── path shape ──
 ok('relative path valid', isValidPath('src/a.mjs'));
 ok('absolute path invalid', !isValidPath('/etc/passwd'));
@@ -177,7 +183,27 @@ ok('UC: a rename claim covers BOTH its from and to sides', verify(contract([{ t:
 
 // ── no_change & deferred ──
 ok('no_change + empty diff → clean (the frictionless Q&A turn)', verify(contract([{ t: 'no_change' }]), { files: [] }).ok);
-ok('no_change but the diff is non-empty → surfaces as UC', has(verify(contract([{ t: 'no_change' }]), { files: [{ status: 'M', path: 'a.mjs' }] }), 'UC'));
+// Change 2b — a no_change contract on a turn that AUTHORED changes is a self-contradiction → block CA, not a warn.
+ok('no_change + authored non-empty diff → block CA (self-contradiction)', (() => {
+  const r = verify(contract([{ t: 'no_change' }]), { files: [{ status: 'M', path: 'a.mjs' }], authored: new Set(['a.mjs']) });
+  return has(r, 'CA', 'declared no_change') && r.findings.some(f => f.cls === 'CA' && f.sev === 'block');
+})());
+ok('no_change + non-empty diff, authored UNDEFINED (pure-unit whole-diff fallback) → still block CA', has(verify(contract([{ t: 'no_change' }]), { files: [{ status: 'M', path: 'a.mjs' }] }), 'CA', 'declared no_change'));
+ok('no_change block lists up to 3 authored paths', (() => {
+  const files = ['a', 'b', 'c', 'd'].map(p => ({ status: 'M', path: `${p}.mjs` }));
+  const r = verify(contract([{ t: 'no_change' }]), { files, authored: new Set(files.map(f => f.path)) });
+  const ca = r.findings.find(f => f.cls === 'CA');
+  const paths = ca ? ca.msg.slice(ca.msg.indexOf(':') + 1).split(',').map(s => s.trim()) : [];
+  return paths.length === 3 && paths.includes('a.mjs') && paths.includes('c.mjs') && !paths.includes('d.mjs');
+})());
+// UC suppression — the contradicting files are condemned ONCE by the block CA, not additionally as per-file UC warns.
+ok('no_change block SUPPRESSES the redundant per-file UC warns', (() => {
+  const r = verify(contract([{ t: 'no_change' }]), { files: [{ status: 'M', path: 'a.mjs' }, { status: 'A', path: 'b.mjs' }], authored: new Set(['a.mjs', 'b.mjs']) });
+  return r.findings.filter(f => f.cls === 'CA').length === 1 && !r.findings.some(f => f.cls === 'UC');
+})());
+// Honest no_change — the diff is NOT the agent's (empty authored / all-excluded) → SILENT, no CA and no UC.
+ok('no_change + empty authored Set (dirty tree, agent touched nothing) → clean, no CA/UC', verify(contract([{ t: 'no_change' }]), { files: [{ status: 'M', path: 'a.mjs' }], authored: new Set() }).ok);
+ok('no_change + only-excluded authored changes → clean (honest no_change)', verify(contract([{ t: 'no_change' }]), { files: [{ status: 'M', path: 'pnpm-lock.yaml' }], authored: new Set(['pnpm-lock.yaml']), excluded: (p) => p.endsWith('lock.yaml') }).ok);
 ok('deferred produces no verify finding (recorded, not audited here)', verify(contract([{ t: 'deferred', what: 'e2e', why: 'no staging' }], 'partial'), { files: [] }).ok);
 
 // ── the pincer: omission fires UC, invention fires CA, in the SAME turn ──
@@ -268,7 +294,12 @@ ok('buildReality: with untracked UNKNOWN (no-git fallback) the ledger mint still
 ok('verify: honest no_change after edit-then-revert (untracked:[]) → clean (FP-5)', verify(contract([{ t: 'no_change' }]), buildReality({ diff: '', cwd: '/r', authored: ['/r/src/app.js'], untracked: [] })).ok);
 ok('verify: Write-then-rm `created ghost.md` (untracked:[]) → CA, not blessed (FN-5)', has(verify(contract([{ t: 'created', file: 'ghost.md' }]), buildReality({ diff: '', cwd: '/r', authored: ['/r/ghost.md'], untracked: [] })), 'CA', 'absent from the diff'));
 ok('verify: honest heredoc `created tools/gen.py` (untracked-present) → clean (FP-8)', verify(contract([{ t: 'created', file: 'tools/gen.py' }]), buildReality({ diff: '', cwd: '/r', authored: [], untracked: ['tools/gen.py'] })).ok);
-ok('verify: an UNDECLARED authored untracked create still fires UC (no regression)', has(verify(contract([{ t: 'no_change' }]), buildReality({ diff: '', cwd: '/r', authored: ['/r/src/sneaky.js'], untracked: ['src/sneaky.js'] })), 'UC', 'undeclared change'));
+// Change 2b: a sole no_change claim hiding an authored untracked create now escalates from UC-warn to the
+// stronger self-contradiction block CA (the create is still caught — the regression guard holds, harder).
+ok('verify: an UNDECLARED authored untracked create under no_change now fires the block CA', (() => {
+  const r = verify(contract([{ t: 'no_change' }]), buildReality({ diff: '', cwd: '/r', authored: ['/r/src/sneaky.js'], untracked: ['src/sneaky.js'] }));
+  return has(r, 'CA', 'declared no_change') && r.findings.some(f => f.cls === 'CA' && f.sev === 'block') && !r.findings.some(f => f.cls === 'UC');
+})());
 // C-9 (Fable review D1): untracked === null (git status failed / no-git workspace) ⇒ LEDGER fallback, not an
 // empty untracked set — else every honest Write-created `created` claim blocks on the fail-open path.
 ok('buildReality: untracked=null (git unknown) falls back to the ledger mint (honest created verifies)', buildReality({ diff: '', cwd: '/r', authored: ['/r/new.mjs'], untracked: null }).files.some(f => f.path === 'new.mjs' && f.status === 'A'));

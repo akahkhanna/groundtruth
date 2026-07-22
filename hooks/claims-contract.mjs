@@ -65,6 +65,7 @@ export const SCHEMA_HELP = [
   '',
   'Claim types: created, modified, deleted, renamed, tests_pass, build_pass, deferred, no_change.',
   'status "partial" or "blocked" requires at least one "deferred" claim.',
+  '"no_change" must be the ONLY claim — it asserts the turn changed nothing, so it cannot coexist with any other claim.',
 ].join('\n');
 
 // Opening fence (3+ backticks + the tag on its own line) … content … closing fence line. `m` so ^/$ bind
@@ -146,6 +147,14 @@ export function validateContract(obj) {
   if ((obj.status === 'partial' || obj.status === 'blocked')
       && !obj.claims.some(c => c && c.t === 'deferred')) {
     errors.push(`status "${obj.status}" requires at least one "deferred" claim`);
+  }
+
+  // Cross-field: `no_change` asserts the turn changed nothing — it cannot coexist with any claim that asserts
+  // a change (created/modified/deleted/renamed/tests_pass/build_pass/deferred). The two together are a direct
+  // self-contradiction decidable from the block alone, so reject at schema time (→ NC) rather than leaving
+  // verify() to reconcile a contradiction. (Change 2a.)
+  if (obj.claims.some(c => c && c.t === 'no_change') && obj.claims.some(c => c && c.t !== 'no_change')) {
+    errors.push('"no_change" must be the only claim — it asserts nothing changed, so it cannot coexist with any other claim');
   }
 
   return { ok: errors.length === 0, errors, contract: errors.length === 0 ? obj : null };
@@ -433,17 +442,40 @@ export function verify(contract, reality = {}) {
         findings.push({ cls: 'CA', sev: 'info', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but every matching run was FILTERED to a subset — a filtered run cannot back the full \`${c.cmd}\` claim` });
     }
     // deferred: recorded, never verified against the diff (feeds the Week-3 ledger).
-    // no_change: contributes no claimed path; a non-empty diff surfaces precisely as UC below.
+    // no_change: contributes no claimed path; a non-empty AUTHORED diff surfaces as the block CA just below
+    //            (a self-contradiction), and any residual as UC.
+  }
+
+  // Scope to files the AGENT authored this session (its Write/Edit ledger). A file the agent didn't touch —
+  // a tree dirty at session start, a manual edit, lockfile churn from `npm install` — is not something it
+  // could honestly declare, so flagging it is a false positive. `authored === undefined` (no transcript /
+  // pure-unit path) audits the WHOLE diff — the explicit test-only contract. Shared by the no_change check
+  // and PASS 2. (Fable finding 7.)
+  const authored = reality.authored;   // Set | undefined
+  const agentTouched = (p) => authored === undefined || authored.has(p);
+
+  // ── no_change contradiction (Change 2b) — a contract whose SOLE claim is `no_change` on a turn that
+  // authored non-excluded changes is a direct self-contradiction ("I changed nothing" + a diff that shows
+  // otherwise), not an ordinary undeclared omission. Escalate it to a single block-tier CA. Scope the
+  // "authored, non-excluded" set EXACTLY like the UC pass below (authored-set filter when we have the ledger;
+  // whole-files fallback only when authored === undefined; excluded paths never count). An empty authored Set
+  // or an all-excluded diff yields an empty set → SILENT (the honest no_change case). When it fires, the same
+  // files' per-file UC warns are SUPPRESSED below — the CA already condemns them, harder.
+  const noChangeContradiction = new Set();
+  if (claims.length > 0 && claims.every(c => c && c.t === 'no_change')) {
+    for (const f of files) {
+      const path = norm(f.path);
+      if (excluded(path)) continue;
+      if (!agentTouched(path) && !(f.status === 'R' && agentTouched(norm(f.from)))) continue;
+      noChangeContradiction.add(path);
+    }
+    if (noChangeContradiction.size > 0) {
+      const shown = [...noChangeContradiction].slice(0, 3).join(', ');
+      findings.push({ cls: 'CA', sev: SEV_CA, msg: `declared no_change, but the diff shows authored changes: ${shown}` });
+    }
   }
 
   // ── PASS 2 — reality → claims (UC) ──
-  // Scope to files the AGENT authored this session (its Write/Edit ledger). A file the agent didn't touch —
-  // a tree dirty at session start, a manual edit, lockfile churn from `npm install` — is not something it
-  // could honestly declare, so flagging it as undeclared is a false positive. `authored === undefined`
-  // (no transcript) audits nothing here rather than everything. (Fable finding 7; tests pass `authored`
-  // undefined for the pure-unit path, which keeps auditing all — that's the explicit test-only contract.)
-  const authored = reality.authored;   // Set | undefined
-  const agentTouched = (p) => authored === undefined || authored.has(p);
   for (const f of files) {
     const path = norm(f.path);
     if (excluded(path)) continue;
@@ -451,6 +483,7 @@ export function verify(contract, reality = {}) {
     if (claimedPaths.has(path)) continue;
     if (f.status === 'R' && claimedPaths.has(norm(f.from))) continue;
     if (!agentTouched(path) && !(f.status === 'R' && agentTouched(norm(f.from)))) continue;
+    if (noChangeContradiction.has(path)) continue;   // already condemned by the no_change CA — no redundant UC warn
     findings.push({ cls: 'UC', sev: SEV_UC, file: path, status: f.status, msg: `undeclared change: ${path} (${f.status}) is in the diff but no claim covers it` });
   }
 
