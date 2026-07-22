@@ -380,20 +380,37 @@ ok('contractFindings: valid contract, clean reality → no findings', contractFi
 }
 // ── openDeferrals: reconstruct the still-open deferral set across the session's contracts (spec §6) ──
 {
-  const C = (...claims) => ({ v: 1, task: 't', status: 'complete', claims });
+  const Ct = (task, ...claims) => ({ v: 1, task, status: 'complete', claims });
+  const C = (...claims) => Ct('t', ...claims);
   const d = (what, why = 'r') => ({ t: 'deferred', what, why });
+  const whats = (contracts) => openDeferrals(contracts).map(x => x.what);
   ok('openDeferrals: a deferral from turn 1 STAYS OPEN when turn 2 omits it (the persistence fix)',
-    openDeferrals([C(d('add e2e coverage')), C({ t: 'modified', file: 'x.js' })]).map(x => x.what).join(',') === 'add e2e coverage');
+    whats([C(d('add e2e coverage')), C({ t: 'modified', file: 'x.js' })]).join(',') === 'add e2e coverage');
   ok('openDeferrals: two turns of deferrals accumulate', openDeferrals([C(d('a thing')), C(d('another thing'))]).length === 2);
   ok('openDeferrals: dedupes by normalized `what`', openDeferrals([C(d('Fix The Retry')), C(d('fix the retry'))]).length === 1);
-  ok('openDeferrals: a later claim whose descriptor CONTAINS the `what` CLOSES it (strict substring)',
-    openDeferrals([C(d('add e2e coverage')), C({ t: 'created', file: 'add e2e coverage.test.js' })]).length === 0);
+  // closes only on VERIFIED work covering the (distinctive) key, token-bounded:
+  ok('openDeferrals: a CREATED file covering the multi-word `what` (token-bounded) CLOSES it',
+    openDeferrals([C(d('add e2e coverage')), C({ t: 'created', file: 'tests/add-e2e-coverage.spec.ts' })]).length === 0);
+  ok('openDeferrals: a run `cmd` covering the `what` CLOSES it',
+    openDeferrals([C(d('run smoke suite')), C({ t: 'tests_pass', cmd: 'npm run smoke suite' })]).length === 0);
   ok('openDeferrals: unrelated later work does NOT false-close (bias to keep-open)',
     openDeferrals([C(d('add e2e coverage')), C({ t: 'modified', file: 'README.md' }, { t: 'tests_pass', cmd: 'npm test' })]).length === 1);
   ok('openDeferrals: re-declaring the same turn a matching claim appears KEEPS it open',
-    openDeferrals([C(d('add e2e coverage'), { t: 'created', file: 'add e2e coverage' })]).length === 1);
-  ok('openDeferrals: a too-short `what` (<4 chars) is never auto-closed by a coincidental substring',
-    openDeferrals([C(d('ci')), C({ t: 'modified', file: 'scion.js' })]).length === 1);
+    openDeferrals([C(d('add e2e coverage'), { t: 'created', file: 'tests/add-e2e-coverage.spec.ts' })]).length === 1);
+  // ── Fable PR #4 review: the four proven false-close leaks must NOT silently drop a set-aside ──
+  // A/D — the agent-authored `task` is UNVERIFIED, so echoing the `what` in a later turn's task must NOT close.
+  ok('openDeferrals (A): a task that echoes the `what` on a zero-work turn does NOT close',
+    whats([Ct('add auth', { t: 'modified', file: 'src/auth.js' }, d('e2e coverage')), Ct('explain the e2e coverage plan', { t: 'no_change' })]).join(',') === 'e2e coverage');
+  ok('openDeferrals (D): a blocked turn whose task equals the `what` does NOT close the original',
+    whats([C(d('e2e coverage')), Ct('add e2e coverage', d('staging env access'))]).length === 2);
+  // C — verify() abstains on `modified` symbols, so they are agent-assertable and must NOT close.
+  ok('openDeferrals (C): a `modified` claim\'s symbols do NOT close (unverified channel)',
+    whats([C(d('e2e coverage')), C({ t: 'modified', file: 'README.md', symbols: ['e2e coverage'] })]).join(',') === 'e2e coverage');
+  // B — a terse, generic `what` must not be dropped by an incidental same-named path.
+  ok('openDeferrals (B): terse `config` is NOT closed by an incidental src/config.js',
+    whats([C(d('config')), C({ t: 'modified', file: 'src/config.js' })]).join(',') === 'config');
+  ok('openDeferrals (B): terse `tests` is NOT closed by an incidental tests/other.fixture.json',
+    whats([C(d('tests')), C({ t: 'created', file: 'tests/other.fixture.json' })]).join(',') === 'tests');
   ok('openDeferrals: empty / non-array input → []', openDeferrals(undefined).length === 0 && openDeferrals([]).length === 0);
 }
 

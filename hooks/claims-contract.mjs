@@ -670,25 +670,34 @@ export const deferralMsg = (d) => `deferred (declared) — ${d.what}${d.why ? ` 
 // Reconstruct the still-OPEN deferrals across the session from the ordered list of past+current CONTRACTS
 // (parsed from the transcript — the unforgeable harness record, so a declared set-aside can't silently vanish
 // by omission next turn; restores spec §6's multi-turn tracking WITHOUT a forgeable ledger — the v1 tasks.json
-// was agent-writable, exactly what v2 rejects). Keyed by the normalized `what`. A deferral CLOSES only on a
-// STRONG signal that a later turn did the work: its full normalized `what` appears as a substring of a
-// completing claim's descriptor (file/cmd/symbol) or the turn's task. Closure is deliberately conservative —
-// a missed close leaves a stale deferral on the card (a harmless warn, the agent's own admission), whereas a
-// false close would SILENTLY DROP a real open loop (the bad direction). Session-scoped by construction (a new
-// session = a fresh transcript = a fresh ledger). Pure → directly unit-testable.
+// was agent-writable, exactly what v2 rejects). Keyed by the normalized `what`.
+//
+// A deferral CLOSES only when a later turn's VERIFIED work covers it, and only for a distinctive key — because
+// a false close SILENTLY DROPS a real open loop (the bad direction), whereas a missed close leaves a harmless
+// stale warn. So closure uses ONLY verify()-grounded channels: `file`/`from`/`to` (checked by the CA pass),
+// `cmd` (checked by the run sensors), and `symbols` ONLY from a `created` claim (the one case verify grounds
+// symbols — it deliberately abstains on `modified` symbols, so those are agent-assertable and must NOT close).
+// The turn's `task` is EXCLUDED entirely: it is the agent-authored ASK, never verified, so an agent (or a Q&A
+// turn that merely echoes the phrase) could vanish a set-aside for free. The key must be distinctive (≥2 words
+// or ≥8 chars) and match on TOKEN boundaries, so a terse `what` like "config"/"tests" isn't dropped by an
+// incidental same-named path. (All four false-close leaks Fable's PR #4 review proved: A/D task, C modified-
+// symbols, B short-key.) Session-scoped by construction. Pure → directly unit-testable.
 const nlow = (s) => String(s == null ? '' : s).trim().toLowerCase().replace(/\s+/g, ' ');
+const toks = (s) => ' ' + nlow(s).replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim() + ' ';   // ' tok tok '
 export function openDeferrals(contracts) {
   const open = new Map();   // key: normalized `what` → { what, why }
   for (const c of (Array.isArray(contracts) ? contracts : [])) {
     const claims = Array.isArray(c && c.claims) ? c.claims : [];
-    // (1) close open deferrals this turn's COMPLETING work clearly satisfies (strict substring containment).
-    const done = claims.filter(x => x && x.t !== 'deferred' && x.t !== 'no_change')
-      .flatMap(x => [x.file, x.from, x.to, x.cmd, ...(Array.isArray(x.symbols) ? x.symbols : [])])
-      .filter(isNonEmptyStr).map(nlow);
-    const task = nlow(c && c.task);
+    // (1) close a deferral only when this turn's VERIFIED work covers it (token-bounded, distinctive key only).
+    const done = claims
+      .filter(x => x && x.t !== 'deferred' && x.t !== 'no_change')
+      .flatMap(x => [x.file, x.from, x.to, x.cmd, ...(x.t === 'created' && Array.isArray(x.symbols) ? x.symbols : [])])
+      .filter(isNonEmptyStr).map(toks);
     for (const key of [...open.keys()]) {
-      if (key.length < 4) continue;                       // too short to match safely → keep open
-      if (done.some(d => d.includes(key)) || (task && task.includes(key))) open.delete(key);
+      const kt = toks(key).trim();                          // ' key tokens '
+      const words = kt ? kt.split(' ') : [];
+      if (words.length < 2 && kt.length < 8) continue;      // too generic → keep open (never silently drop)
+      if (done.some(d => d.includes(' ' + kt + ' '))) open.delete(key);
     }
     // (2) open / refresh deferrals declared this turn — re-declaring KEEPS it open even if (1) just matched.
     for (const x of claims) {
