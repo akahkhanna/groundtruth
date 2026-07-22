@@ -578,7 +578,7 @@ function relativize(p, cwd) {
  * test/build claims. An empty array means a transcript with no commands (a real "nothing ran"). This
  * distinction is why a truthful `tests_pass` on the fail-open path is no longer a false CA. (Fable finding 3.)
  */
-export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile = undefined, excluded = () => false, cwd = '', authored = undefined, lastEditSeq = undefined, untracked = undefined, sidechainCmds = undefined } = {}) {
+export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile = undefined, excluded = () => false, cwd = '', authored = undefined, lastEditSeq = undefined, untracked = undefined, sidechainCmds = undefined, contractInstruction = false } = {}) {
   const commands = bashEvents === undefined ? undefined : (bashEvents || [])
     .filter(e => e && typeof e.cmd === 'string')
     .map(e => ({
@@ -613,13 +613,18 @@ export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile 
   } else if (authoredSet) {
     for (const p of authoredSet) if (p && !seen.has(p)) files.push({ status: 'A', path: p });
   }
-  return { files, commands, symbolsByFile, excluded, authored: authoredSet, lastEditSeq, sidechainCmds };
+  return { files, commands, symbolsByFile, excluded, authored: authoredSet, lastEditSeq, sidechainCmds, contractInstruction };
 }
 
-// Contract-finding severities. NC is WARN by default (deliberately conservative — a repo touched by an
-// agent that never saw the contract instruction, e.g. a teammate's plain session, would otherwise NC-block
-// every turn; scoping NC-block to contract-aware sessions is a follow-up). CA/UC keep verify()'s severities.
+// Contract-finding severities. NC is WARN unless the session is CONTRACT-AWARE — i.e. the repo's CLAUDE.md
+// carries the `groundtruth-claims` instruction (the Stop hook passes `reality.contractInstruction`). Then NC
+// is BLOCK-eligible: omitting the manifest on a code turn is the cheapest evasion (a lie CAs and can block,
+// but silence only warned — an asymmetry that made "just don't declare" the safe dodge). Gating the escalation
+// on the instruction preserves the conservative default for a teammate's plain session that never saw it; and
+// because the instruction lives inside Rule Zero's tamper perimeter, an agent can't quietly delete it to dodge
+// the block without tripping the referee-tamper check. CA/UC keep verify()'s severities.
 const SEV_NC = 'warn';
+const SEV_NC_AWARE = 'block';
 
 /**
  * The single entry the Stop hook calls (runs by default; disabled only by GROUNDTRUTH_CONTRACT=0). Returns findings in the engine's
@@ -648,7 +653,9 @@ export function contractFindings(message, reality = {}) {
       .filter(f => !excluded(norm(f.path)));
     if (declarable.length === 0) return [];
     // NC: surface the first concrete reason (not the whole SCHEMA_HELP block — that goes to the block handback).
-    return [{ cls: 'NC', sev: SEV_NC, msg: `no valid ${FENCE_TAG} block — ${a.errors[0] || 'missing'}` }];
+    // Block-eligible only in a contract-aware session (the instruction is in the repo's rule docs); else warn.
+    const ncSev = reality.contractInstruction ? SEV_NC_AWARE : SEV_NC;
+    return [{ cls: 'NC', sev: ncSev, msg: `no valid ${FENCE_TAG} block — ${a.errors[0] || 'missing'}` }];
   }
   const out = verify(a.contract, reality).findings.map(f => ({ cls: f.cls, sev: f.sev, msg: f.msg }));
   // Surface DECLARED deferrals as the task ledger's replacement (spec §6: declaration, not prose extraction).

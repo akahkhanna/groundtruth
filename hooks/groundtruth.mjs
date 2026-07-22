@@ -38,7 +38,7 @@ import { checkDroppedSymbols, addedSymbolsByFile } from './symbol-integrity.mjs'
 // v2 claims contract — the DEFAULT honesty engine as of v2.0.0 (disable with GROUNDTRUTH_CONTRACT=0; the
 // diff-facing checks still run, but the retired v1 prose honesty layer is NOT restored). Pure module —
 // parse + validate + verify the agent's end-of-turn claims block against reality.
-import { buildReality, contractFindings } from './claims-contract.mjs';
+import { buildReality, contractFindings, FENCE_TAG } from './claims-contract.mjs';
 
 const CLASS_NAME = { 1: 'false test/build claim', 2: 'stub/placeholder', 3: 'silent no-op', 4: 'phantom ref',
   6: 'dropped symbol (dangling ref)', 9: 'special-casing / overfit', async_done: 'false completion (async)',
@@ -73,6 +73,21 @@ const COMPLETION_STAMP_RE = /(^|\n)[\s>#*-]*(?:🟢\s*|✓\s*)?(?:all\s+|told\s*
 // Rule-source files the compiler reads (and the --watch-rules trigger fires on). Declared, versioned
 // sources only (§10) — never freeform memory.
 const RULE_SRC_RE = /(^|\/)(CLAUDE|AGENTS|SCHEMA)\.md$|(^|\/)ARCHITECTURE\.md$|\.claude\/skills\/[^/]+\/SKILL\.md$|\.claude\/agents\/[^/]+\.md$|(^|\/)docs\/[^/]+\.md$|\.(cursor|windsurf)rules$/i;
+
+// A session is CONTRACT-AWARE when a tracked rule doc carries the FENCED `groundtruth-claims` instruction that
+// `/groundtruth-setup` writes — the signal that the agent was told to declare a manifest. Matched as a code
+// FENCE (```groundtruth-claims), NOT a bare inline mention, so a doc that merely *discusses* the format (e.g.
+// Groundtruth's own CLAUDE.md) doesn't count. Its presence escalates NC from warn → block-eligible (closes the
+// "just don't declare" evasion). Injectable (files + reader) so it's unit-testable. (Follow-up: NC asymmetry.)
+const CONTRACT_INSTRUCTION_RE = new RegExp('(^|\\n)`{3,}[ \\t]*' + FENCE_TAG + '\\b');
+export function contractInstructionPresent(files, readFile) {
+  for (const f of (files || [])) {
+    if (!RULE_SRC_RE.test(f)) continue;
+    let txt = ''; try { txt = readFile(f) || ''; } catch { continue; }
+    if (CONTRACT_INSTRUCTION_RE.test(txt)) return true;
+  }
+  return false;
+}
 
 // Shared classifiers — used by both Verify (analyze, on a diff) and Audit (scanContent, on whole files).
 // Markers are UPPERCASE-only by convention: that avoids matching `xxx` in a URL or a `todo` variable
@@ -2464,6 +2479,12 @@ function main() {
         // commands the filtered SIDECHAINS ran → a tests_pass claim backed only by a subagent's run ABSTAINS
         // (not a block-tier "no such command ran"). (Fable adv FP-10.)
         sidechainCmds: parsed.sidechainCmds,
+        // CONTRACT-AWARE? — a tracked rule doc carries the fenced `groundtruth-claims` instruction. When it
+        // does, NC (no manifest on a code turn) becomes BLOCK-eligible, closing the "just don't declare" dodge.
+        // The instruction lives inside Rule Zero's tamper perimeter, so it can't be quietly deleted to escape.
+        contractInstruction: contractInstructionPresent(
+          git('ls-files', cwd).split('\n').filter(Boolean),
+          (f) => readFileSync(join(cwd, f), 'utf8')),
       });
       findings.push(...contractFindings(payload.last_assistant_message || '', reality));
     } catch { /* fail-open — v1 verdict stands */ }

@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { analyze, stripQuotedForClaim, claimsSuccess, testExclusionFindings, testWeakeningFindings, vacuousTestFindings, mojibakeFindings, agentFindings, parseAgentFile, untrackedAdded, parseTranscript, scanContent, attributeDebt, runCompiledRules, compileRuleRe, intentConfidence, renderCard, shouldAskStar, projectFindings, advanceSnapshot, freshRatifiers, remediationDecision, renderCorrective, blockOutcomeNote, liveNoticeCmds, editorCli, runProcedures, envFindings, loadGtConfig, pendingApprovals, refereeTamper, compareSnapshot, integrityScope, GAMED_FILE_RE, priorFindingsContext, sessionHasCommit, proposedStale, isSecret, excludedScanPath, dropExcludedFiles, preCommitHookScript, parseDiffRange, lastCodeEditSeq } from './groundtruth.mjs';
+import { analyze, stripQuotedForClaim, claimsSuccess, testExclusionFindings, testWeakeningFindings, vacuousTestFindings, mojibakeFindings, agentFindings, parseAgentFile, untrackedAdded, parseTranscript, scanContent, attributeDebt, runCompiledRules, compileRuleRe, intentConfidence, renderCard, shouldAskStar, projectFindings, advanceSnapshot, freshRatifiers, remediationDecision, renderCorrective, blockOutcomeNote, liveNoticeCmds, editorCli, runProcedures, envFindings, loadGtConfig, pendingApprovals, refereeTamper, compareSnapshot, integrityScope, GAMED_FILE_RE, priorFindingsContext, sessionHasCommit, proposedStale, isSecret, excludedScanPath, dropExcludedFiles, preCommitHookScript, parseDiffRange, lastCodeEditSeq, contractInstructionPresent } from './groundtruth.mjs';
 import { parseCorrectivePairs, parseForbidTokens, isArmableToken, extractCandidates, compile, repoSourceExts } from './compile-rules.mjs';
 import { checkDroppedSymbols, collectDefs } from './symbol-integrity.mjs';
 
@@ -1095,6 +1095,23 @@ ok('no-git: no Edit/Write calls → empty toolDiff (nothing to check)',
   // falls back to the ledger instead of treating [] as "nothing untracked" and blocking honest created claims.
   ok('untrackedAdded: a non-git dir returns paths:null (unknown), NOT an empty array',
     untrackedAdded('/nonexistent-gt-dir-xyz').paths === null);
+}
+
+// ── contractInstructionPresent: a session is "contract-aware" only if a RULE DOC carries the FENCED instruction
+//    (not a bare prose mention) — the signal that escalates NC from warn to block-eligible. ──
+{
+  const fenced = 'End every turn with:\n```groundtruth-claims\n{ "v": 1 }\n```\n';
+  const prose = 'the agent ends a turn with one fenced `groundtruth-claims` block';   // documentation, not an instruction
+  const rd = (m) => (f) => { if (!(f in m)) throw new Error('nope'); return m[f]; };
+  ok('contractInstructionPresent: a FENCED groundtruth-claims block in CLAUDE.md → true',
+    contractInstructionPresent(['CLAUDE.md'], rd({ 'CLAUDE.md': fenced })) === true);
+  ok('contractInstructionPresent: a bare PROSE mention (no fence) does NOT count → false',
+    contractInstructionPresent(['CLAUDE.md'], rd({ 'CLAUDE.md': prose })) === false);
+  ok('contractInstructionPresent: the fence in a NON-rule-doc (a .mjs) does NOT count → false',
+    contractInstructionPresent(['hooks/x.mjs'], rd({ 'hooks/x.mjs': fenced })) === false);
+  ok('contractInstructionPresent: the fence in docs/*.md (a rule doc) counts → true',
+    contractInstructionPresent(['docs/rules.md'], rd({ 'docs/rules.md': fenced })) === true);
+  ok('contractInstructionPresent: an unreadable file is skipped, not thrown', contractInstructionPresent(['CLAUDE.md'], rd({})) === false);
 }
 
 // ── compile() validation gates: a seed rule must (1) compile at runtime and (2) match its positive_example

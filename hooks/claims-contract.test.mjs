@@ -359,6 +359,14 @@ ok('contractFindings: no block but the agent AUTHORED changes → single NC find
 })());
 ok('contractFindings: malformed JSON (with authored work) → NC', contractFindings(block('{ bad json }'), authoredReality(['x.mjs'])).some(f => f.cls === 'NC'));
 ok('contractFindings: no block AND no authored change → ABSTAIN, no NC (kills the default-on nag storm)', contractFindings('just chatting, read-only turn', { files: [], authored: new Set() }).length === 0);
+// NC asymmetry follow-up: NC is BLOCK-eligible in a CONTRACT-AWARE session (the repo carries the instruction),
+// so "just don't declare" is no longer the cheap dodge; a plain session that never saw it stays warn.
+ok('contractFindings: NC is BLOCK-eligible when reality.contractInstruction is set (contract-aware session)', (() => {
+  const f = contractFindings('just prose, no fence', { ...authoredReality(['x.mjs']), contractInstruction: true });
+  return f.length === 1 && f[0].cls === 'NC' && f[0].sev === 'block';
+})());
+ok('contractFindings: NC stays WARN in a plain session (no instruction) — conservative default preserved', contractFindings('just prose, no fence', { ...authoredReality(['x.mjs']), contractInstruction: false })[0].sev === 'warn');
+ok('buildReality: contractInstruction flows through to reality', buildReality({ diff: '', cwd: '/r', authored: ['/r/x.mjs'], untracked: ['x.mjs'], contractInstruction: true }).contractInstruction === true);
 ok('contractFindings: valid contract, clean reality → no findings', contractFindings(block(good()), { files: [{ status: 'A', path: 'src/auth.mjs' }], commands: [] }).length === 0);
 {
   // the pincer through the engine seam: invented file → CA(block), undeclared file → UC(warn)

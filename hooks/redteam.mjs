@@ -254,6 +254,17 @@ try {
   git(['config', '--unset', 'diff.external']);
   kreset();
 
+  // K11 — NC asymmetry follow-up: in a CONTRACT-AWARE repo (CLAUDE.md carries the FENCED instruction), an
+  // authored change with NO manifest is a BLOCK-eligible NC, not a warn — closing the "just don't declare"
+  // dodge. Warn mode still shows it (the card carries the "GROUNDTRUTH_BLOCK=1 to halt" marker) without halting.
+  writeFileSync(join(repo, 'CLAUDE.md'), '# Project rules\n\nEnd every code-changing turn with one fenced block:\n\n```groundtruth-claims\n{ "v": 1, "task": "<one line>", "status": "complete", "claims": [] }\n```\n');
+  git(['add', 'CLAUDE.md']); git(['commit', '-qm', 'add contract instruction']);
+  writeFileSync(join(repo, 'real.js'), 'export const v = 12;\n');
+  const k11 = driveClean('k11', 'Done — no manifest this turn.', [userln('bump real.js'), writeln(join(repo, 'real.js'), 'export const v = 12;\n')]);
+  check('contract: NC in a contract-aware repo (CLAUDE.md has the fenced instruction) is BLOCK-eligible, not warn',
+    /no claims contract/i.test(k11) && /GROUNDTRUTH_BLOCK=1 to halt/.test(k11), k11.slice(0, 400));
+  git(['rm', '-q', 'CLAUDE.md']); git(['commit', '-qm', 'drop']); kreset();
+
   delete process.env.GROUNDTRUTH_CONTRACT;
 } finally { rmSync(repo, { recursive: true, force: true }); }
 
