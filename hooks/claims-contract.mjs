@@ -222,16 +222,20 @@ const norm = (p) => String(p == null ? '' : p).trim().replace(/\\/g, '/').replac
 // test would pass"` (exit 0) as evidence for `tests_pass:{cmd:"npm test"}` is a false green. (Fable finding 5.)
 const LOOKALIKE_RE = /^\s*(?:echo|printf|cat|grep|rg|ag|ls|head|tail|sed|awk|:|true|false|#)\b/;
 
-// Does a tests_pass/build_pass claim's cmd correspond to a command that actually ran? Match on exact cmd
-// or an executed command that CONTAINS it (tolerates wrapper flags: `npm test` vs `npm test -- --ci`).
-// The lookalike test is applied PER SEGMENT (split on && / || / ; / |), so a real invocation inside a
-// compound run — `echo start && npm test` — still matches, while `echo "npm test"` does not. (Fable re-review, finding 5.)
+// Does a tests_pass/build_pass claim's cmd correspond to a command that actually ran? QUOTED substrings are
+// masked FIRST (so an operator or the cmd name inside a quoted arg — `grep "lint && npm test" pkg.json`,
+// `echo "run npm test"` — is neither split on nor counted as a run), then the remainder is split on
+// && / || / ; / | and each segment lookalike-tested. So `echo start && npm test` (a real run) matches while
+// `echo "npm test"` and `grep "…npm test…" f` do not. (Fable re-review round 3, Issue 1.)
 function commandRun(commands, cmd) {
   const want = norm(cmd);
-  return (commands || []).filter(e => String(e.cmd).split(/&&|\|\|?|;/).some(seg => {
-    const s = norm(seg);
-    return (s === want || s.includes(want)) && !LOOKALIKE_RE.test(s);
-  }));
+  return (commands || []).filter(e => {
+    const masked = String(e.cmd).replace(/"[^"]*"|'[^']*'/g, '""');
+    return masked.split(/&&|\|\|?|;/).some(seg => {
+      const s = norm(seg);
+      return (s === want || s.includes(want)) && !LOOKALIKE_RE.test(s);
+    });
+  });
 }
 
 /**
@@ -346,23 +350,24 @@ function unquotePath(s) {
 const stripAB = (p) => (p.startsWith('a/') || p.startsWith('b/')) ? p.slice(2) : p;
 
 /**
- * Parse `reality.files` [{status,path,from?}] from a unified diff — the SAME authored diff the engine
- * already computes (git diff + the tool-ledger merge), so untracked creates are visible without a second
- * git call. Status is read from the diff's OWN STRUCTURE, anchored on the `diff --git` header so a stray
- * content line that looks like a file header can't mint a phantom file (Fable finding 8):
+ * Parse `reality.files` [{status,path,from?}] from the GIT portion of a unified diff — status is read from
+ * the diff's own structure, anchored on the `diff --git` header:
  *   `new file mode`/`--- /dev/null` → A · `deleted file mode`/`+++ /dev/null` → D · `rename from/to` → R ·
  *   `Binary files … differ` and empty new/modified files (which emit NO ---/+++ hunk headers) → resolved
- *   from the diff --git block, not from hunk lines — the fix for CA-block FPs on binaries and empty files.
- * A bare `+++ b/path` with no `diff --git` (a tool-ledger fragment for a new file) still reads as A.
- * Last status per path wins.
+ *   from the diff --git block. Hunk bodies are consumed by the `@@ -a,b +c,d @@` line COUNTS, so an in-hunk
+ *   content line that looks like a header (`+++ b/X`, `--- a/X`, `++ b/X`) can never mint a phantom file —
+ *   the fix for the agent-controlled-content claim-laundering the naive `inHunk` boolean allowed (Fable re-review round 3, Issue 2).
+ *
+ * It deliberately does NOT parse bare tool-ledger `+++ b/` fragments: those paths are agent-controllable
+ * content, so untracked creates are instead added from the AUTHORITATIVE Write/Edit ledger in buildReality.
  */
 export function filesFromDiff(diff) {
   const byPath = new Map();          // path → status (A/M/D)
   const renames = [];                // {from,to}
   const renamed = new Set();
   let cur = null;                    // current `diff --git` block
-  let inHunk = false;                // past the first `@@` → subsequent ---/+++ are CONTENT, not headers
   let prevMinus = false;             // the previous line was this block's git `--- ` header (so the next `+++ ` is its pair)
+  let remOld = 0, remNew = 0;        // hunk lines still to consume on the old/new side (exact @@ counting)
   const flush = () => {
     if (!cur) return;
     const b = cur; cur = null;
@@ -381,27 +386,28 @@ export function filesFromDiff(diff) {
       // and normal paths fall back to the greedy two-token split.
       const rest = line.slice(11); const bi = rest.startsWith('a/') ? rest.lastIndexOf(' b/') : -1;
       const [aRaw, bRaw] = bi > 0 ? [rest.slice(0, bi), rest.slice(bi + 1)] : (rest.match(/^(.+) (.+)$/)?.slice(1) || [rest, rest]);
-      cur = { aPath: stripAB(unquotePath(aRaw)), bPath: stripAB(unquotePath(bRaw)) }; inHunk = false; prevMinus = false; continue;
+      cur = { aPath: stripAB(unquotePath(aRaw)), bPath: stripAB(unquotePath(bRaw)) }; prevMinus = false; remOld = 0; remNew = 0; continue;
     }
-    if (line.startsWith('@@')) { inHunk = true; prevMinus = false; continue; }   // hunk body begins
+    const hm = line.match(/^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/);
+    if (hm) { remOld = hm[1] === undefined ? 1 : +hm[1]; remNew = hm[2] === undefined ? 1 : +hm[2]; prevMinus = false; continue; }
+    if (remOld > 0 || remNew > 0) {           // inside a hunk body → consume by count, never reinterpret
+      const c = line[0];
+      if (c === '\\') { /* "\ No newline at end of file" — counts for neither side */ }
+      else if (c === '-') remOld--;
+      else if (c === '+') remNew--;
+      else { remOld--; remNew--; }            // context (space) or blank line
+      continue;
+    }
     if (line.startsWith('--- ')) {
-      // a git `--- ` header (a/ or /dev/null) only counts before the hunk and inside a block; else it's content.
-      if (cur && !inHunk) { const r = unquotePath(line.slice(4).trim()); cur.minus = r === '/dev/null' ? '/dev/null' : (r.startsWith('a/') ? r.slice(2) : cur.minus); prevMinus = true; continue; }
-      prevMinus = false; continue;
+      if (cur) { const r = unquotePath(line.slice(4).trim()); cur.minus = r === '/dev/null' ? '/dev/null' : (r.startsWith('a/') ? r.slice(2) : cur.minus); prevMinus = true; }
+      continue;
     }
     if (line.startsWith('+++ ')) {
-      const r = unquotePath(line.slice(4).trim());
-      const plus = r === '/dev/null' ? '/dev/null' : (r.startsWith('b/') ? r.slice(2) : null);
-      if (cur && !inHunk && prevMinus) { cur.plus = plus; prevMinus = false; continue; }   // git header pair
-      // Otherwise a BARE tool-ledger fragment for a new file — a `+++ b/path` NOT preceded by a `--- ` header.
-      // This is the untracked-create seam: the engine appends fragments AFTER the git diff, so `cur`/`inHunk`
-      // are still set from the last git block — without this branch the create is dropped → CA on an honest
-      // `created` claim in any mixed session (Fable re-review, finding 1/2 regression).
-      flush();
-      if (plus && plus !== '/dev/null') byPath.set(plus, byPath.get(plus) || 'A');
-      inHunk = false; prevMinus = false; continue;
+      // ONLY a git header pair (directly after this block's `--- `) sets the path; a stray `+++ ` (a tool-ledger
+      // fragment line, or content past the hunk) is ignored — ledger creates come from `authored` in buildReality.
+      if (cur && prevMinus) { const r = unquotePath(line.slice(4).trim()); cur.plus = r === '/dev/null' ? '/dev/null' : (r.startsWith('b/') ? r.slice(2) : cur.plus); }
+      prevMinus = false; continue;
     }
-    if (inHunk) { prevMinus = false; continue; }
     if (cur) {
       if (line.startsWith('new file mode')) cur.added = true;
       else if (line.startsWith('deleted file mode')) cur.deleted = true;
@@ -448,8 +454,16 @@ export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile 
       seq: typeof e.seq === 'number' ? e.seq : 0,
     }));
   const rel = (p) => relativize(p, cwd);
-  const files = filesFromDiff(diff).map(f => (f.from != null ? { ...f, path: rel(f.path), from: rel(f.from) } : { ...f, path: rel(f.path) }));
+  const gitFiles = filesFromDiff(diff).map(f => (f.from != null ? { ...f, path: rel(f.path), from: rel(f.from) } : { ...f, path: rel(f.path) }));
   const authoredSet = authored === undefined ? undefined : new Set((authored || []).map(rel));
+  // Untracked creates the agent authored via Write don't show in `git diff` (untracked), so add them from the
+  // AUTHORITATIVE ledger — NOT by parsing `+++ b/` fragments out of the diff, whose paths are agent-controllable
+  // content a planted `++ b/ghost.js` line could forge to launder a false `created` claim. (Fable round 3, Issue 2.)
+  const files = [...gitFiles];
+  if (authoredSet) {
+    const seen = new Set(gitFiles.map(f => f.path));
+    for (const p of authoredSet) if (p && !seen.has(p)) files.push({ status: 'A', path: p });
+  }
   return { files, commands, symbolsByFile, excluded, authored: authoredSet };
 }
 

@@ -194,28 +194,34 @@ ok('deferred produces no verify finding (recorded, not audited here)', verify(co
   ok('filesFromDiff: deleted → D', get('gone.mjs')?.status === 'D');
   ok('filesFromDiff: rename → R with from', (() => { const r = get('ren.mjs'); return r?.status === 'R' && r.from === 'old.mjs'; })());
 }
-ok('filesFromDiff: bare +++ b/ (tool-ledger fragment, no --- header) → A', filesFromDiff('+++ b/created.mjs\n+line').find(f => f.path === 'created.mjs')?.status === 'A');
+ok('filesFromDiff: a bare +++ b/ fragment is IGNORED (ledger creates come from buildReality, not diff text)', filesFromDiff('+++ b/created.mjs\n+line').length === 0);
 ok('filesFromDiff: a content line starting with dashes inside a hunk is NOT a file header', (() => {
   // `---- section` is a REMOVED markdown rule inside the hunk (prefix `-` + `--- section`), not a header.
   const files = filesFromDiff('diff --git a/doc.md b/doc.md\n--- a/doc.md\n+++ b/doc.md\n@@ -1 +1 @@\n---- section\n+kept');
   return files.length === 1 && files[0].path === 'doc.md' && files[0].status === 'M';
 })());
+ok('filesFromDiff: an in-hunk content line `++ b/X` (→ +++ b/X) cannot mint a phantom file (round 3, Issue 2)', (() => {
+  // real git diff: an added line whose content is `++ b/ghost.js` renders in the hunk as `+++ b/ghost.js`.
+  const files = filesFromDiff('diff --git a/notes.md b/notes.md\n--- a/notes.md\n+++ b/notes.md\n@@ -1,0 +1,2 @@\n++ b/ghost.js\n+real');
+  return files.length === 1 && files[0].path === 'notes.md' && !files.some(f => f.path === 'ghost.js');
+})());
 ok('filesFromDiff: empty new file (no hunk headers) → A', filesFromDiff('diff --git a/pkg/__init__.py b/pkg/__init__.py\nnew file mode 100644\nindex 0000000..e69de29').find(f => f.path === 'pkg/__init__.py')?.status === 'A');
 ok('filesFromDiff: binary modify (no ---/+++ ) → M', filesFromDiff('diff --git a/logo.png b/logo.png\nindex a1..b2 100644\nBinary files a/logo.png and b/logo.png differ').find(f => f.path === 'logo.png')?.status === 'M');
 ok('filesFromDiff: quoted non-ASCII path is decoded', filesFromDiff('diff --git "a/caf\\303\\251.js" "b/caf\\303\\251.js"\nnew file mode 100644\n--- /dev/null\n+++ "b/caf\\303\\251.js"\n+x').some(f => f.path === 'café.js'));
-// Fable re-review: a tool-ledger fragment appended AFTER a git block (the untracked-create seam) must still
-// be seen — this is the mixed-session shape that re-created the honest-`created` CA block.
-{
-  const mixed = 'diff --git a/app.js b/app.js\n--- a/app.js\n+++ b/app.js\n@@ -1 +1 @@\n-a\n+b\n+++ b//abs/repo/helper.js\n+export function h(){}';
-  const files = filesFromDiff(mixed);
-  ok('filesFromDiff: tool-ledger fragment after a git block is NOT dropped (mixed session)', files.some(f => f.path === '/abs/repo/helper.js' && f.status === 'A') && files.some(f => f.path === 'app.js' && f.status === 'M'));
-}
 ok('filesFromDiff: unquoted path with spaces (empty new file) parses whole path', filesFromDiff('diff --git a/my file.js b/my file.js\nnew file mode 100644\nindex 0..e').some(f => f.path === 'my file.js'));
+// The mixed-session seam (tracked edit + untracked create) — the untracked create now comes from the
+// AUTHORITATIVE ledger via buildReality, not from parsing a fragment out of the diff text.
+{
+  const mixed = 'diff --git a/app.js b/app.js\n--- a/app.js\n+++ b/app.js\n@@ -1 +1 @@\n-a\n+b';
+  const r = buildReality({ diff: mixed, cwd: '/abs/repo', authored: ['/abs/repo/app.js', '/abs/repo/helper.js'] });
+  ok('buildReality: mixed session — tracked edit (M from diff) + untracked create (A from ledger)', r.files.some(f => f.path === 'app.js' && f.status === 'M') && r.files.some(f => f.path === 'helper.js' && f.status === 'A'));
+  ok('buildReality: a ledger create is NOT duplicated when it is already a tracked git change', buildReality({ diff: 'diff --git a/x.js b/x.js\n--- a/x.js\n+++ b/x.js\n@@ -1 +1 @@\n-a\n+b', cwd: '/r', authored: ['/r/x.js'] }).files.filter(f => f.path === 'x.js').length === 1);
+}
 
 // ── buildReality: bashEvents → commands, files from diff, passthrough ──
 {
   const r = buildReality({
-    diff: '--- a/a.mjs\n+++ b/a.mjs\n@@ -1 +1 @@\n-x\n+y',
+    diff: 'diff --git a/a.mjs b/a.mjs\n--- a/a.mjs\n+++ b/a.mjs\n@@ -1 +1 @@\n-x\n+y',
     bashEvents: [
       { cmd: 'npm test', is_error: false },
       { cmd: 'npm run flaky', is_error: true },
@@ -231,9 +237,9 @@ ok('filesFromDiff: unquoted path with spaces (empty new file) parses whole path'
   ok('buildReality: symbolsByFile + excluded passed through', r.symbolsByFile['a.mjs'][0] === 'y' && r.excluded('skip'));
 }
 // buildReality — the FP fixes (Fable findings 1/3/7)
-ok('buildReality: absolute tool-ledger path is relativized against cwd (finding 1)', (() => {
-  const r = buildReality({ diff: '+++ b//home/u/repo/src/new.mjs\n+x', cwd: '/home/u/repo' });
-  return r.files.some(f => f.path === 'src/new.mjs');
+ok('buildReality: an absolute authored create is relativized against cwd and added as A (finding 1)', (() => {
+  const r = buildReality({ diff: '', cwd: '/home/u/repo', authored: ['/home/u/repo/src/new.mjs'] });
+  return r.files.some(f => f.path === 'src/new.mjs' && f.status === 'A');
 })());
 ok('buildReality: bashEvents undefined → commands undefined (abstain, not empty) (finding 3)', buildReality({ diff: '' }).commands === undefined);
 ok('buildReality: unpaired run (is_error null) → ok null, tri-state (finding 3)', buildReality({ diff: '', bashEvents: [{ cmd: 'npm test', is_error: null }] }).commands[0].ok === null);
@@ -245,6 +251,12 @@ ok('verify: stale green — green(seq1) then red re-run(seq2) → CA (last run w
 ok('verify: green re-run after edits (seq2 green) → clean', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: false, seq: 1 }, { cmd: 'npm test', ok: true, seq: 2 }] }).ok);
 ok('verify: a lookalike (echo "npm test") does NOT bless tests_pass → CA no-run', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'echo "npm test would pass"', ok: true }] }), 'CA', 'no such command ran'));
 ok('verify: a REAL invocation inside a compound run (echo x && npm test) still matches (finding 5 residual)', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'echo start && npm test', ok: true }] }).ok);
+// round 3, Issue 1: the cmd MENTIONED inside a QUOTED arg must not count as a run (and its && must not split)
+ok('verify: `grep "lint && npm test" f` (exit 1) does NOT false-CA an honest tests_pass (round 3, Issue 1)', (() => {
+  const r = verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, seq: 1 }, { cmd: 'grep -c "lint && npm test" package.json', ok: false, seq: 2 }] });
+  return r.ok;   // the real green npm test stands; the grep's quoted mention is masked out, not counted as a red run
+})());
+ok('verify: `echo "run npm test to verify"` alone does NOT bless tests_pass → CA no-run (round 3, Issue 1 mirror)', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'echo "run npm test to verify"', ok: true }] }), 'CA', 'no such command ran'));
 ok('verify: a background launch-ack (is_error:false) does NOT bless tests_pass → abstain (finding 3 residual)', buildReality({ diff: '', bashEvents: [{ cmd: 'npm test', is_error: false, background: true }] }).commands[0].ok === null);
 ok('verify: UC scoped to agent-authored files — an undeclared HUMAN/dirty change is NOT flagged (finding 7)', verify(contract([{ t: 'modified', file: 'a.mjs' }]), { files: [{ status: 'M', path: 'a.mjs' }, { status: 'M', path: 'human.mjs' }], authored: new Set(['a.mjs']) }).ok);
 ok('verify: UC still fires on an undeclared AGENT-authored change', has(verify(contract([{ t: 'modified', file: 'a.mjs' }]), { files: [{ status: 'M', path: 'a.mjs' }, { status: 'M', path: 'sneaky.mjs' }], authored: new Set(['a.mjs', 'sneaky.mjs']) }), 'UC', 'sneaky.mjs'));
