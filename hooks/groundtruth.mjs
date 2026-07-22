@@ -780,6 +780,30 @@ export function vacuousTestFindings(claim = '', diff = '') {
 // of such a path (common when the work IS on Groundtruth's own files) doesn't false-flag. (Kept when the v2
 // retirement removed the prose completeness path that originally defined it.)
 const NONREPO_OR_TOOL = /(?:^\/|(?:^|\/)(?:tmp|temp|scratch|scratchpad)\/|\.claude\/groundtruth\/|^tasks\.json$|^(?:compiled|proposed|seed)-rules\.json$|^procedures\.json$)/i;
+
+// The "last source edit" anchor for the v2 contract's stale-green sensor: the max transcript seq of a
+// mutation that touched CODE (not comment/whitespace, not an excluded/non-code path), paths relativized
+// against cwd. Extracted from the retired v1 class-1 block so the four gates that killed its verified FPs are
+// preserved VERBATIM — comment-only edit, whitespace reformat, scratchpad write, and the absolute-path
+// silent-inertness (real transcripts record absolute file_paths; excludedScanPath reads those as out-of-tree,
+// so without relativizing, codeMuts is always empty on the one path that supplies mutations). 0 = none.
+export function lastCodeEditSeq(mutations = [], cwd = process.cwd()) {
+  const normCodeSet = (s, mext) => { const st = { block: false, fence: false };
+    return new Set(String(s).split('\n').map(l => splitCodeComment(l, mext, st).code.replace(/\s+/g, '')).filter(Boolean)); };
+  const touches = (m) => { const mext = extOf(m.path);
+    if (m.added !== undefined || m.removed !== undefined) {
+      const a = normCodeSet(m.added ?? '', mext), r = normCodeSet(m.removed ?? '', mext);
+      return [...a].some(l => !r.has(l)) || [...r].some(l => !a.has(l)); }
+    const mst = { block: false, fence: false };
+    return String(m.text).split('\n').some(l => splitCodeComment(l, mext, mst).code.trim() !== ''); };
+  const relPath = (p) => { const s = String(p).replace(/\\/g, '/');
+    const root = String(cwd).replace(/\\/g, '/').replace(/\/+$/, '') + '/';
+    return s.toLowerCase().startsWith(root.toLowerCase()) ? s.slice(root.length) : s; };
+  return (Array.isArray(mutations) ? mutations : [])
+    .map(m => ({ ...m, path: relPath(m.path) }))
+    .filter(m => CODE_EXT_RE.test(m.path) && !excludedScanPath(m.path) && touches(m))
+    .reduce((mx, m) => Math.max(mx, m.seq || 0), 0);
+}
 export function analyze({ claim = '', diff = '', gitDiff = null, bashCmds = [], results = [], cwd = process.cwd(), bgPending = false, bashEvents = null, mutations = null }) {
   const findings = [];
   // AG-B/AG-C need REAL -/+ pairing, which only the git diff has. `diff` here is the WIDER scanDiff (git +
@@ -2800,6 +2824,8 @@ function main() {
         // scanDiff note above); the CI/pre-merge `--diff-range` gate, which has the full diff and no ledger
         // dependency, is the backstop. Chosen precision-first over the whole-diff scope's dirty-tree FPs.
         authored: (parsed.mutations || []).map(m => m.path),
+        // the "last source edit" seq for the stale-green sensor (computed with the code-only/relativized gates).
+        lastEditSeq: lastCodeEditSeq(parsed.mutations || [], cwd),
       });
       findings.push(...contractFindings(payload.last_assistant_message || '', reality));
     } catch { /* fail-open — v1 verdict stands */ }

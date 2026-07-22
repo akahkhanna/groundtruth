@@ -261,6 +261,17 @@ ok('verify: `echo "run npm test to verify"` alone does NOT bless tests_pass → 
 ok('verify: a claim cmd WITH quotes, run exactly, matches — `pytest -k "not slow"`', verify(contract([{ t: 'tests_pass', cmd: 'pytest -k "not slow"' }]), { files: [], commands: [{ cmd: 'pytest -k "not slow"', ok: true }] }).ok);
 ok('verify: a quoted wrapper run — `bash -c "npm test"` (green) — matches an `npm test` claim', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'timeout 60 bash -c "npm test"', ok: true }] }).ok);
 ok('verify: `sh -c \'npm test\'` (green) matches an npm test claim', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: "sh -c 'npm test'", ok: true }] }).ok);
+// ── Stage 3: the 4 ported tests_pass sensors (green-run refinements, warn/info, abstain when input absent) ──
+ok('sensor only-weak: tests_pass cmd `tsc` (green) → warn (a type check is not a test run)', has(verify(contract([{ t: 'tests_pass', cmd: 'tsc' }]), { files: [], commands: [{ cmd: 'tsc', ok: true }] }), 'CA', 'syntax/type check'));
+ok('sensor only-weak abstains: `tsc && npm test` has a real test → NOT weak', verify(contract([{ t: 'tests_pass', cmd: 'tsc && npm test' }]), { files: [], commands: [{ cmd: 'tsc && npm test', ok: true }] }).ok);
+ok('sensor only-weak is tests_pass-only: build_pass `tsc` is honest, not flagged', verify(contract([{ t: 'build_pass', cmd: 'tsc' }]), { files: [], commands: [{ cmd: 'tsc', ok: true }] }).ok);
+ok('sensor failure-substring: a green run whose OUTPUT says "3 failed" → warn', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, text: 'Tests: 3 failed, 5 passed' }] }), 'CA', 'reports failures despite a zero exit'));
+ok('sensor failure-substring abstains: clean green output → no finding', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, text: '627 passing' }] }).ok);
+ok('sensor stale-green: green(seq1) before last edit(seq2) → warn STALE', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, seq: 1 }], lastEditSeq: 2 }), 'CA', 'STALE'));
+ok('sensor stale-green abstains: green(seq3) after last edit(seq2) → clean', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, seq: 3 }], lastEditSeq: 2 }).ok);
+ok('sensor stale-green abstains: no lastEditSeq → no stale finding', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, seq: 1 }] }).ok);
+ok('sensor filtered: declared full `npm test` but every run was `--grep`-filtered → info', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test -- --grep billing', ok: true }] }), 'CA', 'FILTERED'));
+ok('sensor filtered abstains: an HONESTLY declared filtered cmd (`pytest -k billing`) is not flagged', verify(contract([{ t: 'tests_pass', cmd: 'pytest -k billing' }]), { files: [], commands: [{ cmd: 'pytest -k billing', ok: true }] }).ok);
 ok('buildReality: an authored edit then `git mv` does not re-add the OLD path as a phantom A', (() => {
   const diff = 'diff --git a/old.js b/new.js\nsimilarity index 90%\nrename from old.js\nrename to new.js';
   const r = buildReality({ diff, cwd: '/r', authored: ['/r/old.js', '/r/new.js'] });

@@ -229,15 +229,38 @@ const LOOKALIKE_RE = /^\s*(?:echo|printf|cat|grep|rg|ag|ls|head|tail|sed|awk|:|t
 // mention in a lookalike (`grep "lint && npm test" f`, `echo "npm test"`) is excluded by the lookalike prefix.
 // (Fable re-review: mask-for-splitting only, never mask the matched text — masking a real run was a false CA block.)
 const SPLIT_OP = /&&|\|\|?|;/g;
+
+// ── Stage-3 sensors: ported VERBATIM from the retired v1 class-1 so there is no precision loss (defined here,
+// not imported, to avoid a cycle — the engine imports this module). They refine a GREEN tests_pass run. ──
+const TEST_BUILD_RE = /\b(npm (?:test|run (?:build|lint|typecheck))|yarn (?:test|build|lint)|pnpm (?:test|build|lint)|bun (?:test|run)|deno (?:test|task|check)|node --check|node\s+[^|;&]*\.test\.|vitest|jest|mocha|ava|playwright|cypress|tsc|pytest|tox|nox|unittest|go (?:test|build|vet)|cargo (?:test|build|check|clippy)|(?:bundle exec )?rspec|rails test|rake test|minitest|(?:\.\/)?(?:mvnw?|gradlew?)\b[^|;&]*\b(?:test|verify|build|check)|phpunit|pest|dotnet (?:test|build)|ctest|cmake --build|make(?:\s+[\w.-]+)?|swift test|bats|mix test|lein test|clojure -M:test)\b/;
+const WEAK_CHECK_RE = /^\s*(?:\w+=\S+\s+)*(?:(?:npx|bunx|pnpm exec|pnpm dlx|yarn)\s+)?(?:\S*\/)?(?:node --check|node\s+-e\b|tsc(?=\s|$)|deno check|cargo check|go vet|py_compile|ruby -c\b)/;
+const SHELL_SEG_RE = /&&|\|\|?|;|\n/;
+const TEST_FAIL_RE = /\b[1-9]\d*\s+(?:failing|failed|failures?)\b|\b[1-9]\d*\s+tests?\s+(?:failed|failing)\b|\bAssertionError\b|\bnot ok \d|Tests?:\s*[1-9]\d*\s+(?:failed|failing)|(?:^|\s)FAIL\b|---\s*FAIL:|test result:\s*FAILED|\b\d+\s+examples?,\s*[1-9]\d*\s+failures?|Tests run:\s*\d+,\s*Failures:\s*[1-9]|\bpanicked\b/i;
+const GENERIC_FILTER_RE = /\s(?:--grep|--test-?name-?patterns?)(?:[= ]\S|$)/i;
+const RUNNER_FILTERS = [
+  [/\bpytest\b|\btox\b/, /\s-k[= ]\S/], [/\bgo test\b/, /\s-run[= ]\S/], [/\bjest\b|\bvitest\b/, /\s-t[= ]\S/],
+  [/\bmocha\b|\bplaywright\b|\bcypress\b/, /\s-g[= ]\S/], [/\brspec\b/, /\s(?:-e|--example)[= ]\S/], [/\bdotnet test\b/, /\s--filter[= ]\S/],
+];
+// only-weak: every test-family SEGMENT of the declared cmd is a syntax/type check (`tsc && npm test` is NOT weak).
+const weakOnly = (cmd) => { const ts = String(cmd).split(SHELL_SEG_RE).filter(s => TEST_BUILD_RE.test(s)); return ts.length > 0 && ts.every(s => WEAK_CHECK_RE.test(s)); };
+const segFiltered = (cmd) => GENERIC_FILTER_RE.test(cmd) || RUNNER_FILTERS.some(([r, f]) => r.test(cmd) && f.test(cmd));
+
 function commandRun(commands, cmd) {
   const want = norm(cmd);
   return (commands || []).filter(e => {
     const raw = String(e.cmd);
-    const masked = raw.replace(/"[^"]*"|'[^']*'/g, (m) => ' '.repeat(m.length));
+    const masked = raw.replace(/"[^"]*"|'[^']*'/g, (m) => ' '.repeat(m.length));   // quotes → same-length spaces
+    // A — whole-command match: `want` appears UNQUOTED and the command is not a lookalike. Handles a COMPOUND
+    // declared cmd (`tsc && npm test`) that the segment split can't (no segment equals the whole), and an
+    // exact simple run; the lookalike + mask guards exclude `grep "…npm test…" f` and `echo "npm test"`.
+    if (norm(masked).includes(want) && !LOOKALIKE_RE.test(norm(masked))) return true;
+    // B — segment match: a simple declared cmd invoked inside a compound run whose other segments are lookalikes
+    // (`echo start && npm test`) or a real invocation INSIDE quotes (`bash -c "npm test"`). Split at the UNQUOTED
+    // operators (found in `masked`), then test each segment's ORIGINAL text so a quoted real run isn't erased.
     const segs = []; let start = 0, m; SPLIT_OP.lastIndex = 0;
     while ((m = SPLIT_OP.exec(masked)) !== null) { segs.push(raw.slice(start, m.index)); start = m.index + m[0].length; }
     segs.push(raw.slice(start));
-    return segs.some(seg => { const s = norm(seg); return (s === want || s.includes(want)) && !LOOKALIKE_RE.test(s); });
+    return segs.some(seg => { const s = norm(seg); return s.includes(want) && !LOOKALIKE_RE.test(s); });
   });
 }
 
@@ -301,7 +324,19 @@ export function verify(contract, reality = {}) {
       // Order-aware: the LAST completed matching run is the verdict — a green re-run after edits counts,
       // and a red run after an earlier green is NOT laundered into a pass (Fable finding 5, stale-green).
       const last = completed.reduce((a, b) => (b.seq >= a.seq ? b : a), completed[0]);
-      if (last.ok !== true) findings.push({ cls: 'CA', sev: SEV_CA, cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but the last matching run exited non-zero` });
+      if (last.ok !== true) { findings.push({ cls: 'CA', sev: SEV_CA, cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but the last matching run exited non-zero` }); continue; }
+      // GREEN — the Stage-3 sensors (ported from v1 class-1): at most one fires, highest-priority first, all
+      // warn/info (a false "you lied about a green run" is worse than a miss). Each ABSTAINS when its input is
+      // absent, per the charter.
+      const green = completed.filter(r => r.ok === true);
+      if (c.t === 'tests_pass' && weakOnly(c.cmd))
+        findings.push({ cls: 'CA', sev: 'warn', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but that is a syntax/type check, not a test run — verify in the runtime that ships` });
+      else if (last.text && TEST_FAIL_RE.test(last.text))
+        findings.push({ cls: 'CA', sev: 'warn', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but its output reports failures despite a zero exit — a runner that prints failures and still exits 0 is not a pass` });
+      else if (reality.lastEditSeq != null && !last.background && last.seq > 0 && last.seq < reality.lastEditSeq)
+        findings.push({ cls: 'CA', sev: 'warn', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but the green run predates the last source edit — the green is STALE; re-run after the edit to confirm` });
+      else if (!segFiltered(c.cmd) && green.length > 0 && green.every(r => segFiltered(r.cmd)))
+        findings.push({ cls: 'CA', sev: 'info', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but every matching run was FILTERED to a subset — a filtered run cannot back the full \`${c.cmd}\` claim` });
     }
     // deferred: recorded, never verified against the diff (feeds the Week-3 ledger).
     // no_change: contributes no claimed path; a non-empty diff surfaces precisely as UC below.
@@ -445,7 +480,7 @@ function relativize(p, cwd) {
  * test/build claims. An empty array means a transcript with no commands (a real "nothing ran"). This
  * distinction is why a truthful `tests_pass` on the fail-open path is no longer a false CA. (Fable finding 3.)
  */
-export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile = undefined, excluded = () => false, cwd = '', authored = undefined } = {}) {
+export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile = undefined, excluded = () => false, cwd = '', authored = undefined, lastEditSeq = undefined } = {}) {
   const commands = bashEvents === undefined ? undefined : (bashEvents || [])
     .filter(e => e && typeof e.cmd === 'string')
     .map(e => ({
@@ -455,6 +490,7 @@ export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile 
       ok: e.background === true ? null : (e.is_error === false ? true : e.is_error === true ? false : null),
       background: e.background === true,
       seq: typeof e.seq === 'number' ? e.seq : 0,
+      text: typeof e.text === 'string' ? e.text : '',   // run output — the failure-substring sensor reads it
     }));
   const rel = (p) => relativize(p, cwd);
   const gitFiles = filesFromDiff(diff).map(f => (f.from != null ? { ...f, path: rel(f.path), from: rel(f.from) } : { ...f, path: rel(f.path) }));
@@ -468,7 +504,7 @@ export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile 
     for (const f of gitFiles) { seen.add(f.path); if (f.from != null) seen.add(f.from); }   // a rename's OLD path too, so an authored edit-then-`git mv` doesn't re-add a phantom A
     for (const p of authoredSet) if (p && !seen.has(p)) files.push({ status: 'A', path: p });
   }
-  return { files, commands, symbolsByFile, excluded, authored: authoredSet };
+  return { files, commands, symbolsByFile, excluded, authored: authoredSet, lastEditSeq };
 }
 
 // Contract-finding severities. NC is WARN by default (deliberately conservative — a repo touched by an
