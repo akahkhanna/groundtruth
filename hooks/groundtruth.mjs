@@ -34,7 +34,10 @@ import { fileURLToPath } from 'node:url';   // NOT `new URL(...).pathname` — t
 // Class 6 lives in its own module (this engine is already large). The import is a deliberate cycle
 // (symbol-integrity.mjs re-imports the pure lexers below) — safe because every cross-reference is at
 // call time, never at module-eval time.
-import { checkDroppedSymbols } from './symbol-integrity.mjs';
+import { checkDroppedSymbols, addedSymbolsByFile } from './symbol-integrity.mjs';
+// v2 claims contract (opt-in, GROUNDTRUTH_CONTRACT=1). Pure module — parse + validate + verify the agent's
+// end-of-turn claims block against reality. Off by default; v1 is the fallback during soak.
+import { buildReality, contractFindings } from './claims-contract.mjs';
 
 const CLASS_NAME = { 1: 'false test/build claim', 2: 'stub/placeholder', 3: 'silent no-op', 4: 'phantom ref',
   6: 'dropped symbol (dangling ref)', 9: 'special-casing / overfit', async_done: 'false completion (async)',
@@ -43,7 +46,10 @@ const CLASS_NAME = { 1: 'false test/build claim', 2: 'stub/placeholder', 3: 'sil
   R: 'compiled rule (from your docs)', openloop: 'open loop (asked, not delivered)', P: 'procedure (step skipped / out of order)',
   ENV: 'env file not gitignored (secret-leak risk)', test_exclusion: 'test excluded/skipped to pass',
   test_weakened: 'test weakened/disabled to pass', mojibake: 'encoding corruption (mojibake)',
-  agent: 'subagent cannot load (silently inert)' };
+  agent: 'subagent cannot load (silently inert)',
+  // v2 claims contract (GROUNDTRUTH_CONTRACT=1): NC = no valid claims block, CA = claim unsupported by the
+  // diff/transcript, UC = a changed file no claim covers.
+  NC: 'no claims contract', CA: 'claimed but absent (contract)', UC: 'undeclared change (contract)' };
 const CLASS_BUCKET = { 1: 'Ignored', 2: 'Missed→Ignored', 3: 'Ignored', 4: 'Missed', 6: 'Missed→Ignored', async_done: 'Ignored',
   B1: 'Ignored', B3: 'Ignored', B4: 'Ignored', C1: 'Ignored', C2: 'Ignored', R: 'Ignored' };
 
@@ -2479,7 +2485,7 @@ export function renderCard(findings, { session = 'unknown', intent = '', blockEn
   const hasAsync = findings.some(f => f.cls === 'async_done');     // false-completion: claimed done, work unfinished
   const dot = hasBlock ? '🔴' : hasAsync ? '⏳' : (findings.length || ic.tier === 'thin') ? '🟡' : '🟢';
 
-  const isHonesty = f => [1, 2, 3, 4, 6, 9, 'async_done', 'test_exclusion', 'test_weakened'].includes(f.cls);   // false-claim / stub / no-op / phantom / dangling-ref / special-casing / false-completion / test-exclusion / test-weakened
+  const isHonesty = f => [1, 2, 3, 4, 6, 9, 'async_done', 'test_exclusion', 'test_weakened', 'NC', 'CA', 'UC'].includes(f.cls);   // false-claim / stub / no-op / phantom / dangling-ref / special-casing / false-completion / test-exclusion / test-weakened / (v2 contract) no-contract / claimed-but-absent / undeclared-change
   const sortF = a => [...a].sort((x, y) => (x.sev === 'block' ? 0 : 1) - (y.sev === 'block' ? 0 : 1));
   const sub = f => `       ${SEV[f.sev]} ${CLASS_NAME[f.cls] || f.cls}${f.rule ? ` [${f.rule}]` : ''} — ${f.msg}`;
   const hon = findings.filter(isHonesty);
@@ -3158,6 +3164,22 @@ function main() {
   // rewritten); a write ratified by the matching slash-command is legitimate. See refereeTamper.
   const envBlock = process.env.GROUNDTRUTH_BLOCK === '1';
   findings.push(...refereeTamper(diff, parsed.commandsInvoked || new Set(), envBlock));
+
+  // v2 claims contract (opt-in, GROUNDTRUTH_CONTRACT=1). ADD the contract's NC/CA/UC findings alongside
+  // v1's — v1 stays the fallback during soak, so both render and you can compare precision before the v1
+  // prose layer is retired. Reality is read from the AUTHORED `diff` (git + tool ledger, so untracked
+  // creates are seen) and the transcript's bash evidence; symbols are lexed per-file from scanDiff. Fully
+  // fail-open: the contract path must never break a turn, so any error yields no contract findings.
+  if (process.env.GROUNDTRUTH_CONTRACT === '1') {
+    try {
+      const reality = buildReality({
+        diff, bashEvents: parsed.bashEvents || [],
+        symbolsByFile: addedSymbolsByFile(scanDiff),
+        excluded: (p) => excludedScanPath(p),
+      });
+      findings.push(...contractFindings(payload.last_assistant_message || '', reality));
+    } catch { /* fail-open — v1 verdict stands */ }
+  }
   // D9: DEFENSE-IN-DEPTH for the indirect case (a sub-script writes a referee file, so no command names
   // it) — compare current hashes against the SessionStart snapshot. The TRANSCRIPT scan above is the
   // primary anchor; this catches the effect when the action was laundered through another file.

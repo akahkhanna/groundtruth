@@ -293,3 +293,82 @@ export function verify(contract, reality = {}) {
 
   return { ok: findings.length === 0, findings };
 }
+
+/* ────────────────────────────────────────────────────────────────────────────────────────────────────
+ * WEEK 3 — the reality builder + the engine-facing orchestrator (still pure; the Stop hook supplies the
+ * raw diff / bashEvents / symbol map and flips GROUNDTRUTH_CONTRACT=1).
+ * ──────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Parse `reality.files` [{status,path,from?}] straight from a unified diff — the SAME authored diff the
+ * engine already computes (git diff + the tool-ledger merge), so untracked files the agent just created
+ * are visible without a second git call. Status is read from the diff's own structure:
+ *   `--- /dev/null` → A  ·  `+++ /dev/null` → D  ·  `rename from/to` → R  ·  otherwise M.
+ * A bare `+++ b/path` with no `--- ` header (a tool-ledger fragment for a new file) reads as A.
+ * Gated on the a/ b/ /dev/null prefixes (git's convention, matching the engine's changedFiles) so a removed
+ * CONTENT line that merely starts with dashes is never mistaken for a file header. Last status per path wins.
+ */
+export function filesFromDiff(diff) {
+  const byPath = new Map();          // path → status (A/M/D)
+  const renames = [];                // {from,to}
+  const renamed = new Set();         // paths owned by a rename (skip A/M/D for them)
+  let minus = null, rFrom = null;
+  for (const line of String(diff).split('\n')) {
+    if (line.startsWith('rename from ')) { rFrom = line.slice(12).trim(); continue; }
+    if (line.startsWith('rename to ')) {
+      const to = line.slice(10).trim();
+      if (rFrom != null) { renames.push({ from: rFrom, to }); renamed.add(rFrom); renamed.add(to); rFrom = null; }
+      continue;
+    }
+    if (line.startsWith('--- ')) {
+      const rest = line.slice(4).trim();
+      minus = rest === '/dev/null' ? '/dev/null' : (rest.startsWith('a/') ? rest.slice(2) : null);
+      continue;
+    }
+    if (line.startsWith('+++ ')) {
+      const rest = line.slice(4).trim();
+      const plus = rest === '/dev/null' ? '/dev/null' : (rest.startsWith('b/') ? rest.slice(2) : null);
+      if (plus === '/dev/null') { if (minus && minus !== '/dev/null') byPath.set(minus, 'D'); }
+      else if (plus) byPath.set(plus, (minus === '/dev/null' || minus === null) ? 'A' : 'M');
+      minus = null;
+      continue;
+    }
+  }
+  const files = [];
+  for (const { from, to } of renames) files.push({ status: 'R', from, path: to });
+  for (const [path, status] of byPath) if (!renamed.has(path)) files.push({ status, path });
+  return files;
+}
+
+/**
+ * Assemble the normalized `reality` the verifier consumes, from raw engine inputs. Pure — the Stop hook
+ * passes the real diff, transcript bashEvents, a lexed symbol map, and an exclusion predicate.
+ */
+export function buildReality({ diff = '', bashEvents = [], symbolsByFile = undefined, excluded = () => false } = {}) {
+  const commands = (bashEvents || [])
+    .filter(e => e && typeof e.cmd === 'string' && e.background !== true)   // background runs have no final status
+    .map(e => ({ cmd: e.cmd, ok: e.is_error === false }));                  // ok ONLY on a recorded zero exit
+  return { files: filesFromDiff(diff), commands, symbolsByFile, excluded };
+}
+
+// Contract-finding severities. NC is WARN by default (deliberately conservative — a repo touched by an
+// agent that never saw the contract instruction, e.g. a teammate's plain session, would otherwise NC-block
+// every turn; scoping NC-block to contract-aware sessions is a follow-up). CA/UC keep verify()'s severities.
+const SEV_NC = 'warn';
+
+/**
+ * The single entry the Stop hook calls (behind GROUNDTRUTH_CONTRACT=1). Returns findings in the engine's
+ * `{ cls, sev, msg }` shape so they flow through the existing card / block-loop / history unchanged:
+ *   NC — no valid contract (missing / malformed / schema-invalid)   [warn]
+ *   CA — a claim the diff/transcript don't support                   [block, soft mislabels warn]
+ *   UC — a changed file no claim covers                              [warn]
+ * Fail-open by construction: any unexpected shape yields an empty array upstream (the hook wraps in try).
+ */
+export function contractFindings(message, reality = {}) {
+  const a = analyze(message);
+  if (!a.ok) {
+    // NC: surface the first concrete reason (not the whole SCHEMA_HELP block — that goes to the block handback).
+    return [{ cls: 'NC', sev: SEV_NC, msg: `no valid ${FENCE_TAG} block — ${a.errors[0] || 'missing'}` }];
+  }
+  return verify(a.contract, reality).findings.map(f => ({ cls: f.cls, sev: f.sev, msg: f.msg }));
+}

@@ -8,6 +8,7 @@
 import assert from 'node:assert';
 import {
   analyze, parseContract, validateContract, verify, findClaimsBlock, isValidPath,
+  filesFromDiff, buildReality, contractFindings,
   CONTRACT_VERSION, STATUSES, CLAIM_TYPES, FENCE_TAG, SCHEMA_HELP,
 } from './claims-contract.mjs';
 
@@ -173,6 +174,73 @@ ok('deferred produces no verify finding (recorded, not audited here)', verify(co
     { files: [{ status: 'M', path: 'actually-changed.mjs' }] },
   );
   ok('pincer: invention → CA and omission → UC together', has(r, 'CA', 'absent') && has(r, 'UC', 'actually-changed.mjs'));
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════
+// WEEK 3 — filesFromDiff / buildReality / contractFindings (the engine seam, still pure)
+// ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ── filesFromDiff: status straight from unified-diff structure ──
+{
+  const files = filesFromDiff([
+    'diff --git a/new.mjs b/new.mjs', 'new file mode 100644', '--- /dev/null', '+++ b/new.mjs', '+export function foo(){}',
+    'diff --git a/mod.mjs b/mod.mjs', '--- a/mod.mjs', '+++ b/mod.mjs', '@@ -1 +1 @@', '-old', '+new',
+    'diff --git a/gone.mjs b/gone.mjs', 'deleted file mode 100644', '--- a/gone.mjs', '+++ /dev/null', '-bye',
+    'diff --git a/old.mjs b/ren.mjs', 'similarity index 90%', 'rename from old.mjs', 'rename to ren.mjs',
+  ].join('\n'));
+  const get = (p) => files.find(f => f.path === p);
+  ok('filesFromDiff: new file → A', get('new.mjs')?.status === 'A');
+  ok('filesFromDiff: modified → M', get('mod.mjs')?.status === 'M');
+  ok('filesFromDiff: deleted → D', get('gone.mjs')?.status === 'D');
+  ok('filesFromDiff: rename → R with from', (() => { const r = get('ren.mjs'); return r?.status === 'R' && r.from === 'old.mjs'; })());
+}
+ok('filesFromDiff: bare +++ b/ (tool-ledger fragment, no --- header) → A', filesFromDiff('+++ b/created.mjs\n+line').find(f => f.path === 'created.mjs')?.status === 'A');
+ok('filesFromDiff: a removed content line starting with dashes is NOT a file header', (() => {
+  // `--- x` here is a REMOVED markdown rule inside a hunk (prefix `-` + `-- x`), not an `--- a/` header.
+  const files = filesFromDiff('--- a/doc.md\n+++ b/doc.md\n@@ -1 +1 @@\n---- section\n+kept');
+  return files.length === 1 && files[0].path === 'doc.md' && files[0].status === 'M';
+})());
+
+// ── buildReality: bashEvents → commands, files from diff, passthrough ──
+{
+  const r = buildReality({
+    diff: '--- a/a.mjs\n+++ b/a.mjs\n@@ -1 +1 @@\n-x\n+y',
+    bashEvents: [
+      { cmd: 'npm test', is_error: false },
+      { cmd: 'npm run flaky', is_error: true },
+      { cmd: 'sleep 99', background: true, is_error: false },   // background → no final status → dropped
+    ],
+    symbolsByFile: { 'a.mjs': ['y'] },
+    excluded: (p) => p === 'skip',
+  });
+  ok('buildReality: files parsed from diff', r.files.length === 1 && r.files[0].path === 'a.mjs');
+  ok('buildReality: green run → ok:true', r.commands.some(c => c.cmd === 'npm test' && c.ok === true));
+  ok('buildReality: red run → ok:false', r.commands.some(c => c.cmd === 'npm run flaky' && c.ok === false));
+  ok('buildReality: background command dropped (no final status)', !r.commands.some(c => c.cmd === 'sleep 99'));
+  ok('buildReality: symbolsByFile + excluded passed through', r.symbolsByFile['a.mjs'][0] === 'y' && r.excluded('skip'));
+}
+
+// ── contractFindings: the engine-shaped ({cls,sev,msg}) entry the Stop hook calls ──
+ok('contractFindings: no block → single NC finding', (() => {
+  const f = contractFindings('just prose, no fence', {});
+  return f.length === 1 && f[0].cls === 'NC' && f[0].sev === 'warn' && f[0].msg.includes(FENCE_TAG);
+})());
+ok('contractFindings: malformed JSON → NC', contractFindings(block('{ bad json }'), {}).some(f => f.cls === 'NC'));
+ok('contractFindings: valid contract, clean reality → no findings', contractFindings(block(good()), { files: [{ status: 'A', path: 'src/auth.mjs' }], commands: [] }).length === 0);
+{
+  // the pincer through the engine seam: invented file → CA(block), undeclared file → UC(warn)
+  const msg = block(JSON.stringify({ v: 1, task: 't', status: 'complete', claims: [{ t: 'created', file: 'promised.mjs' }] }));
+  const f = contractFindings(msg, { files: [{ status: 'A', path: 'promised.mjs' }, { status: 'M', path: 'surprise.mjs' }], commands: [] });
+  ok('contractFindings: shape is engine-native {cls,sev,msg}', f.every(x => x.cls && x.sev && x.msg));
+  ok('contractFindings: undeclared surprise.mjs → UC', f.some(x => x.cls === 'UC' && x.msg.includes('surprise.mjs')));
+}
+
+// ── addedSymbolsByFile: the per-file symbol lexer that feeds buildReality().symbolsByFile ──
+{
+  const { addedSymbolsByFile } = await import('./symbol-integrity.mjs');
+  const map = addedSymbolsByFile('--- /dev/null\n+++ b/a.mjs\n+export function foo(){}\n+const bar = 1\n+++ b/b.mjs\n+export function baz(){}');
+  ok('addedSymbolsByFile: binds symbols to the file that added them', (map['a.mjs'] || []).includes('foo') && (map['b.mjs'] || []).includes('baz'));
+  ok('addedSymbolsByFile: does not leak a symbol across files', !(map['b.mjs'] || []).includes('foo'));
 }
 
 console.log(`\n${pass} checks passed.`);
