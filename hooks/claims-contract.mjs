@@ -235,7 +235,15 @@ const SPLIT_OP = /&&|\|\|?|;/g;
 const TEST_BUILD_RE = /\b(npm (?:test|run (?:build|lint|typecheck))|yarn (?:test|build|lint)|pnpm (?:test|build|lint)|bun (?:test|run)|deno (?:test|task|check)|node --check|node\s+[^|;&]*\.test\.|vitest|jest|mocha|ava|playwright|cypress|tsc|pytest|tox|nox|unittest|go (?:test|build|vet)|cargo (?:test|build|check|clippy)|(?:bundle exec )?rspec|rails test|rake test|minitest|(?:\.\/)?(?:mvnw?|gradlew?)\b[^|;&]*\b(?:test|verify|build|check)|phpunit|pest|dotnet (?:test|build)|ctest|cmake --build|make(?:\s+[\w.-]+)?|swift test|bats|mix test|lein test|clojure -M:test)\b/;
 const WEAK_CHECK_RE = /^\s*(?:\w+=\S+\s+)*(?:(?:npx|bunx|pnpm exec|pnpm dlx|yarn)\s+)?(?:\S*\/)?(?:node --check|node\s+-e\b|tsc(?=\s|$)|deno check|cargo check|go vet|py_compile|ruby -c\b)/;
 const SHELL_SEG_RE = /&&|\|\|?|;|\n/;
-const TEST_FAIL_RE = /\b[1-9]\d*\s+(?:failing|failed|failures?)\b|\b[1-9]\d*\s+tests?\s+(?:failed|failing)\b|\bAssertionError\b|\bnot ok \d|Tests?:\s*[1-9]\d*\s+(?:failed|failing)|(?:^|\s)FAIL\b|---\s*FAIL:|test result:\s*FAILED|\b\d+\s+examples?,\s*[1-9]\d*\s+failures?|Tests run:\s*\d+,\s*Failures:\s*[1-9]|\bpanicked\b/i;
+// TWO regexes, on purpose. The WORDED alternatives are all count-anchored ("3 failing", "Tests: 1 failed",
+// node:test "# fail 1" with N≥1 — never "# fail 0"), so /i is safe: a benign lowercase "fail" can't satisfy
+// them without a leading non-zero count. The bare runner BANNER (jest "FAIL src/x", pytest "FAILED …",
+// go "--- FAIL", "FAIL\tpkg") is case-SENSITIVE and split out: the old `(?:^|\s)FAIL\b` under /i was doubly
+// wrong — it FIRED on lowercase prose ("should not fail", a file/dir literally named `fail`, "# fail 0" on a
+// PASSING node:test run) and MISSED pytest's real `FAILED` banner (\b after FAIL rejects the trailing ED).
+// A false "your green output reports failures" on an honest run is exactly the FP this warn tier must not emit.
+const TEST_FAIL_RE = /\b[1-9]\d*\s+(?:failing|failed|failures?)\b|\b[1-9]\d*\s+tests?\s+(?:failed|failing)\b|\bAssertionError\b|\bnot ok \d|Tests?:\s*[1-9]\d*\s+(?:failed|failing)|#\s*fail\s+[1-9]|---\s*FAIL:|test result:\s*FAILED|\b\d+\s+examples?,\s*[1-9]\d*\s+failures?|Tests run:\s*\d+,\s*Failures:\s*[1-9]|\bpanicked\b/i;
+const TEST_FAIL_BANNER_RE = /(?:^|\s)FAIL(?:ED)?\b/;   // case-sensitive: real runner banners are uppercase
 const GENERIC_FILTER_RE = /\s(?:--grep|--test-?name-?patterns?)(?:[= ]\S|$)/i;
 const RUNNER_FILTERS = [
   [/\bpytest\b|\btox\b/, /\s-k[= ]\S/], [/\bgo test\b/, /\s-run[= ]\S/], [/\bjest\b|\bvitest\b/, /\s-t[= ]\S/],
@@ -352,7 +360,7 @@ export function verify(contract, reality = {}) {
       const ambiguousRun = runs.some(r => r.background || r.ok === null);
       if (c.t === 'tests_pass' && weakOnly(c.cmd))
         findings.push({ cls: 'CA', sev: 'warn', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but that is a syntax/type check, not a test run — verify in the runtime that ships` });
-      else if (last.text && TEST_FAIL_RE.test(last.text))
+      else if (last.text && (TEST_FAIL_RE.test(last.text) || TEST_FAIL_BANNER_RE.test(last.text)))
         findings.push({ cls: 'CA', sev: 'warn', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but its output reports failures despite a zero exit — a runner that prints failures and still exits 0 is not a pass` });
       else if (reality.lastEditSeq != null && !ambiguousRun && last.seq > 0 && last.seq < reality.lastEditSeq)
         findings.push({ cls: 'CA', sev: 'warn', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but the green run predates the last source edit — the green is STALE; re-run after the edit to confirm` });

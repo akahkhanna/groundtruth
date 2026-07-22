@@ -479,3 +479,10 @@ Engine self-check **440**; contract **132**; red-team **22/22**.
 Known, documented residuals (warn-tier, not blockers): stale-green's normalized-set mutation diff misses a pure LINE REORDER and a non-`CODE_EXT_RE` edit (Makefile/.env) — FN direction, warn-tier; a `groundtruth-claims` block shown as an EXAMPLE in prose (inside an outer fence) is parsed as the real contract if it is the LAST block — narrow, and an honest turn's real block is always last.
 
 Contract self-check **132 → 137**; engine **440**; red-team **22/22**.
+
+### C-7 · Redteam recall: "filename contains fail" false positive (+ a pytest false-negative it hid)
+- **False positive — a benign `fail` token in green output tripped the failure-substring sensor:** the sensor's `(?:^|\s)FAIL\b` alternative ran under `/i`, so any whitespace-delimited lowercase "fail" fired a warn on a PASSING run — a file/dir literally named `fail` (`PASS fail/handler.test.js`), a test titled `should not fail`, node:test's `# fail 0` summary line, all read as "your green output reports failures". A false "you lied about a green run" is exactly the FP this warn tier exists NOT to emit.
+- **False negative it was hiding:** the same `FAIL\b` REJECTED pytest's real `FAILED …` banner (the `\b` after `FAIL` can't sit before the trailing `ED`), so a genuinely-red pytest run with a zero exit slipped through clean.
+- **Fix:** split the matcher. The worded/counted alternatives stay `/i` (all count-anchored — `# fail 1` with N≥1, never `# fail 0`); the bare runner banner moves to a case-SENSITIVE `TEST_FAIL_BANNER_RE = /(?:^|\s)FAIL(?:ED)?\b/` — real jest/pytest/go/rust banners are uppercase (`FAIL src/x`, `FAILED …`, `--- FAIL`, `FAIL\tpkg`), benign prose "fail" is lowercase. Net: 6 FPs removed, pytest FN fixed, node:test `# fail N` (N≥1) now caught. 8 regression tests added.
+
+Contract self-check **137 → 144**; engine **440**; red-team **22/22**.
