@@ -578,7 +578,7 @@ function relativize(p, cwd) {
  * test/build claims. An empty array means a transcript with no commands (a real "nothing ran"). This
  * distinction is why a truthful `tests_pass` on the fail-open path is no longer a false CA. (Fable finding 3.)
  */
-export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile = undefined, excluded = () => false, cwd = '', authored = undefined, lastEditSeq = undefined, untracked = undefined, sidechainCmds = undefined } = {}) {
+export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile = undefined, excluded = () => false, cwd = '', authored = undefined, lastEditSeq = undefined, untracked = undefined, sidechainCmds = undefined, openDeferrals = undefined } = {}) {
   const commands = bashEvents === undefined ? undefined : (bashEvents || [])
     .filter(e => e && typeof e.cmd === 'string')
     .map(e => ({
@@ -613,7 +613,7 @@ export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile 
   } else if (authoredSet) {
     for (const p of authoredSet) if (p && !seen.has(p)) files.push({ status: 'A', path: p });
   }
-  return { files, commands, symbolsByFile, excluded, authored: authoredSet, lastEditSeq, sidechainCmds };
+  return { files, commands, symbolsByFile, excluded, authored: authoredSet, lastEditSeq, sidechainCmds, openDeferrals };
 }
 
 // Contract-finding severities. NC is WARN by default (deliberately conservative — a repo touched by an
@@ -651,11 +651,49 @@ export function contractFindings(message, reality = {}) {
     return [{ cls: 'NC', sev: SEV_NC, msg: `no valid ${FENCE_TAG} block — ${a.errors[0] || 'missing'}` }];
   }
   const out = verify(a.contract, reality).findings.map(f => ({ cls: f.cls, sev: f.sev, msg: f.msg }));
-  // Surface DECLARED deferrals as the task ledger's replacement (spec §6: declaration, not prose extraction).
-  // Warn-tier + honest — the agent named what it set aside, so it's visible, never silent (mirrors v1's
-  // human-confirmed deferral line). A deferral stays the agent's own admission, not a caught lie.
-  for (const c of a.contract.claims) {
-    if (c.t === 'deferred') out.push({ cls: 'deferred', sev: 'warn', msg: `deferred (declared) — ${c.what}${c.why ? ` — ${c.why}` : ''}` });
-  }
+  // Surface DECLARED deferrals (spec §6: declaration, not prose extraction). Warn-tier + honest — the agent
+  // named what it set aside, so it's visible, never silent (mirrors v1's human-confirmed deferral line).
+  // MULTI-TURN: if the Stop hook supplies `reality.openDeferrals` (the session-wide OPEN set reconstructed from
+  // the transcript), surface THAT — a deferral declared on an earlier turn stays visible until closed, so it
+  // can't silently vanish by being omitted next turn. Absent it (pure-unit path), fall back to THIS turn's
+  // deferrals (unchanged single-turn behavior).
+  const deferredSrc = Array.isArray(reality.openDeferrals)
+    ? reality.openDeferrals
+    : a.contract.claims.filter(c => c && c.t === 'deferred');
+  for (const d of deferredSrc) out.push({ cls: 'deferred', sev: 'warn', msg: deferralMsg(d) });
   return out;
+}
+
+// Consistent card line for a deferral (both the single-turn and multi-turn paths render identically).
+export const deferralMsg = (d) => `deferred (declared) — ${d.what}${d.why ? ` — ${d.why}` : ''}`;
+
+// Reconstruct the still-OPEN deferrals across the session from the ordered list of past+current CONTRACTS
+// (parsed from the transcript — the unforgeable harness record, so a declared set-aside can't silently vanish
+// by omission next turn; restores spec §6's multi-turn tracking WITHOUT a forgeable ledger — the v1 tasks.json
+// was agent-writable, exactly what v2 rejects). Keyed by the normalized `what`. A deferral CLOSES only on a
+// STRONG signal that a later turn did the work: its full normalized `what` appears as a substring of a
+// completing claim's descriptor (file/cmd/symbol) or the turn's task. Closure is deliberately conservative —
+// a missed close leaves a stale deferral on the card (a harmless warn, the agent's own admission), whereas a
+// false close would SILENTLY DROP a real open loop (the bad direction). Session-scoped by construction (a new
+// session = a fresh transcript = a fresh ledger). Pure → directly unit-testable.
+const nlow = (s) => String(s == null ? '' : s).trim().toLowerCase().replace(/\s+/g, ' ');
+export function openDeferrals(contracts) {
+  const open = new Map();   // key: normalized `what` → { what, why }
+  for (const c of (Array.isArray(contracts) ? contracts : [])) {
+    const claims = Array.isArray(c && c.claims) ? c.claims : [];
+    // (1) close open deferrals this turn's COMPLETING work clearly satisfies (strict substring containment).
+    const done = claims.filter(x => x && x.t !== 'deferred' && x.t !== 'no_change')
+      .flatMap(x => [x.file, x.from, x.to, x.cmd, ...(Array.isArray(x.symbols) ? x.symbols : [])])
+      .filter(isNonEmptyStr).map(nlow);
+    const task = nlow(c && c.task);
+    for (const key of [...open.keys()]) {
+      if (key.length < 4) continue;                       // too short to match safely → keep open
+      if (done.some(d => d.includes(key)) || (task && task.includes(key))) open.delete(key);
+    }
+    // (2) open / refresh deferrals declared this turn — re-declaring KEEPS it open even if (1) just matched.
+    for (const x of claims) {
+      if (x && x.t === 'deferred' && isNonEmptyStr(x.what)) open.set(nlow(x.what), { what: x.what, why: isNonEmptyStr(x.why) ? x.why : '' });
+    }
+  }
+  return [...open.values()];
 }
