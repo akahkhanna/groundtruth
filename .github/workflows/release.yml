@@ -1,0 +1,46 @@
+# Groundtruth — release automation. When a version bump lands on main (a change to
+# .claude-plugin/plugin.json), publish a GitHub Release + tag for that version if one
+# doesn't already exist. Idempotent (skips a version already released) and also runnable
+# on demand via the Actions "Run workflow" button (workflow_dispatch) — which is how the
+# first run for an already-merged bump is kicked off. Runs in GitHub's own environment,
+# so it has the token scope to create tags/releases the local hook environment lacks.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: ['.claude-plugin/plugin.json']
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # create the tag + the GitHub Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Publish a release for the current plugin version (if new)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./.claude-plugin/plugin.json').version")"
+          TAG="v${VERSION}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists — nothing to do."
+            exit 0
+          fi
+          # Pull this version's section out of CHANGELOG.md (from '## [VERSION]' to the next '## [').
+          awk -v ver="$VERSION" '
+            /^## \[/ { if (started) exit; if ($0 ~ ("\\[" ver "\\]")) { started=1; next } }
+            started { print }
+          ' CHANGELOG.md > /tmp/notes.md
+          if [ ! -s /tmp/notes.md ]; then
+            printf '%s\n' "Release ${TAG}. See CHANGELOG.md and FIXES.md." > /tmp/notes.md
+          fi
+          printf '\n%s\n' "Full symptom → root-cause → fix → regression-test in [FIXES.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/FIXES.md)." >> /tmp/notes.md
+          gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md --target "$GITHUB_SHA"
+          echo "Published ${TAG}."
