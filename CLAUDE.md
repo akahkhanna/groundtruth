@@ -14,9 +14,9 @@ Design invariant, enforced in review: **a false positive is treated as fatal.** 
 
 ```bash
 node hooks/groundtruth.test.mjs      # 479 engine unit checks, no deps, no framework
-node hooks/claims-contract.test.mjs  # 203 v2 claims-contract checks (same assert style)
-node hooks/redteam.mjs               # live adversarial harness (31 checks across sandboxed throwaway repos)
-npm test                             # runs BOTH unit files (479 engine + 203 contract = 682)
+node hooks/claims-contract.test.mjs  # 217 v2 claims-contract checks (same assert style)
+node hooks/redteam.mjs               # live adversarial harness (37 checks across sandboxed throwaway repos)
+npm test                             # runs BOTH unit files (479 engine + 217 contract = 696)
 npm run check-self                   # engine checks, but echoes the exit code as a GREEN/RED done-verdict
 ```
 
@@ -41,6 +41,7 @@ Everything is one big deterministic engine in `hooks/groundtruth.mjs` (~2600 lin
 - `SessionStart` (`--session-start`) — snapshots the baseline ref + pre-existing debt + a signed referee-file snapshot, and compiles doc rules. Stop diffs against this baseline, **not HEAD** (so work committed mid-session is still seen — a real failure mode this fixes).
 - `UserPromptSubmit` (`--intent`) — warns on a too-thin prompt (completeness can't be checked), and injects the *prior* turn's findings into context so a warn isn't silently lost in VS Code.
 - `PostToolUse[Edit|Write|MultiEdit]` (`--watch-rules`) — recompiles doc rules when a rule-source doc is edited mid-session.
+- `PostToolUse[Bash]` (`--stamp`) — after a `TEST_BUILD_RE` command, appends a **code fingerprint** (a hash of the repo's `CODE_EXT_RE` files, comments/whitespace normalized away, GT's own state excluded) to `.claude/groundtruth/<session>-stamps.jsonl`, so the tests_pass staleness sensor can compare code-at-run-time to code-now — catching a bash-channel edit (`sed -i`) the event-ordering seq can't see, while ignoring docs/config/comment/commit noise. Non-mutating git (`--no-optional-locks`), fail-open.
 - `Stop` / `SubagentStop` (no arg) — the main verdict path.
 
 **The Stop path** (`main()` starts ~line 1857; the no-arg branch is the fallthrough after every flag branch, ~line 2100): load baseline → `git diff <baseRef>` → parse transcript for intent/Bash-evidence/tool-ledger → merge the **tool Diff Ledger** (reconstructed Edit/Write so new untracked files are visible) → build a wider `scanDiff` (adds untracked file *content* + MCP SQL, for security scanners only) → run `analyze()` + compiled rules + dropped-symbol check + referee-tamper check → render + persist to `.claude/groundtruth/<session>.md`.
@@ -52,7 +53,7 @@ Note the two diff variables — this distinction matters when editing: `diff`/`g
 **Finding classes** live in `CLASS_NAME` (~line 39). The buckets map to the README's failure taxonomy (Told&Missed / Told&Ignored). Severity is `block` | `warn` | `info`. Prose-grounded honesty heuristics and test-gaming heuristics are **warn-only by design** — they never hard-block, because their trigger is a natural-language claim and a false block there is exactly the failure this tool exists to avoid.
 
 **Satellite files:**
-- `hooks/claims-contract.mjs` — the **v2 default engine** (pure): `analyze` (fence-parse + schema-validate → the contract; last-VALID-block wins), `buildReality` (diff + transcript + untracked set + sidechain cmds → normalized reality), `verify` (the CA/UC pincer + the tests_pass sensors: only-weak, failure-substring, stale-green, filtered, exit-swallower), `contractFindings` (the Stop-hook entry, emitting `NC`/`CA`/`UC`). `addedSymbolsByFile` (in symbol-integrity) feeds its symbol check. Fully pure → directly unit-tested in `claims-contract.test.mjs`.
+- `hooks/claims-contract.mjs` — the **v2 default engine** (pure): `analyze` (fence-parse + schema-validate → the contract; last-VALID-block wins), `buildReality` (diff + transcript + untracked set + sidechain cmds + tree stamps/currentTree → normalized reality), `verify` (the CA/UC pincer + the tests_pass sensors: only-weak, failure-substring, stale-green by event-order, **stale-by-tree** (`treeStaleVerdict`: compares recorded tree fingerprints to now; abstains unless the stamp↔run mapping is unambiguous), filtered, exit-swallower), `contractFindings` (the Stop-hook entry, emitting `NC`/`CA`/`UC`). `addedSymbolsByFile` (in symbol-integrity) feeds its symbol check. Fully pure → directly unit-tested in `claims-contract.test.mjs`.
 - `hooks/symbol-integrity.mjs` — Class 6 (`checkDroppedSymbols`): a def the diff removed, defined nowhere, still *called* → dangling ref under a "preserved" claim. Receiver-gated to kill FPs. Also exports `addedSymbolsByFile` (function + class/enum/const decls per file) for the contract's `created`-symbol check.
 - `hooks/compile-rules.mjs` — the rule compiler. EXTRACT (regex over backtick'd `` `X` not `Y` ``/`` never `Z` `` in your docs) → GROUND (grep against the tree; already-matching = `review`, clean = `armable`) → **PROPOSE, never arm**. `/groundtruth-rules` is the human approval gate that writes `compiled-rules.json`. `compileRuleRe` is shared with the runtime for grounder⇄runtime parity.
 - `hooks/groundtruth-statusline.mjs` / `.sh` — status badge.

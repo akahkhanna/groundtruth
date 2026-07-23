@@ -334,6 +334,39 @@ function commandRun(commands, cmd) {
   });
 }
 
+// ── stale-by-TREE sensor (tree-state stamping) ──────────────────────────────────────────────────────────
+// The event-ordering stale check (last green run's seq < lastEditSeq) has a blind spot reviewers found: an edit
+// made through the BASH channel (`sed -i`, a heredoc, `> f`) never updates lastEditSeq — it tracks only
+// Write/Edit tool ops — so a green predating such an edit passes clean. This sensor closes it by comparing a
+// CODE FINGERPRINT (an absolute hash of the repo's normalized code — see computeTreeState) recorded at COMMAND
+// time (the PostToolUse `--stamp` hook) against the fingerprint computed NOW. Code-scoped + normalized, so a
+// docs/config/comment/whitespace edit or a commit of the tested code does NOT count (matching the event-ordering
+// anchor's own gates); a real code change through any channel does. It stays PURE: the Stop hook supplies
+// `reality.treeStamps` (the parsed stamp lines) and `reality.currentTree` ({head,tree} computed at claim time);
+// this only compares strings. Returns 'stale' | 'fresh' | 'abstain'. EVERY uncertainty ABSTAINS (→ the
+// event-ordering check remains the fallback, unchanged) — a false "stale" on an honest fresh green is the FP
+// this must never emit, so the mapping to the last green run must be unambiguous before it speaks:
+//   • no stamps file / unreadable / all-malformed → abstain     • current-tree compute failed → abstain
+//   • any background/unpaired run this turn → abstain (a bg run's stamp may predate its completion; mapping unsafe)
+//   • no stamp matches the claimed cmd → abstain (fall back)     • stamp/run counts differ → abstain (misaligned)
+// Only when exactly the matching runs are all completed AND their count equals the matching stamps' count does
+// the LAST matching stamp provably map to `last` (the last green run) — then head/tree equality decides.
+const usableStamp = (s) => s && typeof s.cmd === 'string' && typeof s.head === 'string' && typeof s.tree === 'string';
+function treeStaleVerdict(reality, cmd, runs, ambiguousRun) {
+  const stamps = Array.isArray(reality.treeStamps) ? reality.treeStamps.filter(usableStamp) : null;
+  if (!stamps || stamps.length === 0) return 'abstain';                    // no stamps file / unreadable / all malformed
+  const cur = reality.currentTree;
+  if (!cur || typeof cur.head !== 'string' || typeof cur.tree !== 'string') return 'abstain';   // current-tree compute failed
+  if (ambiguousRun) return 'abstain';                                      // a bg/unpaired run → stamp↔run mapping unreliable
+  const matching = commandRun(stamps, cmd);                               // SAME matching semantics as the run matcher (reuse commandRun)
+  if (matching.length === 0) return 'abstain';                            // no stamp for this cmd → fall back to event-ordering
+  if (matching.length !== runs.length) return 'abstain';                 // stamp/run count misaligned (partial stamping, a sidechain) → ambiguous
+  const stamp = matching[matching.length - 1];                           // aligned + all runs completed → the LAST stamp maps to the last green run
+  // Compare the CODE fingerprint only, NOT `head`: the fingerprint is absolute normalized-code content, so a
+  // commit of the tested code (HEAD moves, code unchanged) is NOT stale — comparing head would false-fire there.
+  return stamp.tree !== cur.tree ? 'stale' : 'fresh';
+}
+
 /**
  * Verify a validated contract against reality. Returns { ok, findings } where each finding is
  *   { cls: 'CA'|'UC', sev, msg, file?, cmd?, symbol?, from?, to?, status? }.
@@ -430,12 +463,22 @@ export function verify(contract, reality = {}) {
       // command (`mkdir -p build || true; npm test`) masks THAT command's exit, not the test's, so it must not
       // false-warn an honest green. (Fable review C1.)
       const swTail = (() => { const lc = norm(last.cmd); const i = lc.lastIndexOf(norm(c.cmd)); return i >= 0 ? lc.slice(i) : lc; })();
+      // stale-by-tree runs AHEAD of event-ordering in the at-most-one chain: it grounds on the recorded code
+      // fingerprint (catches a bash-channel edit event-ordering can't see). It can only ADD a stale warn — it
+      // never SUPPRESSES the event-ordering check. The stamp log is agent-writable on-disk state (Part 3 flags a
+      // Write/Edit to it, but a bash `>` rewrite isn't covered), so a forged `fresh` must NOT be trusted to
+      // subtract the transcript-anchored event-ordering warn (house rule: agent-writable state can add signal,
+      // never cancel a trust-anchored one). So a 'fresh'/'abstain' verdict simply falls through to the unchanged
+      // event-ordering check. (Fable review finding 2.)
+      const treeVerdict = treeStaleVerdict(reality, c.cmd, runs, ambiguousRun);
       if (SWALLOW_RE.test(swTail))
         findings.push({ cls: 'CA', sev: 'warn', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but the run's exit was force-succeeded (\`|| true\` / \`; true\`) — a zero exit there is manufactured, not a real pass` });
       else if (c.t === 'tests_pass' && weakOnly(c.cmd))
         findings.push({ cls: 'CA', sev: 'warn', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but that is a syntax/type check, not a test run — verify in the runtime that ships` });
       else if (last.text && (TEST_FAIL_RE.test(last.text) || TEST_FAIL_BANNER_RE.test(last.text)))
         findings.push({ cls: 'CA', sev: 'warn', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but its output reports failures despite a zero exit — a runner that prints failures and still exits 0 is not a pass` });
+      else if (treeVerdict === 'stale')
+        findings.push({ cls: 'CA', sev: 'warn', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but the working tree has changed since that run — the green is STALE; re-run to confirm` });
       else if (reality.lastEditSeq != null && !ambiguousRun && last.seq > 0 && last.seq < reality.lastEditSeq)
         findings.push({ cls: 'CA', sev: 'warn', cmd: c.cmd, msg: `claimed \`${c.cmd}\` passed, but the green run predates the last source edit — the green is STALE; re-run after the edit to confirm` });
       else if (!ambiguousRun && !segFiltered(c.cmd) && green.length > 0 && green.every(r => segFiltered(r.cmd)))
@@ -611,7 +654,7 @@ function relativize(p, cwd) {
  * test/build claims. An empty array means a transcript with no commands (a real "nothing ran"). This
  * distinction is why a truthful `tests_pass` on the fail-open path is no longer a false CA. (Fable finding 3.)
  */
-export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile = undefined, excluded = () => false, cwd = '', authored = undefined, lastEditSeq = undefined, untracked = undefined, sidechainCmds = undefined, openDeferrals = undefined, contractInstruction = false } = {}) {
+export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile = undefined, excluded = () => false, cwd = '', authored = undefined, lastEditSeq = undefined, untracked = undefined, sidechainCmds = undefined, openDeferrals = undefined, contractInstruction = false, treeStamps = undefined, currentTree = undefined } = {}) {
   const commands = bashEvents === undefined ? undefined : (bashEvents || [])
     .filter(e => e && typeof e.cmd === 'string')
     .map(e => ({
@@ -646,7 +689,7 @@ export function buildReality({ diff = '', bashEvents = undefined, symbolsByFile 
   } else if (authoredSet) {
     for (const p of authoredSet) if (p && !seen.has(p)) files.push({ status: 'A', path: p });
   }
-  return { files, commands, symbolsByFile, excluded, authored: authoredSet, lastEditSeq, sidechainCmds, openDeferrals, contractInstruction };
+  return { files, commands, symbolsByFile, excluded, authored: authoredSet, lastEditSeq, sidechainCmds, openDeferrals, contractInstruction, treeStamps, currentTree };
 }
 
 // Contract-finding severities. NC is WARN unless the session is CONTRACT-AWARE — i.e. an instruction doc

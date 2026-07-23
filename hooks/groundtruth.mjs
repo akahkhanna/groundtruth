@@ -1542,12 +1542,81 @@ function codeOnlyAdded(diff) {
 //     is legit only if the matching command (/groundtruth-rules, /groundtruth-block) was actually run.
 //   • severity is anchored to ENV block authority, NEVER to config.json — the file does not get a vote on
 //     its own tampering. So `config.json {block:false}` written this turn can't quiet its own alarm.
+// ── tree-state stamping (stale-by-tree sensor support) ──────────────────────────────────────────────────
+// A deterministic fingerprint of the repo's NORMALIZED CODE — NOT the whole tree. This is the exact scope the
+// event-ordering anchor (`lastCodeEditSeq`) already adjudicated as "staling": `CODE_EXT_RE` source files, not
+// `excludedScanPath`, with comments + whitespace stripped (a per-file SET of normalized code lines, order-
+// independent, mirroring `lastCodeEditSeq`'s `touches`). Scoping to that — rather than hashing `git diff HEAD`
+// + `git status` wholesale — is what makes the sensor safe: it does NOT fire on
+//   • a docs / config edit (README.md, *.json, *.yaml → not CODE_EXT),   • a harness-written settings file,
+//   • a comment-only or whitespace-only edit (normalized away),          • a COMMIT of the tested code
+// (the fingerprint is ABSOLUTE content — HEAD identity is deliberately NOT part of it, so committing exactly
+// what you tested is not "stale"). A real code change through ANY channel — a Write, or a bash `sed -i` the
+// event-ordering seq can't see — changes a normalized line → caught. GT's own `.claude/groundtruth/` state is
+// dropped by BOTH the pathspec and CODE_EXT (jsonl isn't code). Content is read straight from disk (no `git
+// diff` parse), so no gitconfig knob (difftastic / mnemonicPrefix / autocrlf) can perturb or desync it. Bounded
+// + fail-open: unborn HEAD / not a repo / too many files / git or read error → null ⇒ the sensor abstains, never
+// a false stale. The SAME function runs at COMMAND time (`--stamp`) and CLAIM time (Stop), so the two are
+// directly comparable. (Fable review finding 1: an opaque whole-tree hash false-staled every honest post-green
+// docs/comment/commit turn — the exact fatal FP this project treats as disqualifying.)
+const TREE_EXCLUDE = ['--', '.', ':(exclude).claude/groundtruth'];
+const TREE_MAX_FILES = 20000;   // a pathological repo → abstain rather than spend unboundedly (never hang a turn)
+function computeTreeState(cwd) {
+  try {
+    // `--no-optional-locks` keeps even the opportunistic index refresh off — strictly read-only. Fail-open below.
+    const run = (args) => execFileSync('git', ['--no-optional-locks', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 });
+    const head = run(['rev-parse', 'HEAD']).trim();
+    if (!head) return null;                                              // unborn HEAD / not a repo → abstain
+    const files = new Set();
+    for (const p of run(['ls-files', '-z', ...TREE_EXCLUDE]).split('\0')) if (p) files.add(p);                       // tracked
+    for (const p of run(['ls-files', '--others', '--exclude-standard', '-z', ...TREE_EXCLUDE]).split('\0')) if (p) files.add(p);   // untracked, non-ignored
+    const code = [...files].filter(p => CODE_EXT_RE.test(p) && !excludedScanPath(p)).sort();
+    if (code.length > TREE_MAX_FILES) return null;                      // bound → abstain
+    // per-file normalized-code representation (set of comment/whitespace-stripped code lines) — same normalization
+    // as lastCodeEditSeq, so the two sensors agree on what counts as a code change.
+    const normFile = (content, ext) => { const st = { block: false, fence: false };
+      return [...new Set(String(content).split('\n').map(l => splitCodeComment(l, ext, st).code.replace(/\s+/g, '')).filter(Boolean))].sort().join('\n'); };
+    const h = createHash('sha256');
+    for (const p of code) {
+      // Accepted residual (Fable review): an unreadable file is SKIPPED, not abstained — so a TRANSIENT read
+      // failure at one of the two computations perturbs the hash (a warn-tier false stale). The trade buys the
+      // `rm file.js` catch (a removed code file legitimately drops out and stales the green). Rare; named here.
+      let c; try { c = readFileSync(join(cwd, p), 'utf8'); } catch { continue; }
+      h.update(p); h.update('\0'); h.update(normFile(c, extOf(p))); h.update('\n');
+    }
+    // Accepted residual (Fable review): the fingerprint is over the ENUMERATED code set, so a post-green change
+    // to what git enumerates — a `.gitignore` edit that newly ignores an existing untracked code file, or a
+    // rewritten non-ignored generated artifact — shifts it without a hand-edit (warn-tier, unusual conjunction).
+    // Future hardening (not done): per-file hashes so "left the enumeration, content unchanged" can abstain.
+    return { head, tree: h.digest('hex') };                            // `head` recorded for diagnostics; the sensor compares `tree` only
+  } catch { return null; }                                              // any git/read failure → abstain (never break, never false-stale)
+}
+// Load + parse the per-session tree-stamp log the `--stamp` hook appended. Returns the array of well-formed
+// stamps, or undefined when the file is absent/unreadable (⇒ the sensor abstains → event-ordering remains the
+// fallback). A MALFORMED line is skipped silently (never poisons the set); a DELETED/missing file is ABSENCE,
+// not evidence — abstain, per the charter (Part 2: deleted stamps must never be treated as evidence of anything).
+function loadTreeStamps(cwd, session) {
+  let raw;
+  try { raw = readFileSync(join(cwd, '.claude', 'groundtruth', `${session}-stamps.jsonl`), 'utf8'); }
+  catch { return undefined; }
+  const out = [];
+  for (const line of raw.split('\n')) {
+    const t = line.trim(); if (!t) continue;
+    try { const o = JSON.parse(t); if (o && typeof o.cmd === 'string' && typeof o.head === 'string' && typeof o.tree === 'string') out.push(o); } catch { /* skip malformed line */ }
+  }
+  return out;
+}
+
 const REFEREE_FILES = [
   { re: /(^|\/)\.claude\/groundtruth\/compiled-rules\.json$/, ratifiedBy: ['groundtruth-rules', 'groundtruth-setup'], what: 'compiled-rules.json (the armed rule set)' },
   { re: /(^|\/)\.claude\/groundtruth\/config\.json$/,         ratifiedBy: 'groundtruth-block', what: 'config.json (block-mode switch)' },
   { re: /(^|\/)\.claude\/groundtruth\/[^/]*\.tasks\.json$/,   ratifiedBy: null,                what: 'the task ledger (tasks.json)' },
   { re: /(^|\/)\.claude\/groundtruth\/[^/]*\.baseline\.json$/, ratifiedBy: null,               what: 'the session baseline (baseline.json — deleting it blinds diffing to HEAD)' },
   { re: /(^|\/)\.claude\/groundtruth\/[^/]*\.refsnapshot\.json$/, ratifiedBy: null,            what: 'the referee integrity snapshot (refsnapshot.json — editing it forges the tamper baseline)' },
+  // The tree-state stamp log is harness-written but disk-resident (gitignored), so an agent could REWRITE it to
+  // forge a stale green as fresh. It's appended by the hook via a raw fs write (never a Write/Edit tool), so the
+  // hook's own writes never appear in the tool-ledger diff — only an AGENT Write/Edit to it does → flagged.
+  { re: /(^|\/)\.claude\/groundtruth\/[^/]*-stamps\.jsonl$/, ratifiedBy: null,                 what: 'the tree-state stamp log (<session>-stamps.jsonl — editing it forges a run\'s freshness)' },
 ];
 // A referee-file write is ratified if ANY of its accepting slash-commands ran this turn (a human turn the
 // agent can't author). `ratifiedBy` may be a single command or a list (compiled-rules.json is armable from
@@ -2214,6 +2283,29 @@ function main() {
     process.exit(0);
   }
 
+  // PostToolUse[Bash] (`--stamp`): after a TEST_BUILD command runs, append a CODE-fingerprint stamp so the
+  // Stop-path stale-by-tree sensor can tell whether the repo's code changed since the green — catching a
+  // bash-channel edit (`sed -i`, heredoc, `> f`) that lastEditSeq can't see. Reuses TEST_BUILD_RE (no new
+  // matcher). Best-effort + fail-open: a non-matching command, a non-repo, or any git failure ⇒ write nothing,
+  // exit 0. NEVER mutates the repo (computeTreeState runs read-only git only).
+  if (process.argv.includes('--stamp')) {
+    let p; try { p = JSON.parse(readFileSync(0, 'utf8') || '{}'); } catch { process.exit(0); }
+    const cmd = p.tool_input?.command;
+    const cwd = process.env.CLAUDE_PROJECT_DIR || p.cwd || process.cwd();
+    if (typeof cmd === 'string' && TEST_BUILD_RE.test(cmd)) {
+      try {
+        const st = computeTreeState(cwd);
+        if (st) {
+          const dir = join(cwd, '.claude', 'groundtruth');
+          mkdirSync(dir, { recursive: true });
+          // append one line (flag:'a') — best-effort; a partial/failed write must never break the turn.
+          writeFileSync(join(dir, `${p.session_id || 'session'}-stamps.jsonl`), JSON.stringify({ ts: Date.now(), cmd, head: st.head, tree: st.tree }) + '\n', { flag: 'a' });
+        }
+      } catch { /* best-effort — a stamp write must never break the session */ }
+    }
+    process.exit(0);
+  }
+
   // `--latest`: print the most recent verdict card to stdout — for watching in your own terminal
   // (`node .claude/hooks/groundtruth.mjs --latest`, or wrap in `watch`/a `while` loop to follow live).
   if (process.argv.includes('--latest')) {
@@ -2572,6 +2664,11 @@ function main() {
       const awareWork = contractInstructionPresent(instrDocs, (f) => readFileSync(join(cwd, f), 'utf8'));
       const contractInstruction = awareBase || awareWork;
       const instructionStripped = awareBase && !awareWork;
+      // TREE-STATE stamping: the per-command fingerprints the --stamp hook recorded this session + the fingerprint
+      // NOW, for the stale-by-tree sensor. Both absence (no stamps file) and a failed current-tree compute resolve
+      // to undefined/null ⇒ the sensor ABSTAINS and the event-ordering stale check remains the fallback, unchanged.
+      const treeStamps = loadTreeStamps(cwd, payload.session_id || 'session');
+      const currentTree = computeTreeState(cwd);
       const reality = buildReality({
         diff, cwd,
         // pass bashEvents THROUGH (may be undefined on the fail-open / no-transcript path) so a truthful
@@ -2609,6 +2706,8 @@ function main() {
         // CONTRACT-AWARE? (baseline-anchored, computed above) → NC becomes BLOCK-eligible, closing the
         // "just don't declare" dodge. (Fable PR #2 review, Defect A.)
         contractInstruction,
+        // stale-by-tree: recorded command-time fingerprints + the fingerprint now (undefined/null ⇒ sensor abstains).
+        treeStamps, currentTree,
       });
       findings.push(...contractFindings(payload.last_assistant_message || '', reality));
       // CHANGE 1: prose class-1 fallback — a session that never emitted a valid claims block still gets its

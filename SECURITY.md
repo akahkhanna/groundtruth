@@ -61,6 +61,16 @@ Two later passes tightened the parts that *are* deterministically closable in-se
 
 One in-session residual remains: **snapshot rollback-replay.** An older, validly-signed snapshot can be restored — HMAC proves authenticity, not recency. Like the laundered-helper row above, it is closed only by CI's fresh per-run snapshot. Mechanism and regression tests are in [FIXES.md](FIXES.md).
 
+### The tree-state stamp log
+
+The `tests_pass`/`build_pass` **stale-by-tree** sensor reads a per-session code fingerprint the `--stamp` hook writes to `.claude/groundtruth/<session>-stamps.jsonl`. That file is agent-writable on-disk state, so it is **never trusted as state** — same posture as the referee snapshot:
+
+- A `Write`/`Edit` to the stamp log is surfaced by the referee-tamper perimeter (transcript ledger). A **bash-channel** rewrite (`> stamps.jsonl`) is not — the file is legitimately appended per command, so it can't be sealed into the hash snapshot the way a static referee file is.
+- The sensor is therefore **add-only**: a mismatch can *add* a "stale" warn, but a `fresh` verdict (matching fingerprint) **never suppresses** the transcript-anchored event-ordering staleness check. A forged stamp can at most keep the tree sensor quiet (a missed warn, the safe direction) — it can't launder an event-ordering stale into a green.
+- A deleted or missing log is treated as absence → the sensor abstains, never as evidence of freshness.
+
+The real enforcement boundary for staleness, as everywhere else, is the CI/pre-merge gate, where the runner re-runs the suite in a trust domain the audited agent can't reach.
+
 ## Hardening for security-critical use
 
 To upgrade *evidence → prevention*, the platform must provide what the hook cannot self-enforce:

@@ -370,6 +370,48 @@ ok('sensor filtered abstains when a background run is in the mix', verify(contra
 ok('exit-CA abstains: a red run followed by a LATER unpaired run → outcome unknown, no false "exited non-zero"', verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: false, seq: 1 }, { cmd: 'npm test', ok: null, seq: 2 }] }).ok);
 ok('sensor filtered: declared full `npm test` but every run was `--grep`-filtered → info', has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test -- --grep billing', ok: true }] }), 'CA', 'FILTERED'));
 ok('sensor filtered abstains: an HONESTLY declared filtered cmd (`pytest -k billing`) is not flagged', verify(contract([{ t: 'tests_pass', cmd: 'pytest -k billing' }]), { files: [], commands: [{ cmd: 'pytest -k billing', ok: true }] }).ok);
+
+// ── stale-by-TREE sensor (tree-state stamping): compares the tree fingerprint at run time (stamp) vs now. ──
+// Ahead of event-ordering in the at-most-one chain; every uncertainty ABSTAINS → event-ordering stays the fallback.
+const stamp = (cmd, head, tree) => ({ cmd, head, tree });
+ok('sensor stale-by-tree FIRES: stamp tree differs from current tree → warn STALE',
+  has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, seq: 1 }], treeStamps: [stamp('npm test', 'h1', 't1')], currentTree: { head: 'h1', tree: 't2' } }), 'CA', 'working tree has changed'));
+ok('sensor stale-by-tree SILENT on a HEAD change with identical code (committing the tested code is NOT stale — fingerprint is content, head is ignored)',
+  verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, seq: 1 }], treeStamps: [stamp('npm test', 'hA', 't1')], currentTree: { head: 'hB', tree: 't1' } }).ok);
+ok('sensor stale-by-tree FIRES for build_pass too',
+  has(verify(contract([{ t: 'build_pass', cmd: 'npm run build' }]), { files: [], commands: [{ cmd: 'npm run build', ok: true, seq: 1 }], treeStamps: [stamp('npm run build', 'h1', 't1')], currentTree: { head: 'h1', tree: 't2' } }), 'CA', 'working tree has changed'));
+ok('sensor stale-by-tree SILENT: stamp head+tree equal current → clean (fresh green)',
+  verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, seq: 1 }], treeStamps: [stamp('npm test', 'h1', 't1')], currentTree: { head: 'h1', tree: 't1' } }).ok);
+// Trust asymmetry (Fable finding 2): a 'fresh' tree verdict does NOT suppress the event-ordering warn — the
+// agent-writable stamp log can add a stale signal but never cancel the transcript-anchored one.
+ok('sensor stale-by-tree: a FRESH verdict does NOT suppress event-ordering (which still fires when armed)',
+  has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, seq: 1 }], lastEditSeq: 2, treeStamps: [stamp('npm test', 'h1', 't1')], currentTree: { head: 'h1', tree: 't1' } }), 'CA', 'predates the last source edit'));
+// ABSTAIN cases — each falls back to the event-ordering check, which is armed here (green@seq1 < lastEditSeq 2).
+ok('sensor stale-by-tree ABSTAINS (no stamps at all) → event-ordering fallback fires',
+  has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, seq: 1 }], lastEditSeq: 2 }), 'CA', 'predates the last source edit'));
+ok('sensor stale-by-tree ABSTAINS (empty stamps array) → event-ordering fallback fires',
+  has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, seq: 1 }], lastEditSeq: 2, treeStamps: [], currentTree: { head: 'h1', tree: 't1' } }), 'CA', 'predates the last source edit'));
+ok('sensor stale-by-tree ABSTAINS (malformed stamp — missing tree field) → event-ordering fallback fires',
+  has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, seq: 1 }], lastEditSeq: 2, treeStamps: [{ cmd: 'npm test', head: 'h1' }], currentTree: { head: 'h1', tree: 't2' } }), 'CA', 'predates the last source edit'));
+ok('sensor stale-by-tree ABSTAINS (current-tree compute failed → null) → event-ordering fallback fires',
+  has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, seq: 1 }], lastEditSeq: 2, treeStamps: [stamp('npm test', 'h1', 't1')], currentTree: null }), 'CA', 'predates the last source edit'));
+ok('sensor stale-by-tree ABSTAINS (no stamp matches the claimed cmd) → event-ordering fallback fires',
+  has(verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, seq: 1 }], lastEditSeq: 2, treeStamps: [stamp('npm run lint', 'h1', 't1')], currentTree: { head: 'h1', tree: 't2' } }), 'CA', 'predates the last source edit'));
+ok('sensor stale-by-tree ABSTAINS (2 runs but 1 stamp — count misaligned, mapping ambiguous) → no tree finding',
+  verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, seq: 1 }, { cmd: 'npm test', ok: true, seq: 2 }], treeStamps: [stamp('npm test', 'h1', 't1')], currentTree: { head: 'h1', tree: 'tX' } }).ok);
+ok('sensor stale-by-tree ABSTAINS when a BACKGROUND run is in the mix (stamp↔run mapping unreliable)',
+  verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, seq: 1 }, { cmd: 'npm test', ok: null, background: true, seq: 2 }], treeStamps: [stamp('npm test', 'h1', 't1'), stamp('npm test', 'h1', 't1')], currentTree: { head: 'h1', tree: 'tZ' } }).ok);
+// priority: at most one sensor fires, highest-first.
+ok('sensor priority: force-succeeded OUTRANKS stale-by-tree (exactly one fires)', (() => {
+  const r = verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test || true', ok: true, seq: 1 }], lastEditSeq: 2, treeStamps: [stamp('npm test', 'h1', 't1')], currentTree: { head: 'h1', tree: 't2' } });
+  const cas = r.findings.filter(f => f.cls === 'CA');
+  return cas.length === 1 && /force-succeeded/.test(cas[0].msg);
+})());
+ok('sensor priority: stale-by-tree OUTRANKS event-ordering (tree fires, not event-ordering; exactly one)', (() => {
+  const r = verify(contract([{ t: 'tests_pass', cmd: 'npm test' }]), { files: [], commands: [{ cmd: 'npm test', ok: true, seq: 1 }], lastEditSeq: 2, treeStamps: [stamp('npm test', 'h1', 't1')], currentTree: { head: 'h1', tree: 't2' } });
+  const cas = r.findings.filter(f => f.cls === 'CA');
+  return cas.length === 1 && /working tree has changed/.test(cas[0].msg);
+})());
 ok('buildReality: an authored edit then `git mv` does not re-add the OLD path as a phantom A', (() => {
   const diff = 'diff --git a/old.js b/new.js\nsimilarity index 90%\nrename from old.js\nrename to new.js';
   const r = buildReality({ diff, cwd: '/r', authored: ['/r/old.js', '/r/new.js'] });

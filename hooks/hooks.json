@@ -30,6 +30,15 @@
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/groundtruth.mjs\" --watch-rules"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/groundtruth.mjs\" --stamp"
+          }
+        ]
       }
     ],
     "SubagentStop": [

@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/deterministic-no%20LLM%20%C2%B7%20no%20network%20%C2%B7%20no%20API%20key-111111?style=flat-square" alt="Deterministic: no LLM, no network, no API key">
   <img src="https://img.shields.io/badge/runs%20on-Claude%20Code-111111?style=flat-square" alt="Runs on Claude Code">
   <img src="https://img.shields.io/github/v/release/akahkhanna/groundtruth?style=flat-square&color=111111&label=release" alt="Release">
-  <img src="https://img.shields.io/badge/self--checks-479%20%2B%20203%20%C2%B7%20red--team%2031%2F31-111111?style=flat-square" alt="682 self-checks (479 engine + 203 contract), red-team 31/31">
+  <img src="https://img.shields.io/badge/self--checks-479%20%2B%20217%20%C2%B7%20red--team%2037%2F37-111111?style=flat-square" alt="696 self-checks (479 engine + 217 contract), red-team 37/37">
   <img src="https://img.shields.io/badge/license-MIT-111111?style=flat-square" alt="MIT license">
 </p>
 
@@ -71,7 +71,7 @@ Groundtruth reads the manifest, then reality (the `git diff`, the transcript's c
 
 The two directions are the **pincer**: omit a claim → `UC`. Invent one → `CA`. Dodge the form → `NC`. Bury a lie in the surrounding prose → *irrelevant*, because prose is no longer audited. The only path through is to declare exactly what you did — and to have done it.
 
-Even a green `tests_pass` gets sniffed before it's blessed: a run whose exit was force-succeeded (`npm test || true`), a syntax/type check posing as a test run, output that prints failures despite a zero exit, a green that predates the last source edit, a run filtered to a subset — each earns a bounded warn- or info-tier note, never a quiet pass.
+Even a green `tests_pass` gets sniffed before it's blessed: a run whose exit was force-succeeded (`npm test || true`), a syntax/type check posing as a test run, output that prints failures despite a zero exit, a green that predates the last source edit **or whose working tree has since changed** — including through a bash-channel edit (`sed -i`) an event-ordering check can't see, caught by comparing a recorded tree fingerprint — a run filtered to a subset: each earns a bounded warn- or info-tier note, never a quiet pass.
 
 ## See it catch a lie
 
@@ -178,7 +178,7 @@ A verifier is only worth trusting if it documents its own misses. The contract e
 - `echo "npm test"` blessing a `tests_pass` that never ran; a red re-run laundered by an earlier green. *(C-3)*
 - A gitconfig with nonstandard diff prefixes silently poisoning every path on every turn. *(C-8)*
 
-Current standing: **479 engine checks + 203 contract checks** (682 self-checks total), and a live sandboxed adversarial harness at **red-team 31/31** — a throwaway repo, a genuinely hostile scripted agent, the real hook.
+Current standing: **479 engine checks + 217 contract checks** (696 self-checks total), and a live sandboxed adversarial harness at **red-team 37/37** — a throwaway repo, a genuinely hostile scripted agent, the real hook.
 
 The through-line: *abstain or degrade to a bounded warn outside the domain a check is provably correct in — never a clean green — and never let the audited agent shape its own verdict.*
 
