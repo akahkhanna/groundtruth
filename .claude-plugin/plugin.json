@@ -1,6 +1,6 @@
 {
   "name": "groundtruth",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Audits whether an agent actually did what it was asked. Catches the false 'Done' on Stop: missed subtasks, stubbed/no-op work, false 'tests pass', a method silently dropped in a refactor (dangling reference), and \u2014 uniquely \u2014 a standing project rule that was in context and overridden anyway. Runs on Stop, pre-commit, and CI; warn by default, opt-in block.",
   "author": {
     "name": "Akash Khanna"
