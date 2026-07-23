@@ -3,7 +3,32 @@
 All notable changes to Groundtruth are recorded here. Dates are release dates; the
 detailed symptom → root-cause → fix → regression-test log lives in `FIXES.md`.
 
-## [Unreleased]
+## [2.1.0] — 2026-07-23
+
+Three additive, backward-compatible honesty improvements over 2.0.0. No config change
+needed; opt out of the whole contract engine with `GROUNDTRUTH_CONTRACT=0` as before.
+
+### Added — multi-turn deferral persistence (spec §6)
+
+A `deferred` claim declared on an earlier turn now stays visible on later turns' cards
+until verified work closes it, reconstructed from the transcript (the unforgeable record)
+rather than a forgeable ledger — so a declared set-aside can't silently vanish by being
+omitted next turn. Closure uses only verify-grounded channels and a distinctive key.
+
+### Added — prose class-1 fallback for contract-unaware turns (warn-only)
+
+A session whose agent never emits a `groundtruth-claims` block now still gets a bare prose
+"tests pass" lie caught (warn), reinstating v1's `_passClaim` shape (a test/build noun +
+a pass-verdict verb, with negation/modal/reported-speech guards). Never fires when a valid
+block exists, abstains with no transcript, and doesn't fire on honest closings like
+"Done — fixed the typo."
+
+### Changed — `no_change` contradiction is now block-eligible
+
+A `no_change` claim may no longer coexist with any other claim (schema-invalid → NC), and
+a sole `no_change` claim on a turn that authored non-excluded changes is now a block-tier
+`CA` self-contradiction (naming up to 3 paths), with the redundant per-file `UC` warns
+suppressed. An empty authored set or an all-excluded diff stays silent (the honest case).
 
 ### Added — tree-state stamping for `tests_pass`/`build_pass` staleness
 
